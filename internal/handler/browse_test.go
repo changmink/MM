@@ -2,11 +2,14 @@ package handler
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/chang/file_server/internal/thumb"
 )
 
 func TestBrowse(t *testing.T) {
@@ -92,6 +95,87 @@ func TestBrowse(t *testing.T) {
 		for _, e := range resp.Entries {
 			if e.Name == "film.mp4" && !e.ThumbAvailable {
 				t.Error("film.mp4 should have thumb_available=true when .thumb cache exists")
+			}
+		}
+	})
+
+	t.Run("duration_sec from sidecar for video", func(t *testing.T) {
+		os.MkdirAll(filepath.Join(root, ".thumb"), 0755)
+		thumbJPG := filepath.Join(root, ".thumb", "film.mp4.jpg")
+		os.WriteFile(thumbJPG, []byte("fake-thumb"), 0644)
+		if err := thumb.WriteDurationSidecar(thumbJPG, 142.5); err != nil {
+			t.Fatal(err)
+		}
+
+		req := httptest.NewRequest("GET", "/api/browse?path=/", nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+
+		var resp browseResponse
+		json.NewDecoder(w.Body).Decode(&resp)
+		var got *float64
+		for _, e := range resp.Entries {
+			if e.Name == "film.mp4" {
+				got = e.DurationSec
+			}
+		}
+		if got == nil {
+			t.Fatal("expected duration_sec for film.mp4, got nil")
+		}
+		if math.Abs(*got-142.5) > 0.001 {
+			t.Errorf("duration_sec = %v, want 142.5", *got)
+		}
+	})
+
+	t.Run("duration_sec null for image", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/browse?path=/", nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+
+		var resp browseResponse
+		json.NewDecoder(w.Body).Decode(&resp)
+		for _, e := range resp.Entries {
+			if e.Name == "photo.jpg" && e.DurationSec != nil {
+				t.Errorf("photo.jpg duration_sec = %v, want nil", *e.DurationSec)
+			}
+		}
+	})
+
+	t.Run("duration_sec null for video without thumb", func(t *testing.T) {
+		// separate root to avoid cached thumbs from earlier subtests
+		r2 := t.TempDir()
+		os.WriteFile(filepath.Join(r2, "orphan.mp4"), []byte("vid"), 0644)
+
+		mux2 := http.NewServeMux()
+		Register(mux2, r2, r2)
+
+		req := httptest.NewRequest("GET", "/api/browse?path=/", nil)
+		w := httptest.NewRecorder()
+		mux2.ServeHTTP(w, req)
+
+		var resp browseResponse
+		json.NewDecoder(w.Body).Decode(&resp)
+		for _, e := range resp.Entries {
+			if e.Name == "orphan.mp4" && e.DurationSec != nil {
+				t.Errorf("orphan.mp4 duration_sec = %v, want nil", *e.DurationSec)
+			}
+		}
+	})
+
+	t.Run("duration_sec field always present in json", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/browse?path=/", nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+
+		// Verify the field appears in the raw JSON (even when null) so the
+		// frontend can rely on its presence.
+		var raw struct {
+			Entries []map[string]any `json:"entries"`
+		}
+		json.NewDecoder(w.Body).Decode(&raw)
+		for _, e := range raw.Entries {
+			if _, ok := e["duration_sec"]; !ok {
+				t.Errorf("entry %v missing duration_sec key", e["name"])
 			}
 		}
 	})
