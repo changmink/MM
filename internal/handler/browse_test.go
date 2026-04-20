@@ -62,6 +62,40 @@ func TestBrowse(t *testing.T) {
 		}
 	})
 
+	t.Run("thumb_available true for image with cached thumb", func(t *testing.T) {
+		os.MkdirAll(filepath.Join(root, ".thumb"), 0755)
+		os.WriteFile(filepath.Join(root, ".thumb", "photo.jpg.jpg"), []byte("fake-thumb"), 0644)
+
+		req := httptest.NewRequest("GET", "/api/browse?path=/", nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+
+		var resp browseResponse
+		json.NewDecoder(w.Body).Decode(&resp)
+		for _, e := range resp.Entries {
+			if e.Name == "photo.jpg" && !e.ThumbAvailable {
+				t.Error("photo.jpg should have thumb_available=true")
+			}
+		}
+	})
+
+	t.Run("thumb_available true for video with cached thumb", func(t *testing.T) {
+		os.MkdirAll(filepath.Join(root, ".thumb"), 0755)
+		os.WriteFile(filepath.Join(root, ".thumb", "film.mp4.jpg"), []byte("fake-thumb"), 0644)
+
+		req := httptest.NewRequest("GET", "/api/browse?path=/", nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+
+		var resp browseResponse
+		json.NewDecoder(w.Body).Decode(&resp)
+		for _, e := range resp.Entries {
+			if e.Name == "film.mp4" && !e.ThumbAvailable {
+				t.Error("film.mp4 should have thumb_available=true when .thumb cache exists")
+			}
+		}
+	})
+
 	t.Run("path traversal blocked", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/browse?path=../../etc/passwd", nil)
 		w := httptest.NewRecorder()

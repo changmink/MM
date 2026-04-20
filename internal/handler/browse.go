@@ -75,7 +75,7 @@ func (h *Handler) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		}
 
 		thumbAvail := false
-		if ft == media.TypeImage {
+		if ft == media.TypeImage || ft == media.TypeVideo {
 			thumbPath := filepath.Join(abs, ".thumb", name+".jpg")
 			if _, err := os.Stat(thumbPath); err == nil {
 				thumbAvail = true

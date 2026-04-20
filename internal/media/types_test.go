@@ -32,6 +32,27 @@ func TestDetectType(t *testing.T) {
 	}
 }
 
+func TestIsVideo(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"film.mp4", true},
+		{"film.MP4", true},
+		{"film.mkv", true},
+		{"film.avi", true},
+		{"film.ts", true},
+		{"photo.jpg", false},
+		{"song.mp3", false},
+		{"noext", false},
+	}
+	for _, c := range cases {
+		if got := IsVideo(c.name); got != c.want {
+			t.Errorf("IsVideo(%q) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 func TestIsTS(t *testing.T) {
 	cases := []struct {
 		name string

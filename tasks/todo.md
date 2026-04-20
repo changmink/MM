@@ -21,9 +21,9 @@
 - [x] T11: path traversal 방어 + 통합 테스트
 
 ## Phase 5 — TS 트랜스코딩
-- [ ] T12: Dockerfile에 ffmpeg 설치 (apk add)
-- [ ] T13: media.IsTS() 헬퍼 추가
-- [ ] T14: stream.go에 .ts 분기 + streamTS() 구현
+- [x] T12: Dockerfile에 ffmpeg 설치 (apk add) — 이미 구현됨
+- [x] T13: media.IsTS() 헬퍼 추가 — 이미 구현됨
+- [x] T14: stream.go에 .ts 분기 + streamTS() 구현 — 이미 구현됨
 - [ ] T15: stream_test.go에 트랜스코딩 테스트 추가
 - [ ] T16: docker compose --build 후 브라우저 검증
 
@@ -32,3 +32,11 @@
 - [x] T-F2: files_test.go에 폴더 생성/삭제 테스트 추가
 - [x] T-F3: index.html + style.css — 새 폴더 버튼 + 모달 UI
 - [x] T-F4: app.js — createFolder(), deleteFolder(), buildTable() 분기 수정
+
+## Phase 7 — 동영상 섬네일
+- [ ] VT-1: media.IsVideo() 헬퍼 추가 + 테스트
+- [ ] VT-2: thumb.GenerateFromVideo() + IsBlankFrame() 구현
+- [ ] VT-3: placeholder.jpg embed (placeholder.go + placeholder.jpg)
+- [ ] VT-4: handleThumb 동영상 분기 + placeholder fallback
+- [ ] VT-5: browse.go — 동영상 thumb_available 포함
+- [ ] VT-6: 테스트 (thumb_test, handler/thumb_test, browse_test)
