@@ -1,9 +1,14 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/chang/file_server/internal/handler"
 )
@@ -19,11 +24,27 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	handler.Register(mux, dataDir, webDir)
+	h := handler.Register(mux, dataDir, webDir)
 
-	addr := ":8080"
-	log.Printf("server starting on %s (data: %s)", addr, dataDir)
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatal(err)
+	srv := &http.Server{Addr: ":8080", Handler: mux}
+
+	go func() {
+		log.Printf("server starting on %s (data: %s)", srv.Addr, dataDir)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal(err)
+		}
+	}()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	<-stop
+
+	log.Println("shutdown: draining connections")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("shutdown: %v", err)
 	}
+	h.Close()
+	log.Println("shutdown: complete")
 }

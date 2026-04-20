@@ -244,7 +244,7 @@ function openLightboxVideo(entry) {
   const mime = entry.path.toLowerCase().endsWith('.ts') ? 'video/mp4' : (entry.mime || 'video/mp4');
   lbContent.innerHTML = `
     <video controls autoplay>
-      <source src="/api/stream?path=${encodeURIComponent(entry.path)}" type="${mime}">
+      <source src="/api/stream?path=${encodeURIComponent(entry.path)}" type="${esc(mime)}">
     </video>`;
   lightbox.classList.remove('hidden');
 }

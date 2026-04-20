@@ -3,11 +3,13 @@ package handler
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -294,6 +296,60 @@ func TestCreateFolderResponsePath(t *testing.T) {
 	json.NewDecoder(rw.Body).Decode(&resp)
 	if resp["path"] != "/alpha" {
 		t.Errorf("path = %q, want /alpha", resp["path"])
+	}
+}
+
+// Regression: prior implementation called os.Stat then os.Create in two steps.
+// N goroutines could observe the same free name, and N-1 uploads would clobber
+// each other. createUniqueFile now uses O_CREATE|O_EXCL so each concurrent
+// upload of the same filename lands in a distinct path.
+func TestConcurrentUploadSameNameNoClobber(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, root, root)
+
+	const n = 20
+	var wg sync.WaitGroup
+	results := make([]string, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			body := &bytes.Buffer{}
+			w := multipart.NewWriter(body)
+			fw, _ := w.CreateFormFile("file", "race.txt")
+			fmt.Fprintf(fw, "writer-%d", idx)
+			w.Close()
+			req := httptest.NewRequest("POST", "/api/upload?path=/", body)
+			req.Header.Set("Content-Type", w.FormDataContentType())
+			rw := httptest.NewRecorder()
+			mux.ServeHTTP(rw, req)
+			if rw.Code != http.StatusCreated {
+				t.Errorf("worker %d: expected 201, got %d", idx, rw.Code)
+				return
+			}
+			var resp map[string]interface{}
+			json.NewDecoder(rw.Body).Decode(&resp)
+			results[idx] = resp["name"].(string)
+		}(i)
+	}
+	wg.Wait()
+
+	seen := map[string]bool{}
+	for _, name := range results {
+		if name == "" {
+			continue
+		}
+		if seen[name] {
+			t.Fatalf("duplicate filename %q returned to multiple uploaders — clobber occurred", name)
+		}
+		seen[name] = true
+		if _, err := os.Stat(filepath.Join(root, name)); err != nil {
+			t.Errorf("file %q missing on disk: %v", name, err)
+		}
+	}
+	if len(seen) != n {
+		t.Errorf("expected %d distinct files, got %d", n, len(seen))
 	}
 }
 

@@ -69,7 +69,7 @@ func (h *Handler) streamTS(w http.ResponseWriter, r *http.Request, absPath strin
 		"-loglevel", "error",
 		"-i", absPath,
 		"-map", "0:v:0",
-		"-map", "0:a:0",
+		"-map", "0:a:0?",
 		"-c:v", "copy",
 		"-c:a", "copy",
 		"-bsf:a", "aac_adtstoasc",

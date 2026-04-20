@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 
 	"github.com/chang/file_server/internal/media"
-	"github.com/chang/file_server/internal/thumb"
 )
 
 func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
@@ -44,18 +43,16 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	// filepath.Base strips any directory component from the client-supplied filename
 	destPath := filepath.Join(destDir, filepath.Base(header.Filename))
-	destPath = uniquePath(destPath)
-
-	dst, err := os.Create(destPath)
+	dst, err := createUniqueFile(destPath)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "create file failed")
 		return
 	}
+	destPath = dst.Name()
 	defer dst.Close()
 
 	size, err := io.Copy(dst, file)
 	if err != nil {
-		dst.Close()
 		os.Remove(destPath)
 		writeError(w, http.StatusInternalServerError, "write file failed")
 		return
@@ -63,15 +60,11 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	fileType := media.DetectType(header.Filename)
 
-	// generate thumbnail asynchronously for images
+	// generate thumbnail asynchronously for images via bounded worker pool
 	if fileType == media.TypeImage {
 		thumbDir := filepath.Join(destDir, ".thumb")
-		// use destPath (after uniquePath rename) so thumb name matches the actual file
 		thumbPath := filepath.Join(thumbDir, filepath.Base(destPath)+".jpg")
-		go func() {
-			os.MkdirAll(thumbDir, 0755)
-			thumb.Generate(destPath, thumbPath)
-		}()
+		h.thumbPool.Submit(destPath, thumbPath)
 	}
 
 	relResult := filepath.ToSlash(filepath.Join(rel, filepath.Base(destPath)))
@@ -229,16 +222,29 @@ func validateFolderName(name string) error {
 	return nil
 }
 
-func uniquePath(path string) string {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return path
+// createUniqueFile atomically creates path (or path with _N suffix if taken)
+// using O_CREATE|O_EXCL so concurrent uploads of the same filename cannot
+// observe the same free slot and clobber each other.
+func createUniqueFile(path string) (*os.File, error) {
+	const maxAttempts = 10000
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if err == nil {
+		return f, nil
+	}
+	if !os.IsExist(err) {
+		return nil, err
 	}
 	ext := filepath.Ext(path)
 	base := path[:len(path)-len(ext)]
-	for i := 1; ; i++ {
+	for i := 1; i < maxAttempts; i++ {
 		candidate := fmt.Sprintf("%s_%d%s", base, i, ext)
-		if _, err := os.Stat(candidate); os.IsNotExist(err) {
-			return candidate
+		f, err := os.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+		if err == nil {
+			return f, nil
+		}
+		if !os.IsExist(err) {
+			return nil, err
 		}
 	}
+	return nil, fmt.Errorf("could not find unique name for %s after %d attempts", path, maxAttempts)
 }
