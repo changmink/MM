@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/chang/file_server/internal/media"
+	"github.com/chang/file_server/internal/thumb"
 )
 
 type entry struct {
@@ -20,6 +21,7 @@ type entry struct {
 	ModTime        time.Time      `json:"mod_time"`
 	IsDir          bool           `json:"is_dir"`
 	ThumbAvailable bool           `json:"thumb_available"`
+	DurationSec    *float64       `json:"duration_sec"`
 }
 
 type browseResponse struct {
@@ -75,10 +77,14 @@ func (h *Handler) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		}
 
 		thumbAvail := false
+		var durSec *float64
 		if ft == media.TypeImage || ft == media.TypeVideo {
 			thumbPath := filepath.Join(abs, ".thumb", name+".jpg")
 			if _, err := os.Stat(thumbPath); err == nil {
 				thumbAvail = true
+				if ft == media.TypeVideo {
+					durSec = readOrBackfillDuration(thumbPath, filepath.Join(abs, name))
+				}
 			}
 		}
 
@@ -91,6 +97,7 @@ func (h *Handler) handleBrowse(w http.ResponseWriter, r *http.Request) {
 			ModTime:        fi.ModTime(),
 			IsDir:          info.IsDir(),
 			ThumbAvailable: thumbAvail,
+			DurationSec:    durSec,
 		})
 	}
 
@@ -99,4 +106,20 @@ func (h *Handler) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		Path:    rel,
 		Entries: entries,
 	})
+}
+
+// readOrBackfillDuration returns the video's duration from the thumbnail
+// sidecar, probing with ffprobe and caching the result when the sidecar is
+// missing but the thumbnail exists. Returns nil on any failure so browse
+// never 5xxs over a metadata read.
+func readOrBackfillDuration(thumbPath, videoPath string) *float64 {
+	if sec, ok := thumb.ReadDurationSidecar(thumbPath); ok {
+		return &sec
+	}
+	sec, err := thumb.ProbeDuration(videoPath)
+	if err != nil || sec <= 0 {
+		return nil
+	}
+	_ = thumb.WriteDurationSidecar(thumbPath, sec)
+	return &sec
 }

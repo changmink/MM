@@ -40,3 +40,9 @@
 - [ ] VT-4: handleThumb 동영상 분기 + placeholder fallback
 - [ ] VT-5: browse.go — 동영상 thumb_available 포함
 - [ ] VT-6: 테스트 (thumb_test, handler/thumb_test, browse_test)
+
+## Phase 8 — 동영상 길이 표시 (`feature/video-duration`)
+- [ ] VD-1: thumb 패키지 — ProbeDuration export + Read/Write/PathSidecar 추가, GenerateFromVideo가 사이드카 작성하도록 수정 + 테스트
+- [ ] VD-2: browse handler — entry에 `duration_sec *float64` 추가, 사이드카 read + 기존 썸 백필 로직, 테스트
+- [ ] VD-3: frontend — `formatDuration` 헬퍼, `buildVideoGrid`에 `.duration-badge` 렌더링, CSS 추가
+- [ ] VD-4: E2E 수동 검증 (신규 / 기존 마이그레이션 / placeholder / 모바일 뷰)

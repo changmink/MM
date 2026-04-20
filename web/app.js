@@ -171,10 +171,13 @@ function buildVideoGrid(videos) {
     card.className = 'thumb-card';
 
     const thumbSrc = '/api/thumb?path=' + encodeURIComponent(entry.path);
+    const dur = formatDuration(entry.duration_sec);
+    const durBadge = dur ? `<span class="duration-badge">${esc(dur)}</span>` : '';
 
     card.innerHTML = `
       <img src="${esc(thumbSrc)}" alt="${esc(entry.name)}" loading="lazy">
       <div class="thumb-name">${esc(entry.name)}</div>
+      ${durBadge}
       <button class="delete-btn" title="삭제">✕</button>
     `;
     card.querySelector('img').addEventListener('click', () => openLightboxVideo(entry));
@@ -464,6 +467,19 @@ function formatSize(bytes) {
   const units = ['B', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(1024));
   return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+}
+
+// YouTube-style duration: <1h → "M:SS", ≥1h → "H:MM:SS".
+// Returns null when seconds is unknown or non-positive so callers can skip rendering.
+function formatDuration(sec) {
+  if (sec == null || !Number.isFinite(sec) || sec <= 0) return null;
+  const total = Math.floor(sec);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const ss = String(s).padStart(2, '0');
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${ss}`;
+  return `${m}:${ss}`;
 }
 
 function esc(str) {
