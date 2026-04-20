@@ -45,17 +45,18 @@ func Generate(src, dst string) error {
 	return imaging.Save(thumb, dst, imaging.JPEGQuality(85))
 }
 
-// GenerateFromVideo extracts a representative frame from a video file and saves
-// it as a 200x200 JPEG at dst. It tries 50%, 25%, and 75% of the video
+// GenerateFromVideo extracts a representative frame from a video file and
+// saves it as a 200x200 JPEG at dst. It tries 50%, 25%, and 75% of the video
 // duration in order, falling back on the next offset if the frame is blank
-// (all-black or all-white). Returns an error if ffmpeg/ffprobe is unavailable
-// or all offsets produce blank frames.
+// (all-black or all-white). On success it also writes a duration sidecar at
+// dst+".dur" so browse can serve the value without reprobing. Returns an
+// error if ffmpeg/ffprobe is unavailable or all offsets produce blank frames.
 func GenerateFromVideo(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return err
 	}
 
-	duration, err := videoDuration(src)
+	duration, err := ProbeDuration(src)
 	if err != nil {
 		return fmt.Errorf("probe duration: %w", err)
 	}
@@ -77,9 +78,46 @@ func GenerateFromVideo(src, dst string) error {
 		if IsBlankFrame(img) {
 			continue
 		}
-		return saveJPEG(img, dst)
+		if err := saveJPEG(img, dst); err != nil {
+			return err
+		}
+		// Best-effort: a missing sidecar will be backfilled on next browse.
+		_ = WriteDurationSidecar(dst, duration)
+		return nil
 	}
 	return errors.New("all extracted frames are blank")
+}
+
+// ProbeDuration returns the duration of a video file in seconds, using ffprobe.
+func ProbeDuration(src string) (float64, error) {
+	return videoDuration(src)
+}
+
+// DurationSidecarPath returns the sidecar file path for a thumbnail JPEG.
+// The sidecar lives next to the thumbnail and stores the source video's
+// duration as a plaintext float (seconds).
+func DurationSidecarPath(thumbPath string) string {
+	return thumbPath + ".dur"
+}
+
+// WriteDurationSidecar writes sec to the sidecar file next to thumbPath.
+func WriteDurationSidecar(thumbPath string, sec float64) error {
+	data := []byte(strconv.FormatFloat(sec, 'f', 3, 64))
+	return os.WriteFile(DurationSidecarPath(thumbPath), data, 0644)
+}
+
+// ReadDurationSidecar reads the duration sidecar next to thumbPath.
+// Returns (0, false) if the sidecar is missing or its contents cannot be parsed.
+func ReadDurationSidecar(thumbPath string) (float64, bool) {
+	data, err := os.ReadFile(DurationSidecarPath(thumbPath))
+	if err != nil {
+		return 0, false
+	}
+	sec, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64)
+	if err != nil {
+		return 0, false
+	}
+	return sec, true
 }
 
 // IsBlankFrame returns true if every pixel in img has R+G+B < 10 (near-black)
