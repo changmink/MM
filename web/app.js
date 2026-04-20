@@ -3,6 +3,7 @@
 // ── State ────────────────────────────────────────────────────────────────────
 let currentPath = '/';
 let imageEntries = [];   // images in current dir for lightbox
+let videoEntries = [];   // videos in current dir for grid
 let lbIndex = 0;
 let playlist = [];
 let playlistIndex = 0;
@@ -55,6 +56,7 @@ async function browse(path, pushState = true) {
 
   const entries = data.entries || [];
   imageEntries = entries.filter(e => e.type === 'image');
+  videoEntries = entries.filter(e => e.type === 'video');
   playlist = entries.filter(e => e.type === 'audio');
 
   renderFileList(entries);
@@ -112,7 +114,7 @@ function renderFileList(entries) {
   }
   if (videos.length) {
     fileList.appendChild(sectionTitle('동영상'));
-    fileList.appendChild(buildTable(videos));
+    fileList.appendChild(buildVideoGrid(videos));
   }
   if (audios.length) {
     fileList.appendChild(sectionTitle('음악'));
@@ -152,6 +154,30 @@ function buildImageGrid(images) {
       <button class="delete-btn" title="삭제">✕</button>
     `;
     card.querySelector('img').addEventListener('click', () => openLightboxImage(i));
+    card.querySelector('.delete-btn').addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      deleteFile(entry.path);
+    });
+    grid.appendChild(card);
+  });
+  return grid;
+}
+
+function buildVideoGrid(videos) {
+  const grid = document.createElement('div');
+  grid.className = 'image-grid';
+  videos.forEach((entry, i) => {
+    const card = document.createElement('div');
+    card.className = 'thumb-card';
+
+    const thumbSrc = '/api/thumb?path=' + encodeURIComponent(entry.path);
+
+    card.innerHTML = `
+      <img src="${esc(thumbSrc)}" alt="${esc(entry.name)}" loading="lazy">
+      <div class="thumb-name">${esc(entry.name)}</div>
+      <button class="delete-btn" title="삭제">✕</button>
+    `;
+    card.querySelector('img').addEventListener('click', () => openLightboxVideo(entry));
     card.querySelector('.delete-btn').addEventListener('click', (ev) => {
       ev.stopPropagation();
       deleteFile(entry.path);
