@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func requireFFmpeg(t *testing.T) {
@@ -103,20 +104,7 @@ func TestStream(t *testing.T) {
 		}
 	})
 
-	t.Run("ts sets Accept-Ranges none", func(t *testing.T) {
-		tsPath := makeTestTS(t, root)
-		name := filepath.Base(tsPath)
-
-		req := httptest.NewRequest("GET", "/api/stream?path=/"+name, nil)
-		rw := httptest.NewRecorder()
-		mux.ServeHTTP(rw, req)
-
-		if ar := rw.Header().Get("Accept-Ranges"); ar != "none" {
-			t.Errorf("Accept-Ranges = %q, want none", ar)
-		}
-	})
-
-	t.Run("ts range request returns 200 not 206", func(t *testing.T) {
+	t.Run("ts supports range requests via cached mp4", func(t *testing.T) {
 		tsPath := makeTestTS(t, root)
 		name := filepath.Base(tsPath)
 
@@ -125,8 +113,53 @@ func TestStream(t *testing.T) {
 		rw := httptest.NewRecorder()
 		mux.ServeHTTP(rw, req)
 
-		if rw.Code != http.StatusOK {
-			t.Errorf("expected 200 (range ignored), got %d", rw.Code)
+		if rw.Code != http.StatusPartialContent {
+			t.Errorf("expected 206 from cached mp4, got %d", rw.Code)
 		}
 	})
+}
+
+// Regression: second request for the same TS file must hit the on-disk cache
+// rather than re-running ffmpeg. We verify by timing — a cached serve is
+// orders of magnitude faster than a remux (~5s vs <50ms).
+func TestStreamTSCached(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, root, root)
+
+	tsPath := makeTestTS(t, root)
+	name := filepath.Base(tsPath)
+
+	hit := func() time.Duration {
+		req := httptest.NewRequest("GET", "/api/stream?path=/"+name, nil)
+		rw := httptest.NewRecorder()
+		start := time.Now()
+		mux.ServeHTTP(rw, req)
+		if rw.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rw.Code)
+		}
+		return time.Since(start)
+	}
+
+	cold := hit()
+	warm := hit()
+
+	if warm > cold/2 {
+		t.Errorf("second request should be much faster (cold=%v warm=%v)", cold, warm)
+	}
+
+	cacheDir := filepath.Join(root, ".cache", "streams")
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatalf("cache dir not created: %v", err)
+	}
+	mp4Count := 0
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) == ".mp4" {
+			mp4Count++
+		}
+	}
+	if mp4Count != 1 {
+		t.Errorf("expected exactly 1 cached mp4, got %d", mp4Count)
+	}
 }

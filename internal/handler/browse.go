@@ -29,23 +29,23 @@ type browseResponse struct {
 
 func (h *Handler) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
 		return
 	}
 	rel := r.URL.Query().Get("path")
 	abs, err := media.SafePath(h.dataDir, rel)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid path")
+		writeError(w, r, http.StatusBadRequest, "invalid path", err)
 		return
 	}
 
 	infos, err := os.ReadDir(abs)
 	if err != nil {
 		if os.IsNotExist(err) {
-			writeError(w, http.StatusNotFound, "not found")
+			writeError(w, r, http.StatusNotFound, "not found", nil)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "read dir failed")
+		writeError(w, r, http.StatusInternalServerError, "read dir failed", err)
 		return
 	}
 

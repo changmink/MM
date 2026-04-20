@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,58 +15,85 @@ import (
 
 func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
 		return
 	}
 
 	rel := r.URL.Query().Get("path")
 	destDir, err := media.SafePath(h.dataDir, rel)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid path")
+		writeError(w, r, http.StatusBadRequest, "invalid path", err)
 		return
 	}
 
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		writeError(w, http.StatusBadRequest, "parse form failed")
-		return
-	}
-
-	file, header, err := r.FormFile("file")
+	// Stream the multipart body directly to disk instead of letting
+	// ParseMultipartForm buffer the whole upload (32MB in RAM, rest spilled
+	// to temp files). MultipartReader skips that buffering entirely.
+	mr, err := r.MultipartReader()
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "missing file field")
+		writeError(w, r, http.StatusBadRequest, "expected multipart body", err)
 		return
 	}
-	defer file.Close()
+
+	var part *multipart.Part
+	for {
+		p, err := mr.NextPart()
+		if err == io.EOF {
+			writeError(w, r, http.StatusBadRequest, "missing file field", nil)
+			return
+		}
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "read part failed", err)
+			return
+		}
+		if p.FormName() == "file" {
+			part = p
+			break
+		}
+		p.Close()
+	}
+	defer part.Close()
+
+	if part.FileName() == "" {
+		writeError(w, r, http.StatusBadRequest, "missing filename", nil)
+		return
+	}
 
 	if err := os.MkdirAll(destDir, 0755); err != nil {
-		writeError(w, http.StatusInternalServerError, "mkdir failed")
+		writeError(w, r, http.StatusInternalServerError, "mkdir failed", err)
 		return
 	}
 
 	// filepath.Base strips any directory component from the client-supplied filename
-	destPath := filepath.Join(destDir, filepath.Base(header.Filename))
+	destPath := filepath.Join(destDir, filepath.Base(part.FileName()))
 	dst, err := createUniqueFile(destPath)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "create file failed")
+		writeError(w, r, http.StatusInternalServerError, "create file failed", err)
 		return
 	}
 	destPath = dst.Name()
 	defer dst.Close()
 
-	size, err := io.Copy(dst, file)
+	size, err := io.Copy(dst, part)
 	if err != nil {
 		os.Remove(destPath)
-		writeError(w, http.StatusInternalServerError, "write file failed")
+		writeError(w, r, http.StatusInternalServerError, "write file failed", err)
 		return
 	}
 
-	fileType := media.DetectType(header.Filename)
+	fileType := media.DetectType(part.FileName())
 
-	// generate thumbnail asynchronously for images via bounded worker pool
+	// generate thumbnail asynchronously for images via bounded worker pool.
+	// If the pool queue is full we log and skip — handleThumb will generate
+	// it lazily on first view, so the user still gets a thumbnail.
 	if fileType == media.TypeImage {
 		thumbDir := filepath.Join(destDir, ".thumb")
 		thumbPath := filepath.Join(thumbDir, filepath.Base(destPath)+".jpg")
-		h.thumbPool.Submit(destPath, thumbPath)
+		if !h.thumbPool.Submit(destPath, thumbPath) {
+			slog.Warn("thumb pool full, deferring to lazy generation",
+				"src", destPath,
+			)
+		}
 	}
 
 	relResult := filepath.ToSlash(filepath.Join(rel, filepath.Base(destPath)))
@@ -80,34 +109,34 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
 		return
 	}
 
 	rel := r.URL.Query().Get("path")
 	abs, err := media.SafePath(h.dataDir, rel)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid path")
+		writeError(w, r, http.StatusBadRequest, "invalid path", err)
 		return
 	}
 
 	fi, err := os.Stat(abs)
 	if err != nil {
 		if os.IsNotExist(err) {
-			writeError(w, http.StatusNotFound, "not found")
+			writeError(w, r, http.StatusNotFound, "not found", nil)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "stat failed")
+		writeError(w, r, http.StatusInternalServerError, "stat failed", err)
 		return
 	}
 
 	if fi.IsDir() {
-		writeError(w, http.StatusBadRequest, "cannot delete a directory")
+		writeError(w, r, http.StatusBadRequest, "cannot delete a directory", nil)
 		return
 	}
 
 	if err := os.Remove(abs); err != nil {
-		writeError(w, http.StatusInternalServerError, "delete failed")
+		writeError(w, r, http.StatusInternalServerError, "delete failed", err)
 		return
 	}
 
@@ -127,7 +156,7 @@ func (h *Handler) handleFolder(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		h.deleteFolder(w, r)
 	default:
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
 	}
 }
 
@@ -135,7 +164,7 @@ func (h *Handler) createFolder(w http.ResponseWriter, r *http.Request) {
 	rel := r.URL.Query().Get("path")
 	parentAbs, err := media.SafePath(h.dataDir, rel)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid path")
+		writeError(w, r, http.StatusBadRequest, "invalid path", err)
 		return
 	}
 
@@ -143,24 +172,24 @@ func (h *Handler) createFolder(w http.ResponseWriter, r *http.Request) {
 		Name string `json:"name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid body")
+		writeError(w, r, http.StatusBadRequest, "invalid body", err)
 		return
 	}
 
 	if err := validateFolderName(body.Name); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, r, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
 
 	targetAbs := filepath.Join(parentAbs, body.Name)
 
 	if _, err := os.Stat(targetAbs); err == nil {
-		writeError(w, http.StatusConflict, "already exists")
+		writeError(w, r, http.StatusConflict, "already exists", nil)
 		return
 	}
 
 	if err := os.Mkdir(targetAbs, 0755); err != nil {
-		writeError(w, http.StatusInternalServerError, "mkdir failed")
+		writeError(w, r, http.StatusInternalServerError, "mkdir failed", err)
 		return
 	}
 
@@ -174,33 +203,33 @@ func (h *Handler) deleteFolder(w http.ResponseWriter, r *http.Request) {
 	rel := r.URL.Query().Get("path")
 	abs, err := media.SafePath(h.dataDir, rel)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid path")
+		writeError(w, r, http.StatusBadRequest, "invalid path", err)
 		return
 	}
 
 	// prevent deleting the root data directory itself
 	if abs == filepath.Clean(h.dataDir) {
-		writeError(w, http.StatusBadRequest, "cannot delete root")
+		writeError(w, r, http.StatusBadRequest, "cannot delete root", nil)
 		return
 	}
 
 	fi, err := os.Stat(abs)
 	if err != nil {
 		if os.IsNotExist(err) {
-			writeError(w, http.StatusNotFound, "not found")
+			writeError(w, r, http.StatusNotFound, "not found", nil)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "stat failed")
+		writeError(w, r, http.StatusInternalServerError, "stat failed", err)
 		return
 	}
 
 	if !fi.IsDir() {
-		writeError(w, http.StatusBadRequest, "not a directory")
+		writeError(w, r, http.StatusBadRequest, "not a directory", nil)
 		return
 	}
 
 	if err := os.RemoveAll(abs); err != nil {
-		writeError(w, http.StatusInternalServerError, "delete failed")
+		writeError(w, r, http.StatusInternalServerError, "delete failed", err)
 		return
 	}
 

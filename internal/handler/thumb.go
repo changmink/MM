@@ -11,23 +11,23 @@ import (
 
 func (h *Handler) handleThumb(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
 		return
 	}
 	rel := r.URL.Query().Get("path")
 	abs, err := media.SafePath(h.dataDir, rel)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid path")
+		writeError(w, r, http.StatusBadRequest, "invalid path", err)
 		return
 	}
 
 	fi, err := os.Stat(abs)
 	if err != nil {
 		if os.IsNotExist(err) {
-			writeError(w, http.StatusNotFound, "not found")
+			writeError(w, r, http.StatusNotFound, "not found", nil)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "stat failed")
+		writeError(w, r, http.StatusInternalServerError, "stat failed", err)
 		return
 	}
 
@@ -37,7 +37,7 @@ func (h *Handler) handleThumb(w http.ResponseWriter, r *http.Request) {
 	case media.IsVideo(fi.Name()):
 		h.serveVideoThumb(w, r, abs, fi.Name())
 	default:
-		writeError(w, http.StatusBadRequest, "unsupported file type")
+		writeError(w, r, http.StatusBadRequest, "unsupported file type", nil)
 	}
 }
 
@@ -45,7 +45,7 @@ func (h *Handler) serveImageThumb(w http.ResponseWriter, r *http.Request, abs, n
 	thumbPath := filepath.Join(filepath.Dir(abs), ".thumb", name+".jpg")
 	if _, err := os.Stat(thumbPath); os.IsNotExist(err) {
 		if err := thumb.Generate(abs, thumbPath); err != nil {
-			writeError(w, http.StatusInternalServerError, "thumb generation failed")
+			writeError(w, r, http.StatusInternalServerError, "thumb generation failed", err)
 			return
 		}
 	}
@@ -69,14 +69,14 @@ func (h *Handler) serveVideoThumb(w http.ResponseWriter, r *http.Request, abs, n
 func serveThumbFile(w http.ResponseWriter, r *http.Request, thumbPath string) {
 	f, err := os.Open(thumbPath)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "open thumb failed")
+		writeError(w, r, http.StatusInternalServerError, "open thumb failed", err)
 		return
 	}
 	defer f.Close()
 
 	fi, err := f.Stat()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "stat thumb failed")
+		writeError(w, r, http.StatusInternalServerError, "stat thumb failed", err)
 		return
 	}
 

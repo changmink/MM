@@ -2,15 +2,18 @@ package handler
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"runtime"
+	"sync"
 
 	"github.com/chang/file_server/internal/thumb"
 )
 
 type Handler struct {
-	dataDir   string
-	thumbPool *thumb.Pool
+	dataDir     string
+	thumbPool   *thumb.Pool
+	streamLocks sync.Map // cachePath -> *sync.Mutex; serializes ffmpeg per cache key
 }
 
 func Register(mux *http.ServeMux, dataDir, webDir string) *Handler {
@@ -37,7 +40,19 @@ func (h *Handler) Close() {
 	}
 }
 
-func writeError(w http.ResponseWriter, code int, msg string) {
+// writeError emits a JSON error body and (for 5xx, or any non-nil err) logs
+// the underlying cause with request context. Pass nil for err on plain 4xx
+// validation failures where the message is the whole story.
+func writeError(w http.ResponseWriter, r *http.Request, code int, msg string, err error) {
+	if code >= 500 || err != nil {
+		slog.Error("request failed",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", code,
+			"msg", msg,
+			"err", err,
+		)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
