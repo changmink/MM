@@ -677,3 +677,330 @@ if _, err := os.Stat(thumbPath); err == nil {
 - **위험:** ffprobe 미설치 환경 → 백필 silent fail, null 반환, UI 오버레이 숨김 (acceptable degradation)
 - **위험:** 사이드카 파싱 오류 → `(0, false)` 반환 → 다음 browse에서 재시도 (자가복구)
 - **롤백:** Phase 8의 commit 3개 revert. `.dur` 파일은 `.thumb/` 안에 있어 정적 서빙 안 됨 → 무해
+
+---
+
+## Phase 9 — URL Import (이미지 다운로드 + 업로드) (`feature/url-image-import`)
+
+### 배경
+SPEC §2.6 / §5.1 추가. 사용자가 이미지 URL 목록을 모달에 입력하면 서버가 각 URL을 다운로드하면서(스트리밍) 디스크에 저장한다. 50MB 캡, `image/*` 검증, atomic rename, 자동 리네임. 기존 업로드 흐름의 `createUniqueFile`/`thumbPool` 재사용.
+
+### 결정 사항 (SPEC과의 정렬)
+- **충돌 리네임 패턴**: SPEC 예시는 `foo (1).jpg`이지만 구현은 기존 `createUniqueFile`의 `foo_1.jpg` 패턴을 재사용한다 (일관성). SPEC의 예시 텍스트도 같이 정정.
+- **batch 처리 동시성**: 서버 측 sequential 처리로 시작 (구현 단순성). 50개 × 평균 5초 = 약 4분 한도면 사용성 충분. 추후 필요 시 semaphore 4 병렬로 확장.
+- **결과 UI**: 별도 toast 시스템 도입하지 않고 기존 모달 안에서 결과 인라인 렌더링 (성공 카운트 + 실패 URL 목록). 모달 닫을 때 성공 1건 이상이면 `browse` 새로고침.
+
+### 의존성 그래프
+
+```
+UI-1 (urlfetch 패키지: 단일 URL 다운로드 + 테스트)
+  └─ UI-2 (handler /api/import-url + 테스트)
+       └─ UI-5 (E2E 수동 검증)  ◄── UI-4도 완료 후 진입
+UI-3 (HTML/CSS 모달 + 버튼)
+  └─ UI-4 (JS: 모달 로직 + 결과 렌더링 + browse 새로고침)
+       └─ UI-5
+```
+
+UI-1 & UI-3 병렬 가능. UI-2는 UI-1 후, UI-4는 UI-3 후. UI-5는 모두 완료 후.
+
+체크포인트: UI-2 완료 시 `curl -X POST` 으로 백엔드 단독 검증 → 통과해야 UI-4 진행.
+
+---
+
+### UI-1: `internal/urlfetch` 패키지 (단일 URL 다운로드)
+
+**신규 파일:** `internal/urlfetch/fetch.go`, `internal/urlfetch/fetch_test.go`
+
+**공개 API:**
+```go
+package urlfetch
+
+type Result struct {
+    URL      string   `json:"url"`
+    Path     string   `json:"path"`     // 저장 경로 (relPath, "/foo/bar.jpg")
+    Name     string   `json:"name"`     // 최종 파일명
+    Size     int64    `json:"size"`
+    Type     string   `json:"type"`     // "image" 고정 (현재 단계)
+    Warnings []string `json:"warnings"`
+}
+
+type FetchError struct {
+    Code string // "invalid_scheme" | "missing_content_length" | ...
+    Err  error  // underlying (logging용, 응답엔 노출 안 함)
+}
+func (e *FetchError) Error() string { return e.Code }
+
+// Fetch: rawURL을 destDir 절대경로 아래로 다운로드.
+// destDir은 호출자가 SafePath로 이미 검증한 절대 경로. relDir은 응답용 (예: "/photos").
+// 반환된 Result.Path는 relDir + 최종 파일명 (slash-joined).
+func Fetch(ctx context.Context, client *http.Client, rawURL, destDir, relDir string) (*Result, *FetchError)
+
+// NewClient: 표준 클라이언트 (연결 10s + Total 60s + 리다이렉트 5회).
+// 인증 헤더 자동 첨부 절대 안 함 (default Transport, 쿠키 jar 없음).
+func NewClient() *http.Client
+```
+
+**`NewClient` 구현 포인트:**
+- `http.Transport`: `DialContext`에 `net.Dialer{Timeout: 10*time.Second}`
+- `http.Client.Timeout: 60*time.Second` (전체 다운로드 캡)
+- `CheckRedirect`: hop 카운트 > 5 면 `errors.New("too_many_redirects")` 리턴 (`Fetch`가 잡아서 `FetchError{Code:"too_many_redirects"}` 변환)
+- 매 hop의 URL scheme 검증 (`http`/`https` 외 거부)
+
+**`Fetch` 구현 흐름:**
+1. URL 파싱 → `url.Parse`. 실패 → `invalid_url`
+2. Scheme 검증 → `http`/`https` 외 → `invalid_scheme`. `http`이면 `warnings = ["insecure_http"]`
+3. `http.NewRequestWithContext(ctx, "GET", rawURL, nil)`. 인증 헤더 추가 안 함
+4. `client.Do(req)` → 에러 분류 (`net.OpError` Timeout flag, `tls.CertificateInvalidError`, redirect 에러). 매핑:
+   - DNS / dial 실패 → `network_error` (or `connect_timeout` if `errors.Is(err, context.DeadlineExceeded)` 가능)
+   - TLS 검증 실패 → `tls_error`
+   - 리다이렉트 cap → `too_many_redirects`
+   - context.DeadlineExceeded (전체) → `download_timeout`
+5. `defer resp.Body.Close()`. `resp.StatusCode >= 400` → `http_error`
+6. Header 검증:
+   - `Content-Length` 누락 → `missing_content_length`
+   - `Content-Length` 파싱 실패 또는 > 50MB (`50 << 20` 바이트) → `too_large`
+   - `Content-Type` 누락 또는 mime 파트가 `image/`로 시작 안 하면 → `unsupported_content_type`
+7. 파일명 결정:
+   - `urlPath := url.Path`. `path.Base(urlPath)` (URL 경로는 항상 `/`이므로 `path` 패키지)
+   - URL 디코드(`url.PathUnescape`), 빈/`/`/`.`/`..` 이면 `"image"`
+   - `filepath.Base` 한 번 더 (디스크 측 안전)
+   - sanitize: 컨트롤 문자(`< 0x20`, `0x7F`), `\\`, `/`, NUL 제거
+   - URL 확장자 (`path.Ext`) 소문자
+   - Content-Type → 확장자 매핑 (`image/jpeg` → `.jpg`, `image/png` → `.png`, `image/webp` → `.webp`, `image/gif` → `.gif`)
+   - URL 확장자가 매핑된 확장자와 다르면 (`.jpeg` ↔ `.jpg`는 동일 취급) 확장자 교체 → `warnings += "extension_replaced"`
+   - 확장자 없으면 매핑된 확장자 추가
+8. 다운로드:
+   - `tmpFile, err := os.CreateTemp(destDir, ".urlimport-*.tmp")` → 실패 시 `write_error`
+   - `defer func(){ tmpFile.Close(); os.Remove(tmpFile.Name()) }()` (정리 보장)
+   - `limited := io.LimitReader(resp.Body, 50<<20 + 1)` (캡 + 1바이트로 초과 감지)
+   - `n, err := io.Copy(tmpFile, limited)`
+     - 에러: `write_error` (디스크) or `network_error` (read)
+     - context.DeadlineExceeded → `download_timeout`
+     - n > 50MB → `too_large`
+   - `tmpFile.Close()` → 실패 시 `write_error`
+9. 최종 파일명 충돌 회피 (재사용):
+   - `finalPath := filepath.Join(destDir, sanitizedName)`
+   - 신규 helper `media.RenameUnique(tmpPath, finalPath) (finalPath string, err error)` — `os.Rename` + EEXIST 시 `_N` 접미사 시도. 또는 `createUniqueFile` 패턴을 borrow하여 `O_CREATE|O_EXCL`로 unique 빈 파일 만들고 `os.Rename` 덮어쓰기 (Windows에서 rename은 destination 존재 시 실패하므로 → `os.Rename`에 EEXIST 처리 필요. 간단하게: `for i := 0; i < 10000; i++`로 candidate 생성, `os.Link`(POSIX) 또는 `os.Rename`(Windows: 먼저 stat으로 미존재 확인 후 rename, race 시 다시) — **단순화**: stat → 존재하면 `_N` 시도, 미존재면 rename. race 손실은 `RemoveAll(.tmp)` 보장으로 무해.
+   - 충돌 발생하여 리네임된 경우 → `warnings += "renamed"`
+10. 임시 파일 정리: defer가 `os.Remove`하지만 rename 성공 후엔 임시 파일이 이미 사라진 상태이므로 무해 (ENOENT 무시)
+11. Result 반환: `Path: path.Join(relDir, finalName)` (slash 형식)
+
+**Content-Type → 확장자 매핑 (urlfetch 내부):**
+| MIME (서브타입까지) | ext |
+|---|---|
+| `image/jpeg` | `.jpg` |
+| `image/png` | `.png` |
+| `image/webp` | `.webp` |
+| `image/gif` | `.gif` |
+| 그 외 `image/*` | `unsupported_content_type` (이번 단계 제한) |
+
+**테스트 (`fetch_test.go` — `httptest.NewServer` 모의 origin):**
+- `TestFetch_OK_JPEG` — 정상 다운로드, 파일 저장 확인, warnings 비어있음
+- `TestFetch_InvalidScheme_FilePath` — `file:///etc/passwd` → `invalid_scheme`
+- `TestFetch_NoContentLength` — `Transfer-Encoding: chunked` → `missing_content_length`
+- `TestFetch_ContentLengthTooLarge` — Header 60MB 선언 → `too_large` (다운로드 미시작)
+- `TestFetch_StreamExceedsCap` — Header 1KB 선언, 실제 60MB stream → `too_large` (스트림 중 중단)
+- `TestFetch_NonImageContentType` — `text/html` → `unsupported_content_type`
+- `TestFetch_HTTPWarning` — 정상 + warnings 에 `insecure_http` (httptest는 기본 http)
+- `TestFetch_ExtensionMismatch` — URL `.jpg` + Content-Type `image/png` → 저장명은 `.png` + `extension_replaced`
+- `TestFetch_NoExtensionInURL` — URL `?id=123` + Content-Type `image/jpeg` → 저장명 `image.jpg`
+- `TestFetch_RedirectCap` — 6회 리다이렉트 → `too_many_redirects`
+- `TestFetch_HTTP404` — `http_error`
+- `TestFetch_FilenameSanitize` — URL path에 `..`/`/` 포함 → 안전한 base만 사용
+- `TestFetch_Collision_RenamesUnique` — 동일 이름 파일 미리 생성 → `_1.jpg` 저장 + `renamed` warning
+- `TestFetch_TempFileCleanedOnError` — 실패 케이스 모두에서 `.tmp` 잔재 없음 검증
+
+**완료 기준:** `go test ./internal/urlfetch/... -v` 전체 PASS
+
+---
+
+### UI-2: `handler.handleImportURL` (`POST /api/import-url`)
+
+**파일:** `internal/handler/import_url.go` (신규), `internal/handler/import_url_test.go` (신규), `internal/handler/handler.go` (라우트 등록)
+
+**라우트:** `mux.HandleFunc("/api/import-url", h.handleImportURL)`
+
+**핸들러 흐름:**
+1. Method ≠ POST → 405
+2. `rel := r.URL.Query().Get("path")`. `media.SafePath` → 실패 시 400 `invalid path`
+3. `os.Stat(destAbs)` → 미존재 / 디렉토리 아님 → 404 `path not found`
+4. `os.MkdirAll(destAbs, 0755)` (이미 존재해도 OK; SPEC상 path 없으면 404이지만 SafePath 통과한 경로면 보통 존재). 실제: stat이 우선이므로 MkdirAll은 생략 가능
+5. JSON body parse: `{"urls": []string}`. 실패 → 400 `invalid body`
+6. URL 배열 정리: trim, 빈 줄/공백 제거. 0개 → 400 `no urls`. > 50개 → 400 `too many urls`
+7. `client := h.urlClient` (Handler 필드, `urlfetch.NewClient()`로 초기화)
+8. 각 URL 순차 처리 (sequential):
+   ```go
+   for _, u := range urls {
+       ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+       res, ferr := urlfetch.Fetch(ctx, client, u, destAbs, rel)
+       cancel()
+       if ferr != nil {
+           failed = append(failed, failedItem{URL: u, Error: ferr.Code})
+           continue
+       }
+       res.Type = "image"
+       succeeded = append(succeeded, *res)
+       // 비동기 썸네일 (기존 패턴)
+       thumbDir := filepath.Join(destAbs, ".thumb")
+       thumbPath := filepath.Join(thumbDir, res.Name+".jpg")
+       finalSrc := filepath.Join(destAbs, res.Name)
+       if !h.thumbPool.Submit(finalSrc, thumbPath) {
+           slog.Warn("thumb pool full, deferring", "src", finalSrc)
+       }
+   }
+   ```
+9. 응답 JSON 200:
+   ```json
+   {"succeeded": [...], "failed": [{"url": "...", "error": "code"}]}
+   ```
+
+**Handler 수정 (`handler.go`):**
+- `Handler` 구조체에 `urlClient *http.Client` 추가
+- `Register`에서 `urlClient: urlfetch.NewClient()` 초기화
+- `mux.HandleFunc("/api/import-url", h.handleImportURL)`
+
+**테스트 (`import_url_test.go`):**
+- `httptest.NewServer`로 모의 origin 띄우고 실제 URL을 요청에 사용
+- `TestImportURL_Single_OK` — 1개 URL → succeeded 1, failed 0, 디스크 파일 확인
+- `TestImportURL_Multiple_PartialSuccess` — 3개 (성공/HTTP 404/Content-Type 위반) → succeeded 1 + failed 2 + 각 error code 확인
+- `TestImportURL_EmptyArray` — `{"urls": []}` → 400 `no urls`
+- `TestImportURL_TooMany` — 51개 → 400 `too many urls`
+- `TestImportURL_PathTraversal` — `?path=../escape` → 400 `invalid path`
+- `TestImportURL_PathNotFound` — 미존재 디렉토리 → 404
+- `TestImportURL_MethodNotAllowed` — GET → 405
+- `TestImportURL_InvalidBody` — 비-JSON → 400
+- `TestImportURL_ThumbnailQueued` — 성공 후 `.thumb/{name}.jpg` 잠시 후 존재 (poll로 확인)
+
+**완료 기준:**
+- `go test ./internal/handler/... -v` 전체 PASS
+- `go build ./...` 성공
+- 수동 `curl -X POST -H 'Content-Type: application/json' -d '{"urls":["http://localhost:8080/...자기 이미지 URL..."]}' "http://localhost:8080/api/import-url?path=/photos"` → 응답 + 파일 확인
+
+**체크포인트:** 백엔드 단독 검증 통과 후에만 UI-4 진행.
+
+---
+
+### UI-3: 프론트엔드 — HTML/CSS (모달 + 버튼)
+
+**파일:** `web/index.html`, `web/style.css`
+
+**`index.html` 변경:**
+- 헤더 / 업로드존 영역에 "URL에서 가져오기" 버튼 추가 (`id="url-import-btn"`). 위치: 새 폴더 버튼 옆 또는 업로드존 내부 (디자인 결정: **업로드존 내부, 라벨 옆**이 의미적으로 자연스러움)
+- 모달 추가 (folder-modal과 같은 패턴, hidden 기본):
+  ```html
+  <div id="url-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3>URL에서 이미지 가져오기</h3>
+      <p class="modal-hint">한 줄에 하나씩 입력 (최대 50개, 50MB/파일)</p>
+      <textarea id="url-input" rows="6" placeholder="https://example.com/image.jpg"></textarea>
+      <div id="url-result" class="hidden"></div>
+      <div class="modal-actions">
+        <button id="url-cancel-btn">닫기</button>
+        <button id="url-confirm-btn" class="btn-primary">가져오기</button>
+      </div>
+    </div>
+  </div>
+  ```
+
+**`style.css` 변경:**
+- `.modal textarea` — 폭 100%, 폰트 monospace, resize vertical
+- `.modal-hint` — 작은 회색 보조 텍스트
+- `#url-result` 내부:
+  - `.url-result-summary` — bold 카운트
+  - `.url-result-failed` — 실패 URL 리스트, 빨강
+  - `.url-result-failed li` — `code` 폰트로 URL 표시 + 사유 라벨
+
+**검증:** 브라우저에서 모달 렌더링 확인 (스크립트 없이 `classList.remove('hidden')`로 표시 테스트)
+
+---
+
+### UI-4: 프론트엔드 — JS 로직
+
+**파일:** `web/app.js`
+
+**추가 DOM refs:**
+```js
+const urlImportBtn = document.getElementById('url-import-btn');
+const urlModal     = document.getElementById('url-modal');
+const urlInput     = document.getElementById('url-input');
+const urlResult    = document.getElementById('url-result');
+const urlCancelBtn = document.getElementById('url-cancel-btn');
+const urlConfirmBtn = document.getElementById('url-confirm-btn');
+```
+
+**기능:**
+- `openURLModal()` — input/result 초기화, 모달 표시, focus textarea
+- `closeURLModal()` — 숨김. 직전 요청에서 succeeded 1건 이상이면 `browse(currentPath, false)` 호출
+- `submitURLImport()`:
+  - 줄바꿈 split, trim, 빈 줄/공백 제거 (클라 측 dedupe까지는 안 함)
+  - 0개 → 인라인 에러 "URL을 1개 이상 입력하세요"
+  - confirm 버튼 disable, "가져오는 중..." 텍스트
+  - `fetch('/api/import-url?path=' + encodeURIComponent(currentPath), {method, headers, body: JSON.stringify({urls})})` 
+  - 응답 200이 아니면 (4xx body의 `error`) 인라인 표시
+  - 200이면 결과 렌더:
+    ```
+    성공 N개 / 실패 M개
+    ── 실패 목록 (있을 때만) ──
+    • https://...    [too_large]
+    • https://...    [unsupported_content_type]
+    ```
+  - error code → 한국어 라벨 매핑 (작은 객체):
+    - `missing_content_length` → "Content-Length 헤더 없음"
+    - `too_large` → "50MB 초과"
+    - `unsupported_content_type` → "이미지 아님"
+    - `invalid_scheme` → "지원하지 않는 스킴"
+    - `http_error` → "HTTP 응답 에러"
+    - `connect_timeout` / `download_timeout` → "타임아웃"
+    - `tls_error` → "TLS 검증 실패"
+    - `too_many_redirects` → "리다이렉트 과다"
+    - `network_error` / `write_error` / `invalid_url` → "다운로드 실패"
+- `flashSucceededCount` 상태로 닫을 때 새로고침 결정
+
+**이벤트 와이어링:**
+- `urlImportBtn.onclick = openURLModal`
+- `urlCancelBtn.onclick = closeURLModal`
+- `urlConfirmBtn.onclick = submitURLImport`
+- `urlModal.onclick = e => { if (e.target === urlModal) closeURLModal() }` (오버레이 클릭으로 닫기)
+- ESC 키 처리: 기존 lightbox/folder-modal 패턴 따라 (이미 있으면 추가, 없으면 단순 keydown 추가)
+
+**검증:**
+- 모달 열기/닫기, textarea 줄바꿈 입력
+- 1건 정상 → succeeded 표시 + 닫으면 그리드에 새 이미지 등장
+- 의도적 실패 (잘못된 URL, 비이미지 URL) → 실패 라벨 정확
+- 50건 초과 입력 → 백엔드 `too many urls` 받아 인라인 에러
+- path traversal 등 4xx → 친절한 메시지
+
+---
+
+### UI-5: E2E 수동 검증 (체크포인트)
+
+1. `go run ./cmd/server` (또는 `docker compose up --build`)
+2. 모달 열기 → 빈 입력 → "URL을 입력하세요" 인라인 에러
+3. 정상 이미지 URL 1개 → 성공 1개 → 닫기 → 그리드에 표시 + 썸네일 자동 생성
+4. 여러 URL (성공 + 비이미지 + 404) → 부분 성공 결과 정확
+5. 50MB 넘는 이미지 URL → `too_large` 표시, 디스크에 잔재 파일 없음 (`ls .tmp/` 없음)
+6. HTTP URL → 성공 (`insecure_http` warning은 응답에는 있지만 UI엔 표시 안 해도 OK; 추후 추가 가능)
+7. URL 확장자(`.jpg`) ↔ 응답 타입(`image/png`) 불일치 → 디스크에 `.png`로 저장
+8. 동일 URL 두 번 → 두 번째는 `_1` 붙어서 저장
+9. path traversal `?path=../etc` → 불가능 (이 모달은 currentPath만 사용)
+10. 모바일 뷰포트: 모달 가독성, textarea resize
+
+---
+
+### Out of scope (이번 단계 제외)
+- 동영상/음악 URL (현재 image/* 만 — SPEC §2.6 명시)
+- 도메인 화이트리스트
+- SSRF 강방어 (사설 IP 차단)
+- 진행률 표시 (다운로드 % per URL) — 동기 batch라 UI 단순화
+- 인증 헤더/쿠키 입력 UI
+- toast 알림 시스템 (모달 인라인 결과로 대체)
+- DB 메타데이터 갱신 (브라우저는 fs 기반)
+
+---
+
+### 위험 / 롤백
+- **위험: SSRF (사설 IP 호출)** — 답변상 약하게 가도 OK. LAN 내부 호스트 호출 가능 (예: `http://192.168.0.1/admin`). 개인 사용자가 의도적으로 입력하지 않는 한 무해. 추후 강화 시 host resolver에서 사설 IP 차단 hook 추가 가능.
+- **위험: 임시 파일 누적** — 모든 실패 경로에서 `defer` 로 `.tmp` 정리. 비정상 종료(SIGKILL) 시 잔재 가능. 시작 시 `destDir/.urlimport-*.tmp` 청소 routine은 over-engineering이므로 도입 안 함.
+- **위험: thumbPool 큐 가득** — 기존 동작 그대로 → `handleThumb` lazy 생성 fallback. 회귀 없음.
+- **위험: 외부 호출로 인한 응답 지연** — sequential 50개 = 최대 50분. 개인용 + UI 모달이라 사용자가 의도적으로 50개 동시 입력은 드물 것. 필요 시 semaphore(4) 도입.
+- **롤백:** Phase 9의 commit revert. `internal/urlfetch/` 디렉토리 삭제, handler.go 라우트/필드 제거, web/index.html·style.css·app.js의 url-modal 블록 제거. 기존 동작 영향 없음 (순수 추가 기능).

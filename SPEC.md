@@ -74,6 +74,39 @@
 - [ ] 반응형 레이아웃 (모바일 브라우저 지원)
 - [ ] 폴더 생성 모달 (이름 입력 → 현재 경로에 생성)
 - [ ] 폴더 삭제 확인 모달 (재귀 삭제 경고 문구 포함)
+- [ ] **URL에서 가져오기 모달**: 업로드 버튼 옆 버튼 → textarea(줄바꿈 구분 URL) → "가져오기" → 완료 시 결과 토스트 (성공 N개 / 실패 M개 + 실패 URL 목록)
+
+### 2.6 URL 기반 이미지 가져오기 (URL Import)
+
+이미지 URL을 입력하면 서버가 다운로드와 동시에 디스크에 스트리밍 저장한다. 이번 단계는 **이미지만** 지원하며, 추후 동영상/음악으로 확장 고려.
+
+- [ ] 여러 URL 한 번에 입력 가능 (줄바꿈 구분, 빈 줄/공백 무시)
+- [ ] 동기 batch 처리: 서버가 모든 URL 처리 완료 후 한 번에 응답 (succeeded/failed 분리)
+- [ ] 부분 실패 허용: 성공한 URL만 저장, 실패 URL은 응답의 `failed` 배열에 사유와 함께 반환 (전체 롤백 X)
+- [ ] **저장 위치**: 클라이언트가 보낸 `path` 쿼리 파라미터 경로(현재 browse 경로)
+- [ ] **파일명 결정**:
+  1. URL 마지막 경로 세그먼트 추출 (예: `https://x.com/a/foo.jpg` → `foo.jpg`)
+  2. URL에 확장자 없거나 비표준이면 응답 `Content-Type` 헤더에서 결정 (`image/jpeg` → `.jpg`, `image/png` → `.png`, `image/webp` → `.webp`, `image/gif` → `.gif`)
+  3. URL 확장자와 `Content-Type`이 충돌하면 **`Content-Type` 우선** (확장자를 응답 기준으로 교체)
+  4. 파일명 sanitize: `/`, `\`, `..`, 컨트롤 문자 제거. 빈 이름 → `image` + 확장자
+  5. **충돌 시 자동 리네임**: `foo.jpg` 존재 → `foo_1.jpg`, `foo_2.jpg` ... (기존 `handleUpload`의 `createUniqueFile` 패턴 재사용; race로 재시도 시 매번 다시 검사). 충돌 발생 시 응답 `warnings`에 `"renamed"` 추가
+- [ ] **다운로드 흐름**:
+  1. URL 스킴 검증: `http`/`https`만 허용 (`file:`, `data:`, `javascript:` 등 거부)
+  2. HTTP는 허용하되 응답 `warnings`에 `"insecure_http"` 추가 (다운로드는 진행)
+  3. HTTPS는 표준 TLS 인증서 검증 (자체서명 거부)
+  4. 리다이렉트 최대 5회 추적 (스킴은 매 hop마다 재검증)
+  5. 요청 시 `Authorization` 등 인증 헤더 자동 첨부 안 함
+  6. 응답 헤더 검증:
+     - `Content-Type`이 `image/*` 아니면 거부 (`error: "unsupported_content_type"`)
+     - `Content-Length` 헤더 **없으면 거부** (`error: "missing_content_length"`)
+     - `Content-Length` > 50MB이면 다운로드 시작 전 거부 (`error: "too_large"`)
+  7. 임시 파일에 스트리밍 저장 (다운로드와 디스크 쓰기 동시 = "동시에"의 의미)
+  8. 다운로드 중 누적 바이트가 50MB 초과하면 즉시 중단 + 임시 파일 삭제 (`error: "too_large"`)
+  9. 검증 통과 시 임시 파일 → 최종 경로로 atomic rename
+  10. 기존 업로드 흐름과 동일하게 `.thumb/{name}.jpg` 섬네일 비동기 생성
+- [ ] **타임아웃**: 연결 10초 + 전체 다운로드 60초 (개별 URL 단위)
+- [ ] **SSRF 정책**: 약하게 — 사설 IP(127.0.0.1, 10.x, 172.16-31.x, 192.168.x, 169.254.x, ::1, fc00::/7, fe80::/10) 차단 안 함 (LAN 미디어 서버 자기 호출 등 정상 케이스 허용)
+- [ ] **인증/쿠키**: 자동 첨부 절대 안 함 (인증 필요한 URL은 실패 처리)
 
 ---
 
@@ -130,6 +163,7 @@ file_server/
 | DELETE | `/api/file?path=` | 파일 삭제 |
 | POST | `/api/folder?path=` | 폴더 생성 |
 | DELETE | `/api/folder?path=` | 폴더 재귀 삭제 (하위 내용 + `.thumb/` 포함) |
+| POST | `/api/import-url?path=` | URL 목록에서 이미지 다운로드 → 저장 (batch) |
 | GET | `/` | 프론트엔드 SPA |
 
 ### 5.1 응답 스키마
@@ -213,6 +247,61 @@ file_server/
 - `Accept-Ranges: bytes` 헤더 항상 포함
 - `.ts` 파일: ffmpeg 파이프로 실시간 트랜스코딩, `Content-Type: video/mp4` 반환 (Range 미지원)
 - 미존재: `404`
+
+#### POST /api/import-url
+- 쿼리: `path` (저장할 디렉토리, `/data` 기준 상대 경로)
+- Body:
+```json
+{
+  "urls": [
+    "https://example.com/cat.jpg",
+    "https://example.com/dog.png"
+  ]
+}
+```
+- 응답 `200 OK` (부분 실패도 200, 개별 결과는 배열로 분리):
+```json
+{
+  "succeeded": [
+    {
+      "url": "https://example.com/cat.jpg",
+      "path": "/photos/cat.jpg",
+      "name": "cat.jpg",
+      "size": 204800,
+      "type": "image",
+      "warnings": []
+    }
+  ],
+  "failed": [
+    {
+      "url": "http://example.com/dog.png",
+      "error": "missing_content_length"
+    }
+  ]
+}
+```
+- `warnings` 가능 값:
+  - `"insecure_http"` — HTTP(비암호화) URL 사용
+  - `"renamed"` — 파일명 충돌로 자동 리네임 발생 (최종명은 `name`/`path`에 반영)
+  - `"extension_replaced"` — URL 확장자와 `Content-Type` 불일치로 확장자 교체
+- `error` 가능 값:
+  - `"invalid_scheme"` — `http`/`https` 외 스킴
+  - `"invalid_url"` — URL 파싱 실패
+  - `"connect_timeout"` — 연결 10초 초과
+  - `"download_timeout"` — 전체 60초 초과
+  - `"too_many_redirects"` — 5회 초과
+  - `"tls_error"` — TLS 인증서 검증 실패
+  - `"http_error"` — 4xx/5xx 응답
+  - `"unsupported_content_type"` — `image/*` 아님
+  - `"missing_content_length"` — `Content-Length` 헤더 없음
+  - `"too_large"` — 50MB 초과
+  - `"network_error"` — 기타 네트워크 실패
+  - `"write_error"` — 디스크 저장 실패
+- 4xx 케이스 (요청 자체 거부):
+  - `400 {"error": "invalid path"}` — path traversal
+  - `400 {"error": "no urls"}` — 빈 배열
+  - `400 {"error": "too many urls"}` — 한 번에 50개 초과
+  - `404 {"error": "path not found"}` — 저장 디렉토리 미존재
 
 #### GET /api/thumb
 - 성공: `200 OK`, `Content-Type: image/jpeg`
@@ -305,10 +394,25 @@ volumes:
 - 단위 테스트: 섬네일 생성, MIME 타입 감지, Range 파싱
 - 단위 테스트 (동영상 섬네일): `thumb.IsBlankFrame` 함수 — 전체 흑/백 판정 로직
 - 단위 테스트 (duration): 사이드카 read/write round-trip, `formatDuration` JS 함수 (`4:32`, `1:02:09`, 0/null 케이스)
+- 단위 테스트 (URL import):
+  - 파일명 추출/sanitize (확장자 있음/없음, `..`/컨트롤 문자, 빈 이름)
+  - 확장자 결정 (URL 우선 → Content-Type 폴백 → 충돌 시 Content-Type 우선)
+  - 충돌 자동 리네임 (`foo.jpg` → `foo (1).jpg`, race 시 재시도)
+  - URL 스킴 검증 (`http`/`https`만 통과)
 - 통합 테스트: HTTP 핸들러 (`net/http/httptest` 사용)
 - 통합 테스트 (동영상 섬네일): ffmpeg 없는 환경에서 placeholder 반환 확인
 - 통합 테스트 (duration): browse 응답에 동영상 entry의 `duration_sec` 포함 확인 (사이드카 있을 때 / 없을 때)
+- 통합 테스트 (URL import): `httptest.Server`로 모의 origin 띄워서 검증
+  - 정상 이미지 다운로드 → 파일 저장 + 응답에 `succeeded` 포함
+  - `Content-Length` 누락 → `missing_content_length` 실패
+  - 51MB 응답 → `too_large` 실패 + 임시 파일 정리 확인
+  - `Content-Type: text/html` → `unsupported_content_type` 실패
+  - HTTP URL → 성공 + `warnings: ["insecure_http"]`
+  - URL 확장자(`.jpg`)와 Content-Type(`image/png`) 불일치 → `.png`로 저장 + `warnings: ["extension_replaced"]`
+  - 부분 실패: 3개 URL 중 일부 실패 → `succeeded` + `failed` 양쪽 채워짐
+  - 리다이렉트 6회 → `too_many_redirects`
 - 수동 테스트: 브라우저에서 업로드→섬네일→스트리밍 전체 흐름 확인 (썸네일 우하단 시간 오버레이 확인)
+- 수동 테스트 (URL import): 모달에서 URL 여러 개 입력 → 결과 토스트 확인 (성공/실패 카운트)
 
 ---
 
@@ -318,8 +422,10 @@ volumes:
 - Range 요청 지원 (스트리밍 seek 필수)
 - 업로드 파일은 `/data` 볼륨 내부에만 저장 (path traversal 방지)
 - 섬네일은 비동기로 생성 (업로드 응답 차단 안 함)
+- URL import: HTTPS TLS 인증서 검증, `Content-Length` 사전 검증, 다운로드 누적 50MB 캡, `Content-Type: image/*` 검증, 임시 파일 → atomic rename, 파일명 sanitize
 
 **하지 않을 것 (Never)**
 - TS 이외 포맷 트랜스코딩 (MP4/MKV/AVI는 원본 그대로 스트리밍)
 - 사용자 인증/권한 관리
 - 외부 CDN이나 클라우드 스토리지 연동
+- URL import: `Authorization`/쿠키 등 인증 헤더 자동 첨부, `http`/`https` 외 스킴 허용, 50MB 초과 다운로드, 비이미지 응답 저장, `Content-Length` 없는 응답 저장
