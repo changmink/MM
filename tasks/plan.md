@@ -528,3 +528,152 @@ var Placeholder []byte
 - `handler/browse_test.go`: 동영상 `thumb_available: true`
 
 **완료 기준:** `go test ./... -v` 전체 PASS
+
+---
+
+## Phase 8 — 동영상 길이 표시 (`feature/video-duration`)
+
+### 배경
+SPEC §2.3.2 추가. 썸네일 우하단에 재생 시간 오버레이. 사이드카 파일(`.thumb/{name}.jpg.dur`)에 duration을 평문 float로 캐시.
+
+### 의존성 그래프
+
+```
+VD-1 (thumb 패키지: 사이드카 I/O + GenerateFromVideo 통합)
+  └─ VD-2 (browse handler: duration_sec 노출 + 기존 캐시 백필)
+       └─ VD-3 (frontend: formatDuration + 오버레이 + CSS)
+            └─ VD-4 (E2E 수동 검증)
+```
+
+VD-1 → VD-2 → VD-3 순차. 각 단계에서 commit + 테스트.
+
+### 사이드카 라이프사이클
+
+| 상태 | `.jpg` | `.jpg.dur` | browse 응답 | 동작 |
+|---|---|---|---|---|
+| 신규 동영상 (썸 미생성) | ✗ | ✗ | `null` | `/api/thumb` 첫 호출 시 함께 생성 |
+| 정상 썸 생성 후 | ✓ | ✓ | float | 캐시 hit |
+| 기존 썸 (이 기능 이전) | ✓ | ✗ | float (백필 후) | browse 첫 호출 때 ffprobe 1회 → `.dur` 작성 |
+| placeholder 사용 (손상) | ✗ | ✗ | `null` | UI 오버레이 숨김 |
+
+**왜 thumb 엔드포인트가 아닌 browse에서 백필?** 기존 사용자는 이미 `.thumb/{name}.jpg`가 있어 `/api/thumb`을 다시 호출하지 않음. 캐시 무효화 없이 마이그레이션하려면 browse에서 백필해야 함.
+
+---
+
+### VD-1: thumb 패키지 — 사이드카 I/O
+**파일:** `internal/thumb/thumb.go`, `internal/thumb/thumb_test.go`
+
+**추가 함수 (export):**
+- `ProbeDuration(src string) (float64, error)` — 기존 비공개 `videoDuration` 승격
+- `DurationSidecarPath(thumbPath string) string` → `thumbPath + ".dur"`
+- `WriteDurationSidecar(thumbPath string, sec float64) error` — 평문 `strconv.FormatFloat(sec, 'f', 3, 64)` 저장
+- `ReadDurationSidecar(thumbPath string) (float64, bool)` — 미존재/파싱 실패 시 `(0, false)`
+
+**`GenerateFromVideo` 변경:**
+- 성공 경로(JPEG 저장 직후) 끝에 `WriteDurationSidecar(dst, duration)` 호출 (실패해도 thumbnail은 성공이므로 에러 무시 + 로그 없음 — 다음 browse에서 백필됨)
+- placeholder fallback 경로(GenerateFromVideo가 error 반환)에선 사이드카 작성 안 함 (호출자 책임)
+
+**테스트:**
+- `TestProbeDuration` — 4초짜리 mp4에서 4.0±0.5 반환
+- `TestDurationSidecarRoundTrip` — write → read 동일값 (3 decimal places)
+- `TestReadDurationSidecarMissing` — 미존재 시 `(0, false)`
+- `TestReadDurationSidecarMalformed` — 잘못된 내용 시 `(0, false)`
+- `TestGenerateFromVideoWritesSidecar` — `GenerateFromVideo` 성공 후 `.dur` 존재 확인 (값이 ProbeDuration과 일치)
+
+**완료 기준:** `go test ./internal/thumb/... -v` 전체 PASS, `/api/thumb` 행동 변화 없음
+
+---
+
+### VD-2: browse handler — `duration_sec` 노출 + 백필
+**파일:** `internal/handler/browse.go`, `internal/handler/browse_test.go`
+
+**`entry` 구조체 추가:**
+```go
+DurationSec *float64 `json:"duration_sec"`  // omitempty 없이 — null 일관성
+```
+
+**video entry 처리 로직:**
+```go
+thumbPath := filepath.Join(abs, ".thumb", name+".jpg")
+if _, err := os.Stat(thumbPath); err == nil {
+    thumbAvail = true
+    if sec, ok := thumb.ReadDurationSidecar(thumbPath); ok {
+        durSec = &sec
+    } else {
+        // 백필: 기존 썸은 있지만 사이드카 없음
+        if sec, err := thumb.ProbeDuration(absSrc); err == nil && sec > 0 {
+            _ = thumb.WriteDurationSidecar(thumbPath, sec)
+            durSec = &sec
+        }
+        // ffprobe 실패 시 nil 유지
+    }
+}
+```
+
+**테스트:**
+- `TestBrowseDurationSecPresent` — 사이드카 있을 때 `duration_sec` 값 반환
+- `TestBrowseDurationSecBackfill` — 썸은 있고 사이드카 없을 때 → 응답에 값 + 사이드카 파일 생성됨 (requireFFmpeg)
+- `TestBrowseDurationSecNullForImage` — 이미지 entry는 null
+- `TestBrowseDurationSecNullWhenNoThumb` — 썸 없으면 null
+
+**완료 기준:**
+- `go test ./internal/handler/... -v` 전체 PASS
+- `go build ./...` 성공
+- 수동 `curl /api/browse?path=/...` → 동영상 entry에 `duration_sec` 필드 확인
+
+---
+
+### VD-3: frontend — overlay + 포맷팅
+**파일:** `web/app.js`, `web/style.css`
+
+**`app.js` 변경:**
+- 신규 `formatDuration(sec)` 함수 (Helpers 섹션):
+  - `null` / `undefined` / `<= 0` / `NaN` → `null`
+  - `< 3600` → `"M:SS"` (초만 0 패딩, 분은 패딩 없음)
+  - `>= 3600` → `"H:MM:SS"` (시간 패딩 없음, 분/초 0 패딩)
+- `buildVideoGrid` 수정: `formatDuration(entry.duration_sec)`로 변환 후 non-null이면 카드에 `<span class="duration-badge">{text}</span>` 추가
+
+**`style.css` 변경 (`.thumb-card` 블록 근처):**
+```css
+.thumb-card .duration-badge {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  background: rgba(0,0,0,0.75);
+  color: #fff;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  pointer-events: none;
+}
+```
+
+**검증 (수동):**
+- 콘솔에서 `formatDuration(0)` → null, `formatDuration(5)` → "0:05", `formatDuration(65)` → "1:05", `formatDuration(3600)` → "1:00:00", `formatDuration(3725)` → "1:02:05"
+- 브라우저에서 동영상 그리드 → 우하단에 시간 오버레이 표시
+
+**완료 기준:** Slice 3 commit 후 VD-4로 진행
+
+---
+
+### VD-4: E2E 수동 검증 (체크포인트)
+1. `go run ./cmd/server` (또는 docker compose up --build)
+2. 새 동영상 업로드 → 그리드에서 썸네일 우하단에 시간 표시
+3. 오버레이 영역 클릭 → 라이트박스 동영상 재생 (pointer-events: none 동작 확인)
+4. 기존 동영상 마이그레이션: 임의 동영상의 `.thumb/{name}.jpg.dur` 삭제 → browse 새로고침 → 사이드카 재생성 + 오버레이 정상 표시
+5. 손상 동영상 (placeholder 경로): 빈 `.mp4` 파일 → placeholder 표시 + 오버레이 없음
+6. 모바일 뷰포트 (DevTools): 오버레이 가독성 + 레이아웃 깨짐 없음
+
+---
+
+### Out of scope
+- DB 메타데이터 캐시 (SPEC §5.3 노트대로 보류)
+- audio entry duration 표시
+- 라이트박스 / video player 내부의 시간 표시
+- 일괄 마이그레이션 스크립트 (lazy backfill로 충분)
+
+### 위험 / 롤백
+- **위험:** ffprobe 미설치 환경 → 백필 silent fail, null 반환, UI 오버레이 숨김 (acceptable degradation)
+- **위험:** 사이드카 파싱 오류 → `(0, false)` 반환 → 다음 browse에서 재시도 (자가복구)
+- **롤백:** Phase 8의 commit 3개 revert. `.dur` 파일은 `.thumb/` 안에 있어 정적 서빙 안 됨 → 무해
