@@ -46,6 +46,20 @@
 - [ ] on-demand 생성: 캐시 파일이 없을 때만 ffmpeg 실행, 이후 캐시 서빙
 - [ ] `browse` API: 동영상 파일도 `.thumb/{name}.jpg` 존재 여부로 `thumb_available` 계산
 
+### 2.3.2 동영상 길이 (duration) 표시
+- [ ] 동영상 썸네일 카드 우하단에 재생 시간 오버레이 표시 (반투명 검정 배경 + 흰 글씨)
+- [ ] **포맷 (YouTube 스타일):** 1시간 미만 `M:SS` (예: `4:32`), 1시간 이상 `H:MM:SS` (예: `1:23:45`)
+  - 초는 항상 0 패딩, 분은 시간이 있을 때만 0 패딩 (`4:05`, `1:02:09`)
+- [ ] **저장 위치 (사이드카 파일):** `.thumb/{name}.jpg.dur` — duration(초, float)을 평문 텍스트로 저장 (예: `273.456`)
+  - 썸네일 JPEG 생성과 동시에 ffprobe가 이미 구한 값을 기록 (추가 ffprobe 호출 없음)
+- [ ] **기존 캐시 호환:** `.thumb/{name}.jpg`은 있지만 `.dur`는 없는 경우 → `browse` 응답 시 on-demand ffprobe 1회 실행하여 `.dur` 생성 후 캐시, 실패 시 null 반환 (썸네일은 그대로 서빙)
+- [ ] **placeholder 사용 시:** duration을 구할 수 없으면 사이드카 파일 생성하지 않음 → API 응답에서 `duration_sec: null` → UI는 오버레이 숨김
+- [ ] **browse API 확장:** 동영상 entry에 `duration_sec: float | null` 필드 추가 (다른 타입은 항상 null)
+- [ ] **UI 렌더링 (`buildVideoGrid`):**
+  - `duration_sec`이 null 또는 0 이하이면 오버레이 숨김
+  - 포맷팅은 클라이언트(`app.js`)에서 수행
+  - 폴더 삭제 시 `.thumb/` 전체 삭제로 사이드카도 함께 정리됨 (기존 동작 그대로)
+
 ### 2.4 음악 스트리밍
 - **지원 포맷:** MP3, FLAC, AAC, OGG, WAV, M4A
 - [ ] HTTP Range 요청 지원
@@ -132,7 +146,8 @@ file_server/
       "size": 1234567,
       "mod_time": "2024-01-15T10:30:00Z",
       "is_dir": false,
-      "thumb_available": false
+      "thumb_available": false,
+      "duration_sec": 273.456
     },
     {
       "name": "photo.jpg",
@@ -157,6 +172,7 @@ file_server/
 ```
 - `type`: `"image"` | `"video"` | `"audio"` | `"dir"` | `"other"`
 - `thumb_available`: `.thumb/{name}.jpg` 파일 존재 여부
+- `duration_sec`: 동영상 파일의 재생 시간(초, float). 동영상이 아니거나 ffprobe 실패 시 `null`
 - 에러: `{"error": "message"}` + HTTP 상태 코드
 
 #### POST /api/upload
@@ -288,9 +304,11 @@ volumes:
 
 - 단위 테스트: 섬네일 생성, MIME 타입 감지, Range 파싱
 - 단위 테스트 (동영상 섬네일): `thumb.IsBlankFrame` 함수 — 전체 흑/백 판정 로직
+- 단위 테스트 (duration): 사이드카 read/write round-trip, `formatDuration` JS 함수 (`4:32`, `1:02:09`, 0/null 케이스)
 - 통합 테스트: HTTP 핸들러 (`net/http/httptest` 사용)
 - 통합 테스트 (동영상 섬네일): ffmpeg 없는 환경에서 placeholder 반환 확인
-- 수동 테스트: 브라우저에서 업로드→섬네일→스트리밍 전체 흐름 확인
+- 통합 테스트 (duration): browse 응답에 동영상 entry의 `duration_sec` 포함 확인 (사이드카 있을 때 / 없을 때)
+- 수동 테스트: 브라우저에서 업로드→섬네일→스트리밍 전체 흐름 확인 (썸네일 우하단 시간 오버레이 확인)
 
 ---
 

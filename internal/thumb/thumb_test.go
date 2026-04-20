@@ -4,6 +4,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -127,6 +128,89 @@ func TestGenerateFromVideo(t *testing.T) {
 			t.Error("expected error for missing source file")
 		}
 	})
+}
+
+func TestProbeDuration(t *testing.T) {
+	dir := t.TempDir()
+	src := makeTestMP4(t, dir) // 4-second clip
+
+	got, err := ProbeDuration(src)
+	if err != nil {
+		t.Fatalf("ProbeDuration: %v", err)
+	}
+	if math.Abs(got-4.0) > 0.5 {
+		t.Errorf("ProbeDuration = %v, want ≈4.0", got)
+	}
+}
+
+func TestProbeDurationMissingFile(t *testing.T) {
+	requireFFmpeg(t)
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe not found")
+	}
+	if _, err := ProbeDuration(filepath.Join(t.TempDir(), "ghost.mp4")); err == nil {
+		t.Error("expected error for missing file")
+	}
+}
+
+func TestDurationSidecarRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	thumbPath := filepath.Join(dir, "clip.mp4.jpg")
+
+	if err := WriteDurationSidecar(thumbPath, 273.456); err != nil {
+		t.Fatalf("WriteDurationSidecar: %v", err)
+	}
+	got, ok := ReadDurationSidecar(thumbPath)
+	if !ok {
+		t.Fatal("ReadDurationSidecar returned ok=false")
+	}
+	if math.Abs(got-273.456) > 0.001 {
+		t.Errorf("round-trip got %v, want 273.456", got)
+	}
+}
+
+func TestDurationSidecarPath(t *testing.T) {
+	got := DurationSidecarPath("/foo/.thumb/bar.mp4.jpg")
+	want := "/foo/.thumb/bar.mp4.jpg.dur"
+	if got != want {
+		t.Errorf("DurationSidecarPath = %q, want %q", got, want)
+	}
+}
+
+func TestReadDurationSidecarMissing(t *testing.T) {
+	_, ok := ReadDurationSidecar(filepath.Join(t.TempDir(), "nope.mp4.jpg"))
+	if ok {
+		t.Error("expected ok=false for missing sidecar")
+	}
+}
+
+func TestReadDurationSidecarMalformed(t *testing.T) {
+	dir := t.TempDir()
+	thumbPath := filepath.Join(dir, "bad.mp4.jpg")
+	if err := os.WriteFile(DurationSidecarPath(thumbPath), []byte("not-a-number"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, ok := ReadDurationSidecar(thumbPath)
+	if ok {
+		t.Error("expected ok=false for malformed sidecar contents")
+	}
+}
+
+func TestGenerateFromVideoWritesSidecar(t *testing.T) {
+	dir := t.TempDir()
+	src := makeTestMP4(t, dir)
+	dst := filepath.Join(dir, ".thumb", "clip.mp4.jpg")
+
+	if err := GenerateFromVideo(src, dst); err != nil {
+		t.Fatalf("GenerateFromVideo: %v", err)
+	}
+	sec, ok := ReadDurationSidecar(dst)
+	if !ok {
+		t.Fatal("expected sidecar to be created alongside thumbnail")
+	}
+	if math.Abs(sec-4.0) > 0.5 {
+		t.Errorf("sidecar duration = %v, want ≈4.0", sec)
+	}
 }
 
 func TestGenerate(t *testing.T) {
