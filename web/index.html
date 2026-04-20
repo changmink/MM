@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Media Server</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>Media Server</h1>
+    <nav id="breadcrumb"></nav>
+    <button id="new-folder-btn" class="new-folder-btn">+ 새 폴더</button>
+  </header>
+
+  <main>
+    <section id="upload-zone" class="upload-zone">
+      <p>파일을 드래그하거나 <label for="file-input" class="upload-label">클릭하여 업로드</label></p>
+      <input type="file" id="file-input" multiple hidden>
+      <div id="upload-progress"></div>
+    </section>
+
+    <section id="file-list"></section>
+  </main>
+
+  <!-- 라이트박스 -->
+  <div id="lightbox" class="lightbox hidden">
+    <button class="lb-close" id="lb-close">✕</button>
+    <button class="lb-prev" id="lb-prev">‹</button>
+    <button class="lb-next" id="lb-next">›</button>
+    <div class="lb-content" id="lb-content"></div>
+  </div>
+
+  <!-- 오디오 플레이어 -->
+  <div id="audio-player" class="audio-player hidden">
+    <div class="audio-info">
+      <span id="audio-title">—</span>
+    </div>
+    <audio id="audio-el" controls></audio>
+    <div id="playlist" class="playlist"></div>
+  </div>
+
+  <!-- 폴더 생성 모달 -->
+  <div id="folder-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3>새 폴더 만들기</h3>
+      <input id="folder-name-input" type="text" placeholder="폴더 이름" maxlength="255" autocomplete="off">
+      <p id="folder-error" class="modal-error hidden"></p>
+      <div class="modal-actions">
+        <button id="folder-cancel-btn">취소</button>
+        <button id="folder-confirm-btn" class="btn-primary">만들기</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js?v=3"></script>
+</body>
+</html>

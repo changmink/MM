@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(export PATH=\"$PATH:/c/Program Files/Go/bin\")",
+      "Bash(go test *)",
+      "Bash(go build *)",
+      "Bash(docker compose up *)"
+    ]
+  }
+}

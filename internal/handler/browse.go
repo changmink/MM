@@ -1,0 +1,102 @@
+package handler
+
+import (
+	"encoding/json"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/chang/file_server/internal/media"
+)
+
+type entry struct {
+	Name           string         `json:"name"`
+	Path           string         `json:"path"`
+	Type           media.FileType `json:"type"`
+	Mime           string         `json:"mime"`
+	Size           int64          `json:"size"`
+	ModTime        time.Time      `json:"mod_time"`
+	IsDir          bool           `json:"is_dir"`
+	ThumbAvailable bool           `json:"thumb_available"`
+}
+
+type browseResponse struct {
+	Path    string  `json:"path"`
+	Entries []entry `json:"entries"`
+}
+
+func (h *Handler) handleBrowse(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	rel := r.URL.Query().Get("path")
+	abs, err := media.SafePath(h.dataDir, rel)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid path")
+		return
+	}
+
+	infos, err := os.ReadDir(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "read dir failed")
+		return
+	}
+
+	entries := make([]entry, 0, len(infos))
+	for _, info := range infos {
+		name := info.Name()
+		// hide .thumb directories
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+
+		fi, err := info.Info()
+		if err != nil {
+			continue
+		}
+
+		relPath := filepath.ToSlash(filepath.Join(rel, name))
+		if !strings.HasPrefix(relPath, "/") {
+			relPath = "/" + relPath
+		}
+
+		var ft media.FileType
+		if info.IsDir() {
+			ft = media.TypeDir
+		} else {
+			ft = media.DetectType(name)
+		}
+
+		thumbAvail := false
+		if ft == media.TypeImage {
+			thumbPath := filepath.Join(abs, ".thumb", name+".jpg")
+			if _, err := os.Stat(thumbPath); err == nil {
+				thumbAvail = true
+			}
+		}
+
+		entries = append(entries, entry{
+			Name:           name,
+			Path:           relPath,
+			Type:           ft,
+			Mime:           media.MIMEType(name),
+			Size:           fi.Size(),
+			ModTime:        fi.ModTime(),
+			IsDir:          info.IsDir(),
+			ThumbAvailable: thumbAvail,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(browseResponse{
+		Path:    rel,
+		Entries: entries,
+	})
+}
