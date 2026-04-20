@@ -441,3 +441,90 @@ DELETE /api/folder 케이스:
 - 새 폴더 생성 → 목록에 즉시 반영
 - 파일 포함 폴더 삭제 → 경고 확인 → 재귀 삭제 후 목록 새로고침
 - 파일 삭제는 기존과 동일 동작 (회귀 없음)
+
+---
+
+## Phase 7 — 동영상 섬네일
+
+### 의존성 그래프
+
+```
+VT-1 (media.IsVideo 헬퍼)
+  └─ VT-2 (thumb.GenerateFromVideo + IsBlankFrame)    ← VT-1 완료 후
+       ├─ VT-3 (placeholder embed)                    ← VT-2와 병렬 가능
+       └─ VT-4 (handleThumb 동영상 분기)              ← VT-2 + VT-3 완료 후
+            └─ VT-5 (browse thumb_available 동영상 포함) ← VT-4와 병렬 가능
+                 └─ VT-6 (테스트)                     ← VT-4 + VT-5 완료 후
+```
+
+---
+
+### VT-1: `media.IsVideo()` 헬퍼 추가
+**파일:** `internal/media/types.go`
+
+`videoExts` 맵이 이미 있으므로 `IsImage`와 동일한 패턴으로 추가:
+```go
+func IsVideo(name string) bool {
+    return videoExts[strings.ToLower(extOf(name))]
+}
+```
+
+---
+
+### VT-2: `thumb.GenerateFromVideo()` + `IsBlankFrame()`
+**파일:** `internal/thumb/thumb.go`
+
+**`IsBlankFrame(img image.Image) bool`** — 전체 흑/백 판정:
+- 이미지 전체 픽셀 순회
+- 픽셀 하나라도 R+G+B가 [10, 745] 범위면 → false (정상 프레임)
+- 모두 범위 밖이면 → true (빈 프레임)
+
+**`GenerateFromVideo(src, dst string) error`** — ffmpeg 프레임 추출:
+- ffprobe로 영상 길이 조회
+- 50% 시점 → IsBlankFrame 검사 → 25% 재시도 → 75% 재시도 → 모두 실패 시 error
+
+ffmpeg 명령:
+```
+ffmpeg -y -loglevel error -ss <offset> -i <src> -vframes 1 -vf "scale=200:200:force_original_aspect_ratio=decrease,pad=200:200:(ow-iw)/2:(oh-ih)/2" <dst>
+```
+
+---
+
+### VT-3: `placeholder.jpg` embed
+**파일:** `internal/thumb/placeholder.go` (신규), `internal/thumb/placeholder.jpg` (신규)
+
+```go
+package thumb
+
+import _ "embed"
+
+//go:embed placeholder.jpg
+var Placeholder []byte
+```
+
+---
+
+### VT-4: `handleThumb` 동영상 분기 추가
+**파일:** `internal/handler/thumb.go`
+
+- `IsImage` → 기존 imaging 로직
+- `IsVideo` → `GenerateFromVideo` 호출, 실패 시 `thumb.Placeholder` 반환 (200 OK)
+- 그 외 → `400 "unsupported file type"`
+
+캐시 히트 경로는 이미지/동영상 공통으로 thumbPath 존재 시 바로 서빙.
+
+---
+
+### VT-5: `browse.go` — 동영상 `thumb_available` 포함
+**파일:** `internal/handler/browse.go`
+
+`ft == media.TypeImage` → `ft == media.TypeImage || ft == media.TypeVideo`
+
+---
+
+### VT-6: 테스트
+- `thumb_test.go`: `TestIsBlankFrame`, `TestGenerateFromVideo` (requireFFmpeg 스킵)
+- `handler/thumb_test.go`: 동영상 200+image/jpeg, unsupported 400
+- `handler/browse_test.go`: 동영상 `thumb_available: true`
+
+**완료 기준:** `go test ./... -v` 전체 PASS

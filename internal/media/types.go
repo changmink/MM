@@ -68,6 +68,10 @@ func IsImage(name string) bool {
 	return imageExts[strings.ToLower(extOf(name))]
 }
 
+func IsVideo(name string) bool {
+	return videoExts[strings.ToLower(extOf(name))]
+}
+
 func IsTS(name string) bool {
 	return strings.ToLower(extOf(name)) == ".ts"
 }

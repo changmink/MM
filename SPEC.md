@@ -32,6 +32,20 @@
 - [ ] TS: ffmpeg로 실시간 MP4 트랜스코딩 후 스트리밍 (`Content-Type: video/mp4`)
 - [ ] MIME 타입 자동 감지
 
+### 2.3.1 동영상 섬네일
+- **지원 포맷:** MP4, MKV, AVI, TS (전체)
+- [ ] `GET /api/thumb?path=` 에서 동영상 파일도 섬네일 반환 (기존 이미지와 동일 엔드포인트)
+- [ ] ffmpeg로 프레임 추출 → 200×200px JPEG (이미지 섬네일과 동일 크기)
+- [ ] 섬네일은 원본과 동일 경로의 `.thumb/` 디렉토리에 저장 (캐시)
+- [ ] **프레임 추출 전략 (순서대로 시도):**
+  1. 영상 길이의 50% 시점 추출
+  2. 추출된 프레임이 모두 검정(모든 픽셀 R+G+B < 10) 또는 모두 흰색(모든 픽셀 R+G+B > 745)이면 25% 시점 재시도
+  3. 25%도 무효이면 75% 시점 재시도
+  4. 모두 실패하면 `internal/thumb/placeholder.jpg` (빌드 시 embed) 반환
+- [ ] ffmpeg 실패(파일 손상, 지원 코덱 없음 등) 시 placeholder 반환 (5xx 에러 아님)
+- [ ] on-demand 생성: 캐시 파일이 없을 때만 ffmpeg 실행, 이후 캐시 서빙
+- [ ] `browse` API: 동영상 파일도 `.thumb/{name}.jpg` 존재 여부로 `thumb_available` 계산
+
 ### 2.4 음악 스트리밍
 - **지원 포맷:** MP3, FLAC, AAC, OGG, WAV, M4A
 - [ ] HTTP Range 요청 지원
@@ -186,8 +200,13 @@ file_server/
 
 #### GET /api/thumb
 - 성공: `200 OK`, `Content-Type: image/jpeg`
-- 비이미지 파일: `400 {"error": "not an image"}`
-- 미존재: `404`
+- 이미지 파일: `imaging` 라이브러리로 섬네일 생성 (기존)
+- 동영상 파일 (MP4, MKV, AVI, TS): ffmpeg로 프레임 추출
+  - 프레임 추출 순서: 50% → (전체 흑/백이면) 25% → 75% → placeholder
+  - ffmpeg 실패 시 placeholder 반환 (`200 OK`, placeholder JPEG)
+- 이미지/동영상 외 파일: `400 {"error": "unsupported file type"}`
+- 파일 미존재: `404`
+- **Placeholder:** `internal/thumb/placeholder.jpg` (빌드 바이너리에 embed)
 
 ### 5.2 MIME 타입 맵
 
@@ -268,7 +287,9 @@ volumes:
 ## 8. Testing Strategy
 
 - 단위 테스트: 섬네일 생성, MIME 타입 감지, Range 파싱
+- 단위 테스트 (동영상 섬네일): `thumb.IsBlankFrame` 함수 — 전체 흑/백 판정 로직
 - 통합 테스트: HTTP 핸들러 (`net/http/httptest` 사용)
+- 통합 테스트 (동영상 섬네일): ffmpeg 없는 환경에서 placeholder 반환 확인
 - 수동 테스트: 브라우저에서 업로드→섬네일→스트리밍 전체 흐름 확인
 
 ---

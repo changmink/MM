@@ -31,20 +31,42 @@ func (h *Handler) handleThumb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !media.IsImage(fi.Name()) {
-		writeError(w, http.StatusBadRequest, "not an image")
-		return
+	switch {
+	case media.IsImage(fi.Name()):
+		h.serveImageThumb(w, r, abs, fi.Name())
+	case media.IsVideo(fi.Name()):
+		h.serveVideoThumb(w, r, abs, fi.Name())
+	default:
+		writeError(w, http.StatusBadRequest, "unsupported file type")
 	}
+}
 
-	thumbPath := filepath.Join(filepath.Dir(abs), ".thumb", fi.Name()+".jpg")
-
+func (h *Handler) serveImageThumb(w http.ResponseWriter, r *http.Request, abs, name string) {
+	thumbPath := filepath.Join(filepath.Dir(abs), ".thumb", name+".jpg")
 	if _, err := os.Stat(thumbPath); os.IsNotExist(err) {
 		if err := thumb.Generate(abs, thumbPath); err != nil {
 			writeError(w, http.StatusInternalServerError, "thumb generation failed")
 			return
 		}
 	}
+	serveThumbFile(w, r, thumbPath)
+}
 
+func (h *Handler) serveVideoThumb(w http.ResponseWriter, r *http.Request, abs, name string) {
+	thumbPath := filepath.Join(filepath.Dir(abs), ".thumb", name+".jpg")
+	if _, err := os.Stat(thumbPath); os.IsNotExist(err) {
+		if err := thumb.GenerateFromVideo(abs, thumbPath); err != nil {
+			// ffmpeg unavailable or all frames blank — serve placeholder
+			w.Header().Set("Content-Type", "image/jpeg")
+			w.WriteHeader(http.StatusOK)
+			w.Write(thumb.Placeholder)
+			return
+		}
+	}
+	serveThumbFile(w, r, thumbPath)
+}
+
+func serveThumbFile(w http.ResponseWriter, r *http.Request, thumbPath string) {
 	f, err := os.Open(thumbPath)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "open thumb failed")
@@ -52,12 +74,12 @@ func (h *Handler) handleThumb(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
-	fi2, err := f.Stat()
+	fi, err := f.Stat()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "stat thumb failed")
 		return
 	}
 
 	w.Header().Set("Content-Type", "image/jpeg")
-	http.ServeContent(w, r, fi2.Name(), fi2.ModTime(), f)
+	http.ServeContent(w, r, fi.Name(), fi.ModTime(), f)
 }
