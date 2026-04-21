@@ -34,12 +34,13 @@
 - [x] T-F4: app.js — createFolder(), deleteFolder(), buildTable() 분기 수정
 
 ## Phase 7 — 동영상 섬네일
-- [ ] VT-1: media.IsVideo() 헬퍼 추가 + 테스트
-- [ ] VT-2: thumb.GenerateFromVideo() + IsBlankFrame() 구현
-- [ ] VT-3: placeholder.jpg embed (placeholder.go + placeholder.jpg)
-- [ ] VT-4: handleThumb 동영상 분기 + placeholder fallback
-- [ ] VT-5: browse.go — 동영상 thumb_available 포함
-- [ ] VT-6: 테스트 (thumb_test, handler/thumb_test, browse_test)
+- [x] VT-1: media.IsVideo() 헬퍼 추가 + 테스트
+- [x] VT-2: thumb.GenerateFromVideo() + IsBlankFrame() 구현
+- [x] VT-3: placeholder.jpg embed (placeholder.go + placeholder.jpg)
+- [x] VT-4: handleThumb 동영상 분기 + placeholder fallback
+- [x] VT-5: browse.go — 동영상 thumb_available 포함
+- [x] VT-6: 테스트 (thumb_test, handler/thumb_test, browse_test)
+- [x] VT-7: thumb.Pool.worker가 media.IsVideo 기반 분기 (업로드/URL-import 경로에서 MP4 async 썸네일 생성) + 업로드 분기 TypeImage||TypeVideo + 삭제 시 .dur 사이드카 정리
 
 ## Phase 8 — 동영상 길이 표시 (`feature/video-duration`)
 - [ ] VD-1: thumb 패키지 — ProbeDuration export + Read/Write/PathSidecar 추가, GenerateFromVideo가 사이드카 작성하도록 수정 + 테스트

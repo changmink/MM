@@ -120,6 +120,12 @@ func (h *Handler) handleImportURL(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
+	// emit serializes SSE writes between the handler goroutine (start / done /
+	// error / summary) and the per-URL progress writer goroutine. Flush blocks
+	// on a slow client, so this mutex also bounds concurrency to one in-flight
+	// flush. Progress events tolerate back-pressure via the drop-on-full
+	// progressCh; every other event type intentionally waits its turn so
+	// clients never miss a lifecycle transition.
 	var writeMu sync.Mutex
 	emit := func(payload any) {
 		writeMu.Lock()

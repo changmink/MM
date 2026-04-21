@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	"github.com/chang/file_server/internal/media"
+	"github.com/chang/file_server/internal/thumb"
 )
 
 func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
@@ -83,10 +84,10 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	fileType := media.DetectType(part.FileName())
 
-	// generate thumbnail asynchronously for images via bounded worker pool.
-	// If the pool queue is full we log and skip — handleThumb will generate
-	// it lazily on first view, so the user still gets a thumbnail.
-	if fileType == media.TypeImage {
+	// generate thumbnail asynchronously for images and videos via the bounded
+	// worker pool. If the pool queue is full we log and skip — handleThumb
+	// generates lazily on first view, so the user still gets a thumbnail.
+	if fileType == media.TypeImage || fileType == media.TypeVideo {
 		thumbDir := filepath.Join(destDir, ".thumb")
 		thumbPath := filepath.Join(thumbDir, filepath.Base(destPath)+".jpg")
 		if !h.thumbPool.Submit(destPath, thumbPath) {
@@ -140,10 +141,14 @@ func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// remove thumbnail if image
-	if media.IsImage(fi.Name()) {
+	// remove sidecar thumbnail (and duration sidecar for videos). Both are
+	// best-effort: a stale .jpg simply gets overwritten on next generation.
+	if media.IsImage(fi.Name()) || media.IsVideo(fi.Name()) {
 		thumbPath := filepath.Join(filepath.Dir(abs), ".thumb", fi.Name()+".jpg")
 		os.Remove(thumbPath)
+		if media.IsVideo(fi.Name()) {
+			os.Remove(thumb.DurationSidecarPath(thumbPath))
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)
