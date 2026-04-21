@@ -129,6 +129,11 @@ func (h *Handler) handleImportURL(w http.ResponseWriter, r *http.Request) {
 
 	succeeded, failed := 0, 0
 	for i, u := range urls {
+		// Stop early when the client disconnects so we don't keep firing
+		// HTTP requests at origins for events nobody will read.
+		if r.Context().Err() != nil {
+			return
+		}
 		if h.fetchOneSSE(r.Context(), emit, i, u, destAbs, rel) {
 			succeeded++
 		} else {

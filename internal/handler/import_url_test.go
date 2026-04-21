@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -276,6 +278,42 @@ func TestImportURL_SSE_AudioSkipsThumbPool(t *testing.T) {
 	thumbPath := filepath.Join(root, ".thumb", "song.mp3.jpg")
 	if _, err := os.Stat(thumbPath); !os.IsNotExist(err) {
 		t.Errorf("audio should not generate thumbnail, got err = %v", err)
+	}
+}
+
+func TestImportURL_SSE_ClientCancelled_StopsBatch(t *testing.T) {
+	// Origin counts hits so we can confirm the loop never reaches URLs after
+	// the client disconnects.
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Content-Length", strconv.Itoa(len(jpegBody)))
+		w.WriteHeader(http.StatusOK)
+		w.Write(jpegBody)
+	}))
+	defer srv.Close()
+
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, root, root)
+
+	// Pre-cancelled context simulates a client that gave up before the handler
+	// dispatched the first fetch.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	body, _ := json.Marshal(map[string]any{
+		"urls": []string{srv.URL + "/a.jpg", srv.URL + "/b.jpg", srv.URL + "/c.jpg"},
+	})
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost,
+		"/api/import-url?path=/", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rw := httptest.NewRecorder()
+	mux.ServeHTTP(rw, req)
+
+	if got := hits.Load(); got != 0 {
+		t.Errorf("origin received %d requests, want 0 (handler should have aborted on cancelled ctx)", got)
 	}
 }
 
