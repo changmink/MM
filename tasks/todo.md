@@ -34,15 +34,23 @@
 - [x] T-F4: app.js — createFolder(), deleteFolder(), buildTable() 분기 수정
 
 ## Phase 7 — 동영상 섬네일
-- [ ] VT-1: media.IsVideo() 헬퍼 추가 + 테스트
-- [ ] VT-2: thumb.GenerateFromVideo() + IsBlankFrame() 구현
-- [ ] VT-3: placeholder.jpg embed (placeholder.go + placeholder.jpg)
-- [ ] VT-4: handleThumb 동영상 분기 + placeholder fallback
-- [ ] VT-5: browse.go — 동영상 thumb_available 포함
-- [ ] VT-6: 테스트 (thumb_test, handler/thumb_test, browse_test)
+- [x] VT-1: media.IsVideo() 헬퍼 추가 + 테스트
+- [x] VT-2: thumb.GenerateFromVideo() + IsBlankFrame() 구현
+- [x] VT-3: placeholder.jpg embed (placeholder.go + placeholder.jpg)
+- [x] VT-4: handleThumb 동영상 분기 + placeholder fallback
+- [x] VT-5: browse.go — 동영상 thumb_available 포함
+- [x] VT-6: 테스트 (thumb_test, handler/thumb_test, browse_test)
 
 ## Phase 8 — 동영상 길이 표시 (`feature/video-duration`)
-- [ ] VD-1: thumb 패키지 — ProbeDuration export + Read/Write/PathSidecar 추가, GenerateFromVideo가 사이드카 작성하도록 수정 + 테스트
-- [ ] VD-2: browse handler — entry에 `duration_sec *float64` 추가, 사이드카 read + 기존 썸 백필 로직, 테스트
-- [ ] VD-3: frontend — `formatDuration` 헬퍼, `buildVideoGrid`에 `.duration-badge` 렌더링, CSS 추가
-- [ ] VD-4: E2E 수동 검증 (신규 / 기존 마이그레이션 / placeholder / 모바일 뷰)
+- [x] VD-1: thumb 패키지 — ProbeDuration export + Read/Write/PathSidecar 추가, GenerateFromVideo가 사이드카 작성하도록 수정 + 테스트
+- [x] VD-2: browse handler — entry에 `duration_sec *float64` 추가, 사이드카 read + 기존 썸 백필 로직, 테스트
+- [x] VD-3: frontend — `formatDuration` 헬퍼, `buildVideoGrid`에 `.duration-badge` 렌더링, CSS 추가
+- [x] VD-4: E2E 수동 검증 (신규 / 기존 마이그레이션 / placeholder / 모바일 뷰)
+
+## Phase 8.1 — 리뷰 후속 (review hardening)
+- [x] R-1: WriteDurationSidecar atomic write (temp+rename) + NaN/Inf/<=0 검증
+- [x] R-2: ReadDurationSidecar에서 poisoned 값(NaN/Inf/<=0) 거부
+- [x] R-3: ffprobe 5초 타임아웃 (exec.CommandContext)
+- [x] R-4: thumb.LookupDuration / thumb.BackfillDuration 분리 — handler 디커플링
+- [x] R-5: browse handler per-request backfill budget (probe ≤1 회)
+- [x] R-6: SPEC §5.1 entry 예시에 `mime` 필드 추가

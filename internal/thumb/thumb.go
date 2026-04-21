@@ -1,20 +1,25 @@
 package thumb
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"image/gif"
 	"image/jpeg"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/disintegration/imaging"
 )
+
+const probeTimeout = 5 * time.Second
 
 const (
 	thumbWidth  = 200
@@ -100,14 +105,39 @@ func DurationSidecarPath(thumbPath string) string {
 	return thumbPath + ".dur"
 }
 
-// WriteDurationSidecar writes sec to the sidecar file next to thumbPath.
+// WriteDurationSidecar atomically writes sec to the sidecar file next to
+// thumbPath. Rejects non-finite or non-positive values to avoid poisoning
+// the cache with garbage that would deserialize as NaN/Inf.
 func WriteDurationSidecar(thumbPath string, sec float64) error {
+	if !isValidDuration(sec) {
+		return fmt.Errorf("invalid duration: %v", sec)
+	}
+	dst := DurationSidecarPath(thumbPath)
+	tmp, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
 	data := []byte(strconv.FormatFloat(sec, 'f', 3, 64))
-	return os.WriteFile(DurationSidecarPath(thumbPath), data, 0644)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, dst); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return nil
 }
 
 // ReadDurationSidecar reads the duration sidecar next to thumbPath.
-// Returns (0, false) if the sidecar is missing or its contents cannot be parsed.
+// Returns (0, false) if the sidecar is missing, malformed, or contains a
+// non-finite or non-positive value (a corrupted half-write or stray "NaN").
 func ReadDurationSidecar(thumbPath string) (float64, bool) {
 	data, err := os.ReadFile(DurationSidecarPath(thumbPath))
 	if err != nil {
@@ -117,7 +147,37 @@ func ReadDurationSidecar(thumbPath string) (float64, bool) {
 	if err != nil {
 		return 0, false
 	}
+	if !isValidDuration(sec) {
+		return 0, false
+	}
 	return sec, true
+}
+
+// LookupDuration returns the cached duration if a sidecar exists.
+// Returns nil for any failure; never probes or writes.
+func LookupDuration(thumbPath string) *float64 {
+	sec, ok := ReadDurationSidecar(thumbPath)
+	if !ok {
+		return nil
+	}
+	return &sec
+}
+
+// BackfillDuration probes videoPath, writes the duration sidecar next to
+// thumbPath, and returns the duration. Returns nil on probe failure or
+// invalid duration. Used to migrate thumbnails generated before duration
+// caching was added.
+func BackfillDuration(thumbPath, videoPath string) *float64 {
+	sec, err := ProbeDuration(videoPath)
+	if err != nil || !isValidDuration(sec) {
+		return nil
+	}
+	_ = WriteDurationSidecar(thumbPath, sec)
+	return &sec
+}
+
+func isValidDuration(sec float64) bool {
+	return !math.IsNaN(sec) && !math.IsInf(sec, 0) && sec > 0
 }
 
 // IsBlankFrame returns true if every pixel in img has R+G+B < 10 (near-black)
@@ -138,7 +198,9 @@ func IsBlankFrame(img image.Image) bool {
 }
 
 func videoDuration(src string) (float64, error) {
-	out, err := exec.Command("ffprobe",
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ffprobe",
 		"-v", "quiet",
 		"-show_entries", "format=duration",
 		"-of", "csv=p=0",

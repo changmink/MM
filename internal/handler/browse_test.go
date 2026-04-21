@@ -200,3 +200,50 @@ func TestBrowse(t *testing.T) {
 		}
 	})
 }
+
+func TestLookupVideoDurationBudget(t *testing.T) {
+	dir := t.TempDir()
+	thumbDir := filepath.Join(dir, ".thumb")
+	os.MkdirAll(thumbDir, 0755)
+
+	cachedThumb := filepath.Join(thumbDir, "cached.mp4.jpg")
+	os.WriteFile(cachedThumb, []byte("fake-thumb"), 0644)
+	if err := thumb.WriteDurationSidecar(cachedThumb, 60.0); err != nil {
+		t.Fatal(err)
+	}
+
+	uncachedThumb := filepath.Join(thumbDir, "uncached.mp4.jpg")
+	os.WriteFile(uncachedThumb, []byte("fake-thumb"), 0644)
+	uncachedSrc := filepath.Join(dir, "uncached.mp4")
+	os.WriteFile(uncachedSrc, []byte("not a real video"), 0644)
+
+	t.Run("cache hit does not consume budget", func(t *testing.T) {
+		budget := 0
+		got := lookupVideoDuration(cachedThumb, filepath.Join(dir, "cached.mp4"), &budget)
+		if got == nil || *got != 60.0 {
+			t.Errorf("expected cached duration 60.0, got %v", got)
+		}
+		if budget != 0 {
+			t.Errorf("budget = %d, want 0 (cache hit must not decrement)", budget)
+		}
+	})
+
+	t.Run("zero budget skips backfill", func(t *testing.T) {
+		budget := 0
+		got := lookupVideoDuration(uncachedThumb, uncachedSrc, &budget)
+		if got != nil {
+			t.Errorf("expected nil with zero budget, got %v", *got)
+		}
+		if _, err := os.Stat(thumb.DurationSidecarPath(uncachedThumb)); err == nil {
+			t.Error("sidecar should not be written when budget is zero")
+		}
+	})
+
+	t.Run("backfill attempt decrements budget even on failure", func(t *testing.T) {
+		budget := 1
+		_ = lookupVideoDuration(uncachedThumb, uncachedSrc, &budget)
+		if budget != 0 {
+			t.Errorf("budget = %d, want 0 (probe attempt must decrement)", budget)
+		}
+	})
+}

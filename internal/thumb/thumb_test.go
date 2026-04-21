@@ -196,6 +196,135 @@ func TestReadDurationSidecarMalformed(t *testing.T) {
 	}
 }
 
+func TestWriteDurationSidecarRejectsInvalid(t *testing.T) {
+	dir := t.TempDir()
+	thumbPath := filepath.Join(dir, "clip.mp4.jpg")
+
+	cases := []struct {
+		name string
+		sec  float64
+	}{
+		{"NaN", math.NaN()},
+		{"+Inf", math.Inf(1)},
+		{"-Inf", math.Inf(-1)},
+		{"zero", 0},
+		{"negative", -1.5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := WriteDurationSidecar(thumbPath, tc.sec); err == nil {
+				t.Errorf("WriteDurationSidecar(%v) returned nil error, want error", tc.sec)
+			}
+			if _, err := os.Stat(DurationSidecarPath(thumbPath)); err == nil {
+				t.Errorf("sidecar file should not exist after rejected write of %v", tc.sec)
+				os.Remove(DurationSidecarPath(thumbPath))
+			}
+		})
+	}
+}
+
+func TestReadDurationSidecarRejectsPoisoned(t *testing.T) {
+	dir := t.TempDir()
+	thumbPath := filepath.Join(dir, "bad.mp4.jpg")
+
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{"NaN", "NaN"},
+		{"+Inf", "+Inf"},
+		{"-Inf", "-Inf"},
+		{"zero", "0"},
+		{"negative", "-3.14"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(DurationSidecarPath(thumbPath), []byte(tc.content), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := ReadDurationSidecar(thumbPath); ok {
+				t.Errorf("ReadDurationSidecar accepted poisoned value %q", tc.content)
+			}
+		})
+	}
+}
+
+func TestWriteDurationSidecarLeavesNoTempFile(t *testing.T) {
+	dir := t.TempDir()
+	thumbPath := filepath.Join(dir, "clip.mp4.jpg")
+	if err := WriteDurationSidecar(thumbPath, 12.5); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if name != filepath.Base(DurationSidecarPath(thumbPath)) {
+			t.Errorf("unexpected leftover file: %s", name)
+		}
+	}
+}
+
+func TestLookupDuration(t *testing.T) {
+	dir := t.TempDir()
+	thumbPath := filepath.Join(dir, "clip.mp4.jpg")
+
+	if d := LookupDuration(thumbPath); d != nil {
+		t.Errorf("LookupDuration on missing sidecar = %v, want nil", *d)
+	}
+	if err := WriteDurationSidecar(thumbPath, 99.5); err != nil {
+		t.Fatal(err)
+	}
+	d := LookupDuration(thumbPath)
+	if d == nil {
+		t.Fatal("LookupDuration after write returned nil")
+	}
+	if math.Abs(*d-99.5) > 0.001 {
+		t.Errorf("LookupDuration = %v, want 99.5", *d)
+	}
+}
+
+func TestBackfillDuration(t *testing.T) {
+	dir := t.TempDir()
+	src := makeTestMP4(t, dir)
+	thumbPath := filepath.Join(dir, ".thumb", "clip.mp4.jpg")
+	if err := os.MkdirAll(filepath.Dir(thumbPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	d := BackfillDuration(thumbPath, src)
+	if d == nil {
+		t.Fatal("BackfillDuration returned nil")
+	}
+	if math.Abs(*d-4.0) > 0.5 {
+		t.Errorf("BackfillDuration = %v, want ≈4.0", *d)
+	}
+	cached, ok := ReadDurationSidecar(thumbPath)
+	if !ok || math.Abs(cached-*d) > 0.001 {
+		t.Errorf("sidecar after backfill = (%v, %v), want %v", cached, ok, *d)
+	}
+}
+
+func TestBackfillDurationProbeFailure(t *testing.T) {
+	requireFFmpeg(t)
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe not found")
+	}
+	dir := t.TempDir()
+	thumbPath := filepath.Join(dir, ".thumb", "ghost.mp4.jpg")
+	if err := os.MkdirAll(filepath.Dir(thumbPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if d := BackfillDuration(thumbPath, filepath.Join(dir, "ghost.mp4")); d != nil {
+		t.Errorf("BackfillDuration on missing source = %v, want nil", *d)
+	}
+	if _, err := os.Stat(DurationSidecarPath(thumbPath)); err == nil {
+		t.Error("sidecar should not be written on probe failure")
+	}
+}
+
 func TestGenerateFromVideoWritesSidecar(t *testing.T) {
 	dir := t.TempDir()
 	src := makeTestMP4(t, dir)

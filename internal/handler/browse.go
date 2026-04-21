@@ -51,6 +51,10 @@ func (h *Handler) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cap how many missing-sidecar backfills (each forks ffprobe) we run per
+	// request so a directory of legacy thumbnails can't stall the handler.
+	backfillBudget := 1
+
 	entries := make([]entry, 0, len(infos))
 	for _, info := range infos {
 		name := info.Name()
@@ -83,7 +87,7 @@ func (h *Handler) handleBrowse(w http.ResponseWriter, r *http.Request) {
 			if _, err := os.Stat(thumbPath); err == nil {
 				thumbAvail = true
 				if ft == media.TypeVideo {
-					durSec = readOrBackfillDuration(thumbPath, filepath.Join(abs, name))
+					durSec = lookupVideoDuration(thumbPath, filepath.Join(abs, name), &backfillBudget)
 				}
 			}
 		}
@@ -108,18 +112,18 @@ func (h *Handler) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// readOrBackfillDuration returns the video's duration from the thumbnail
-// sidecar, probing with ffprobe and caching the result when the sidecar is
-// missing but the thumbnail exists. Returns nil on any failure so browse
-// never 5xxs over a metadata read.
-func readOrBackfillDuration(thumbPath, videoPath string) *float64 {
-	if sec, ok := thumb.ReadDurationSidecar(thumbPath); ok {
-		return &sec
+// lookupVideoDuration returns the cached duration sidecar value, or — if the
+// sidecar is missing and the per-request budget allows — performs one
+// ffprobe-backed backfill. Returns nil on any failure so browse never 5xxs
+// over a metadata read. The budget pointer is decremented when a backfill
+// is attempted (regardless of success), bounding ffprobe forks per request.
+func lookupVideoDuration(thumbPath, videoPath string, budget *int) *float64 {
+	if d := thumb.LookupDuration(thumbPath); d != nil {
+		return d
 	}
-	sec, err := thumb.ProbeDuration(videoPath)
-	if err != nil || sec <= 0 {
+	if *budget <= 0 {
 		return nil
 	}
-	_ = thumb.WriteDurationSidecar(thumbPath, sec)
-	return &sec
+	*budget--
+	return thumb.BackfillDuration(thumbPath, videoPath)
 }

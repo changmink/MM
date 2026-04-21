@@ -143,6 +143,7 @@ file_server/
       "name": "film.mp4",
       "path": "/movies/film.mp4",
       "type": "video",
+      "mime": "video/mp4",
       "size": 1234567,
       "mod_time": "2024-01-15T10:30:00Z",
       "is_dir": false,
@@ -153,26 +154,31 @@ file_server/
       "name": "photo.jpg",
       "path": "/movies/photo.jpg",
       "type": "image",
+      "mime": "image/jpeg",
       "size": 204800,
       "mod_time": "2024-01-14T08:00:00Z",
       "is_dir": false,
-      "thumb_available": true
+      "thumb_available": true,
+      "duration_sec": null
     },
     {
       "name": "subfolder",
       "path": "/movies/subfolder",
       "type": "dir",
+      "mime": "",
       "size": 0,
       "mod_time": "2024-01-13T00:00:00Z",
       "is_dir": true,
-      "thumb_available": false
+      "thumb_available": false,
+      "duration_sec": null
     }
   ]
 }
 ```
 - `type`: `"image"` | `"video"` | `"audio"` | `"dir"` | `"other"`
+- `mime`: 확장자 기반 MIME 타입 (디렉토리/미지원 타입은 `""`)
 - `thumb_available`: `.thumb/{name}.jpg` 파일 존재 여부
-- `duration_sec`: 동영상 파일의 재생 시간(초, float). 동영상이 아니거나 ffprobe 실패 시 `null`
+- `duration_sec`: 동영상 파일의 재생 시간(초, float). 동영상이 아니거나 ffprobe 실패/사용 불가 시 `null` (썸네일은 정상 서빙)
 - 에러: `{"error": "message"}` + HTTP 상태 코드
 
 #### POST /api/upload
