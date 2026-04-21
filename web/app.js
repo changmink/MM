@@ -29,6 +29,13 @@ const folderNameInput = document.getElementById('folder-name-input');
 const folderCancelBtn = document.getElementById('folder-cancel-btn');
 const folderConfirmBtn = document.getElementById('folder-confirm-btn');
 const folderError   = document.getElementById('folder-error');
+const urlImportBtn  = document.getElementById('url-import-btn');
+const urlModal      = document.getElementById('url-modal');
+const urlInput      = document.getElementById('url-input');
+const urlError      = document.getElementById('url-error');
+const urlResult     = document.getElementById('url-result');
+const urlCancelBtn  = document.getElementById('url-cancel-btn');
+const urlConfirmBtn = document.getElementById('url-confirm-btn');
 
 // ── Routing ───────────────────────────────────────────────────────────────────
 window.addEventListener('popstate', () => {
@@ -430,6 +437,123 @@ async function submitCreateFolder() {
 function showFolderError(msg) {
   folderError.textContent = msg;
   folderError.classList.remove('hidden');
+}
+
+// ── URL Import ────────────────────────────────────────────────────────────────
+const URL_ERROR_LABELS = {
+  missing_content_length: 'Content-Length 헤더 없음',
+  too_large: '50MB 초과',
+  unsupported_content_type: '이미지 아님',
+  invalid_scheme: '지원하지 않는 스킴',
+  invalid_url: '잘못된 URL',
+  http_error: 'HTTP 응답 에러',
+  connect_timeout: '연결 타임아웃',
+  download_timeout: '다운로드 타임아웃',
+  tls_error: 'TLS 검증 실패',
+  too_many_redirects: '리다이렉트 과다',
+  network_error: '네트워크 오류',
+  write_error: '저장 실패',
+};
+
+let urlSubmitting = false;
+let urlAnySucceeded = false;
+
+urlImportBtn.addEventListener('click', openURLModal);
+urlCancelBtn.addEventListener('click', closeURLModal);
+urlConfirmBtn.addEventListener('click', submitURLImport);
+urlModal.addEventListener('click', e => { if (e.target === urlModal) closeURLModal(); });
+document.addEventListener('keydown', e => {
+  if (urlModal.classList.contains('hidden')) return;
+  if (e.key === 'Escape') closeURLModal();
+});
+
+function openURLModal() {
+  urlInput.value = '';
+  urlError.textContent = '';
+  urlError.classList.add('hidden');
+  urlResult.innerHTML = '';
+  urlResult.classList.add('hidden');
+  urlAnySucceeded = false;
+  urlModal.classList.remove('hidden');
+  urlInput.focus();
+}
+
+function closeURLModal() {
+  urlModal.classList.add('hidden');
+  if (urlAnySucceeded) {
+    urlAnySucceeded = false;
+    browse(currentPath, false);
+  }
+}
+
+async function submitURLImport() {
+  if (urlSubmitting) return;
+  const urls = urlInput.value
+    .split('\n')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  if (urls.length === 0) {
+    showURLError('URL을 한 줄에 하나씩 입력하세요.');
+    return;
+  }
+  if (urls.length > 50) {
+    showURLError('한 번에 최대 50개까지 입력할 수 있습니다.');
+    return;
+  }
+
+  urlError.classList.add('hidden');
+  urlResult.classList.add('hidden');
+  urlResult.innerHTML = '';
+  urlSubmitting = true;
+  urlConfirmBtn.disabled = true;
+  urlConfirmBtn.textContent = '가져오는 중...';
+
+  try {
+    const res = await fetch('/api/import-url?path=' + encodeURIComponent(currentPath), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ urls }),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      showURLError(body || `요청 실패 (${res.status})`);
+      return;
+    }
+    const data = await res.json();
+    const succeeded = data.succeeded || [];
+    const failed = data.failed || [];
+    if (succeeded.length > 0) urlAnySucceeded = true;
+    renderURLResult(succeeded.length, failed);
+  } catch (e) {
+    showURLError('요청 실패: ' + e.message);
+  } finally {
+    urlSubmitting = false;
+    urlConfirmBtn.disabled = false;
+    urlConfirmBtn.textContent = '가져오기';
+  }
+}
+
+function renderURLResult(successCount, failed) {
+  const parts = [];
+  parts.push(`<div class="url-result-summary">성공 ${successCount}개 · 실패 ${failed.length}개</div>`);
+  if (failed.length > 0) {
+    parts.push('<ul class="url-result-failed">');
+    failed.forEach(f => {
+      const label = URL_ERROR_LABELS[f.error] || f.error || '알 수 없는 오류';
+      parts.push(
+        `<li><span class="url-text">${esc(f.url)}</span><span class="url-reason">${esc(label)}</span></li>`
+      );
+    });
+    parts.push('</ul>');
+  }
+  urlResult.innerHTML = parts.join('');
+  urlResult.classList.remove('hidden');
+}
+
+function showURLError(msg) {
+  urlError.textContent = msg;
+  urlError.classList.remove('hidden');
 }
 
 // ── Delete ────────────────────────────────────────────────────────────────────
