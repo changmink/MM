@@ -43,10 +43,10 @@
 - [x] VT-7: thumb.Pool.worker가 media.IsVideo 기반 분기 (업로드/URL-import 경로에서 MP4 async 썸네일 생성) + 업로드 분기 TypeImage||TypeVideo + 삭제 시 .dur 사이드카 정리
 
 ## Phase 8 — 동영상 길이 표시 (`feature/video-duration`)
-- [ ] VD-1: thumb 패키지 — ProbeDuration export + Read/Write/PathSidecar 추가, GenerateFromVideo가 사이드카 작성하도록 수정 + 테스트
-- [ ] VD-2: browse handler — entry에 `duration_sec *float64` 추가, 사이드카 read + 기존 썸 백필 로직, 테스트
-- [ ] VD-3: frontend — `formatDuration` 헬퍼, `buildVideoGrid`에 `.duration-badge` 렌더링, CSS 추가
-- [ ] VD-4: E2E 수동 검증 (신규 / 기존 마이그레이션 / placeholder / 모바일 뷰)
+- [x] VD-1: thumb 패키지 — ProbeDuration export + Read/Write/PathSidecar 추가, GenerateFromVideo가 사이드카 작성하도록 수정 + 테스트 (commit 949e5a5, 8f5c17a)
+- [x] VD-2: browse handler — entry에 `duration_sec *float64` 추가, 사이드카 read + 기존 썸 백필 로직, 테스트 (commit fbf08d4)
+- [x] VD-3: frontend — `formatDuration` 헬퍼, `buildVideoGrid`에 `.duration-badge` 렌더링, CSS 추가 (commit d0e55b8)
+- [x] VD-4: E2E 수동 검증 (신규 / 기존 마이그레이션 / placeholder / 모바일 뷰)
 
 ## Phase 9 — URL Import (`feature/url-image-import`)
 - [x] UI-1: `internal/urlfetch` 패키지 — `Fetch` + `NewClient` (스킴/헤더/사이즈/Content-Type 검증, 임시파일 → atomic rename, `_N` 충돌 회피, warnings) + `fetch_test.go` (httptest mock origin 13개 케이스)
