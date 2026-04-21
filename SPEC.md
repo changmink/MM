@@ -74,37 +74,43 @@
 - [ ] 반응형 레이아웃 (모바일 브라우저 지원)
 - [ ] 폴더 생성 모달 (이름 입력 → 현재 경로에 생성)
 - [ ] 폴더 삭제 확인 모달 (재귀 삭제 경고 문구 포함)
-- [ ] **URL에서 가져오기 모달**: 업로드 버튼 옆 버튼 → textarea(줄바꿈 구분 URL) → "가져오기" → 완료 시 결과 토스트 (성공 N개 / 실패 M개 + 실패 URL 목록)
+- [ ] **URL에서 가져오기 모달**: 업로드 버튼 옆 버튼 → textarea(줄바꿈 구분 URL) → "가져오기" → 각 URL별 실시간 프로그래스 바 표시 (다운로드 중 % / 완료 / 실패 상태) → 전체 완료 시 성공·실패 카운트 요약
 
-### 2.6 URL 기반 이미지 가져오기 (URL Import)
+### 2.6 URL 기반 미디어 가져오기 (URL Import)
 
-이미지 URL을 입력하면 서버가 다운로드와 동시에 디스크에 스트리밍 저장한다. 이번 단계는 **이미지만** 지원하며, 추후 동영상/음악으로 확장 고려.
+미디어 URL을 입력하면 서버가 다운로드와 동시에 디스크에 스트리밍 저장한다. 이미지·동영상·음악 모두 지원.
 
 - [ ] 여러 URL 한 번에 입력 가능 (줄바꿈 구분, 빈 줄/공백 무시)
-- [ ] 동기 batch 처리: 서버가 모든 URL 처리 완료 후 한 번에 응답 (succeeded/failed 분리)
-- [ ] 부분 실패 허용: 성공한 URL만 저장, 실패 URL은 응답의 `failed` 배열에 사유와 함께 반환 (전체 롤백 X)
+- [ ] **실시간 progress 스트리밍**: 서버가 `text/event-stream` (SSE) 응답으로 URL별 진행 이벤트를 순차 전송 → 클라이언트가 URL별 프로그래스 바 업데이트
+- [ ] 순차 batch 처리: 서버는 URL을 순서대로 하나씩 다운로드 (동시성 1), 각 단계를 SSE 이벤트로 내보냄
+- [ ] 부분 실패 허용: 성공한 URL만 저장, 실패 URL은 해당 `error` 이벤트로 사유 전달 (전체 롤백 X)
 - [ ] **저장 위치**: 클라이언트가 보낸 `path` 쿼리 파라미터 경로(현재 browse 경로)
+- [ ] **지원 Content-Type** (응답 헤더 기준):
+  - **Image**: `image/jpeg`, `image/png`, `image/webp`, `image/gif`
+  - **Video**: `video/mp4`, `video/x-matroska`, `video/x-msvideo`, `video/mp2t`
+  - **Audio**: `audio/mpeg`, `audio/flac`, `audio/aac`, `audio/ogg`, `audio/wav`, `audio/mp4`
 - [ ] **파일명 결정**:
-  1. URL 마지막 경로 세그먼트 추출 (예: `https://x.com/a/foo.jpg` → `foo.jpg`)
-  2. URL에 확장자 없거나 비표준이면 응답 `Content-Type` 헤더에서 결정 (`image/jpeg` → `.jpg`, `image/png` → `.png`, `image/webp` → `.webp`, `image/gif` → `.gif`)
+  1. URL 마지막 경로 세그먼트 추출 (예: `https://x.com/a/foo.mp4` → `foo.mp4`)
+  2. URL에 확장자 없거나 비표준이면 응답 `Content-Type` 헤더에서 결정 (`image/jpeg` → `.jpg`, `video/mp4` → `.mp4`, `audio/mpeg` → `.mp3`, `video/x-matroska` → `.mkv`, `audio/mp4` → `.m4a`, …)
   3. URL 확장자와 `Content-Type`이 충돌하면 **`Content-Type` 우선** (확장자를 응답 기준으로 교체)
-  4. 파일명 sanitize: `/`, `\`, `..`, 컨트롤 문자 제거. 빈 이름 → `image` + 확장자
-  5. **충돌 시 자동 리네임**: `foo.jpg` 존재 → `foo_1.jpg`, `foo_2.jpg` ... (기존 `handleUpload`의 `createUniqueFile` 패턴 재사용; race로 재시도 시 매번 다시 검사). 충돌 발생 시 응답 `warnings`에 `"renamed"` 추가
+  4. 파일명 sanitize: `/`, `\`, `..`, 컨트롤 문자 제거. 빈 이름 → 타입별 기본값 (`image`/`video`/`audio`) + 확장자
+  5. **충돌 시 자동 리네임**: `foo.mp4` 존재 → `foo_1.mp4`, `foo_2.mp4` ... (기존 `createUniqueFile` 패턴 재사용). 충돌 시 `warnings`에 `"renamed"` 추가
 - [ ] **다운로드 흐름**:
   1. URL 스킴 검증: `http`/`https`만 허용 (`file:`, `data:`, `javascript:` 등 거부)
-  2. HTTP는 허용하되 응답 `warnings`에 `"insecure_http"` 추가 (다운로드는 진행)
+  2. HTTP는 허용하되 `warnings`에 `"insecure_http"` 추가 (다운로드는 진행)
   3. HTTPS는 표준 TLS 인증서 검증 (자체서명 거부)
   4. 리다이렉트 최대 5회 추적 (스킴은 매 hop마다 재검증)
   5. 요청 시 `Authorization` 등 인증 헤더 자동 첨부 안 함
   6. 응답 헤더 검증:
-     - `Content-Type`이 `image/*` 아니면 거부 (`error: "unsupported_content_type"`)
+     - `Content-Type`이 위 허용 목록에 없으면 거부 (`error: "unsupported_content_type"`)
      - `Content-Length` 헤더 **없으면 거부** (`error: "missing_content_length"`)
-     - `Content-Length` > 50MB이면 다운로드 시작 전 거부 (`error: "too_large"`)
-  7. 임시 파일에 스트리밍 저장 (다운로드와 디스크 쓰기 동시 = "동시에"의 의미)
-  8. 다운로드 중 누적 바이트가 50MB 초과하면 즉시 중단 + 임시 파일 삭제 (`error: "too_large"`)
+     - `Content-Length` > **2 GiB** (2 × 1024³ = 2147483648 B)이면 다운로드 시작 전 거부 (`error: "too_large"`)
+  7. 임시 파일에 스트리밍 저장
+  8. 다운로드 중 누적 바이트가 2 GiB 초과하면 즉시 중단 + 임시 파일 삭제 (`error: "too_large"`)
   9. 검증 통과 시 임시 파일 → 최종 경로로 atomic rename
-  10. 기존 업로드 흐름과 동일하게 `.thumb/{name}.jpg` 섬네일 비동기 생성
-- [ ] **타임아웃**: 연결 10초 + 전체 다운로드 60초 (개별 URL 단위)
+  10. 이미지·동영상 성공 시 `.thumb/{name}.jpg` 섬네일 비동기 생성 (음악은 생략)
+- [ ] **진행 이벤트 (SSE)**: URL당 최소 `start` → `done` 또는 `start` → `error`. 큰 파일은 중간에 `progress` 이벤트를 주기적으로 방출 (§5.1.1 참고)
+- [ ] **타임아웃**: 연결 10초 + 전체 다운로드 **10분** (개별 URL 단위). 초과 시 `error: "download_timeout"`
 - [ ] **SSRF 정책**: 약하게 — 사설 IP(127.0.0.1, 10.x, 172.16-31.x, 192.168.x, 169.254.x, ::1, fc00::/7, fe80::/10) 차단 안 함 (LAN 미디어 서버 자기 호출 등 정상 케이스 허용)
 - [ ] **인증/쿠키**: 자동 첨부 절대 안 함 (인증 필요한 URL은 실패 처리)
 
@@ -163,7 +169,7 @@ file_server/
 | DELETE | `/api/file?path=` | 파일 삭제 |
 | POST | `/api/folder?path=` | 폴더 생성 |
 | DELETE | `/api/folder?path=` | 폴더 재귀 삭제 (하위 내용 + `.thumb/` 포함) |
-| POST | `/api/import-url?path=` | URL 목록에서 이미지 다운로드 → 저장 (batch) |
+| POST | `/api/import-url?path=` | URL 목록에서 미디어 다운로드 → 저장 (SSE 진행 스트림) |
 | GET | `/` | 프론트엔드 SPA |
 
 ### 5.1 응답 스키마
@@ -255,53 +261,73 @@ file_server/
 {
   "urls": [
     "https://example.com/cat.jpg",
-    "https://example.com/dog.png"
+    "https://example.com/clip.mp4",
+    "https://example.com/song.mp3"
   ]
 }
 ```
-- 응답 `200 OK` (부분 실패도 200, 개별 결과는 배열로 분리):
-```json
-{
-  "succeeded": [
-    {
-      "url": "https://example.com/cat.jpg",
-      "path": "/photos/cat.jpg",
-      "name": "cat.jpg",
-      "size": 204800,
-      "type": "image",
-      "warnings": []
-    }
-  ],
-  "failed": [
-    {
-      "url": "http://example.com/dog.png",
-      "error": "missing_content_length"
-    }
-  ]
-}
+- **응답**: `200 OK`, `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`
+- SSE 프레임: 각 이벤트는 `data: {JSON}\n\n` 형식. 이벤트 이름은 생략(기본 `message`), JSON의 `phase` 필드로 구분
+- **이벤트 흐름** (URL당):
+  1. `start` — 다운로드 시작 (응답 헤더 검증 통과 직후)
+  2. `progress` — 다운로드 진행 (0개 이상, throttled, §5.1.1)
+  3. `done` 또는 `error` — 종료 (URL당 정확히 1개)
+- 전체 끝에 `summary` 이벤트 1개
+
+**이벤트 스키마**
+
+```jsonc
+// phase: "start"
+{"phase":"start","index":0,"url":"https://example.com/clip.mp4",
+ "name":"clip.mp4","total":524288000,"type":"video"}
+
+// phase: "progress"
+{"phase":"progress","index":0,"received":67108864}
+
+// phase: "done"
+{"phase":"done","index":0,"url":"https://example.com/clip.mp4",
+ "path":"/movies/clip.mp4","name":"clip.mp4","size":524288000,
+ "type":"video","warnings":[]}
+
+// phase: "error"
+{"phase":"error","index":1,"url":"http://example.com/x.html",
+ "error":"unsupported_content_type"}
+
+// phase: "summary"
+{"phase":"summary","succeeded":2,"failed":1}
 ```
+
+- `index`는 요청 `urls` 배열의 0-based 인덱스
+- `total`은 `Content-Length` 값(바이트). 알 수 없으면 생략
+- `type` ∈ `"image" | "video" | "audio"`
 - `warnings` 가능 값:
   - `"insecure_http"` — HTTP(비암호화) URL 사용
-  - `"renamed"` — 파일명 충돌로 자동 리네임 발생 (최종명은 `name`/`path`에 반영)
+  - `"renamed"` — 파일명 충돌로 자동 리네임 (최종명은 `name`/`path` 반영)
   - `"extension_replaced"` — URL 확장자와 `Content-Type` 불일치로 확장자 교체
 - `error` 가능 값:
   - `"invalid_scheme"` — `http`/`https` 외 스킴
   - `"invalid_url"` — URL 파싱 실패
   - `"connect_timeout"` — 연결 10초 초과
-  - `"download_timeout"` — 전체 60초 초과
+  - `"download_timeout"` — 전체 10분 초과
   - `"too_many_redirects"` — 5회 초과
   - `"tls_error"` — TLS 인증서 검증 실패
   - `"http_error"` — 4xx/5xx 응답
-  - `"unsupported_content_type"` — `image/*` 아님
+  - `"unsupported_content_type"` — 허용 Content-Type 목록 밖
   - `"missing_content_length"` — `Content-Length` 헤더 없음
-  - `"too_large"` — 50MB 초과
+  - `"too_large"` — 2 GiB 초과
   - `"network_error"` — 기타 네트워크 실패
   - `"write_error"` — 디스크 저장 실패
-- 4xx 케이스 (요청 자체 거부):
+- 4xx 케이스 (요청 자체 거부 — SSE 스트림 시작 전 일반 JSON 에러 응답):
   - `400 {"error": "invalid path"}` — path traversal
   - `400 {"error": "no urls"}` — 빈 배열
   - `400 {"error": "too many urls"}` — 한 번에 50개 초과
   - `404 {"error": "path not found"}` — 저장 디렉토리 미존재
+
+##### 5.1.1 Progress 이벤트 throttling
+- `progress` 이벤트는 **수신 바이트 1 MiB마다** 또는 **250 ms마다** 중 먼저 도달하는 시점에 방출 (양쪽 모두 ticker/카운터 기반)
+- 동일 값으로 `received`가 변하지 않으면 방출 생략 (중복 제거)
+- 파일이 작아 `progress` 없이 `start` → `done` 바로 가는 케이스 허용
+- 최종 바이트 수는 항상 `done` 이벤트 `size` 필드로 전달 (`progress`의 마지막 값은 신뢰하지 말 것)
 
 #### GET /api/thumb
 - 성공: `200 OK`, `Content-Type: image/jpeg`
@@ -395,24 +421,30 @@ volumes:
 - 단위 테스트 (동영상 섬네일): `thumb.IsBlankFrame` 함수 — 전체 흑/백 판정 로직
 - 단위 테스트 (duration): 사이드카 read/write round-trip, `formatDuration` JS 함수 (`4:32`, `1:02:09`, 0/null 케이스)
 - 단위 테스트 (URL import):
-  - 파일명 추출/sanitize (확장자 있음/없음, `..`/컨트롤 문자, 빈 이름)
-  - 확장자 결정 (URL 우선 → Content-Type 폴백 → 충돌 시 Content-Type 우선)
-  - 충돌 자동 리네임 (`foo.jpg` → `foo (1).jpg`, race 시 재시도)
+  - 파일명 추출/sanitize (확장자 있음/없음, `..`/컨트롤 문자, 빈 이름 — image/video/audio 기본값 각각)
+  - 확장자 결정 (URL 우선 → Content-Type 폴백 → 충돌 시 Content-Type 우선, video/audio 확장자 포함)
+  - 충돌 자동 리네임 (`foo.mp4` → `foo_1.mp4`, race 시 재시도)
   - URL 스킴 검증 (`http`/`https`만 통과)
+  - Content-Type 허용 목록 검증 (image/video/audio 세 카테고리 각 포맷 + 거부 케이스)
+  - 2 GiB 초과 Content-Length 사전 거부
+  - Progress counter throttling 로직 (1 MiB/250ms 경계, 중복 제거)
 - 통합 테스트: HTTP 핸들러 (`net/http/httptest` 사용)
 - 통합 테스트 (동영상 섬네일): ffmpeg 없는 환경에서 placeholder 반환 확인
 - 통합 테스트 (duration): browse 응답에 동영상 entry의 `duration_sec` 포함 확인 (사이드카 있을 때 / 없을 때)
-- 통합 테스트 (URL import): `httptest.Server`로 모의 origin 띄워서 검증
-  - 정상 이미지 다운로드 → 파일 저장 + 응답에 `succeeded` 포함
-  - `Content-Length` 누락 → `missing_content_length` 실패
-  - 51MB 응답 → `too_large` 실패 + 임시 파일 정리 확인
-  - `Content-Type: text/html` → `unsupported_content_type` 실패
-  - HTTP URL → 성공 + `warnings: ["insecure_http"]`
-  - URL 확장자(`.jpg`)와 Content-Type(`image/png`) 불일치 → `.png`로 저장 + `warnings: ["extension_replaced"]`
-  - 부분 실패: 3개 URL 중 일부 실패 → `succeeded` + `failed` 양쪽 채워짐
-  - 리다이렉트 6회 → `too_many_redirects`
+- 통합 테스트 (URL import): `httptest.Server`로 모의 origin 띄워서 검증 (SSE 응답 파싱)
+  - 정상 이미지 다운로드 → `start` → `done` 이벤트, 파일 저장 확인
+  - 정상 MP4 동영상 다운로드 → `type: "video"` 반환 + `.thumb/` 생성
+  - 정상 MP3 음악 다운로드 → `type: "audio"` 반환 + 섬네일 생성 안 함
+  - `Content-Length` 누락 → `error: "missing_content_length"` 이벤트
+  - 2 GiB + 1 응답 → `error: "too_large"` + 임시 파일 정리 확인
+  - `Content-Type: text/html` → `error: "unsupported_content_type"` 이벤트
+  - HTTP URL → `done` + `warnings: ["insecure_http"]`
+  - URL 확장자와 Content-Type 불일치 → 확장자 교체 + `warnings: ["extension_replaced"]`
+  - 부분 실패: 3개 URL 혼합 → 각 URL당 `done`/`error` 1개씩 + `summary` 1개
+  - 리다이렉트 6회 → `error: "too_many_redirects"`
+  - 큰 파일(>1 MiB) → `progress` 이벤트 ≥1개 포함, 각 이벤트의 `received` 단조 증가
 - 수동 테스트: 브라우저에서 업로드→섬네일→스트리밍 전체 흐름 확인 (썸네일 우하단 시간 오버레이 확인)
-- 수동 테스트 (URL import): 모달에서 URL 여러 개 입력 → 결과 토스트 확인 (성공/실패 카운트)
+- 수동 테스트 (URL import): 모달에서 URL 여러 개(이미지/동영상/음악 섞어) 입력 → URL별 프로그래스 바 실시간 진행 확인 → 완료 후 성공/실패 카운트 요약 확인
 
 ---
 
@@ -422,10 +454,10 @@ volumes:
 - Range 요청 지원 (스트리밍 seek 필수)
 - 업로드 파일은 `/data` 볼륨 내부에만 저장 (path traversal 방지)
 - 섬네일은 비동기로 생성 (업로드 응답 차단 안 함)
-- URL import: HTTPS TLS 인증서 검증, `Content-Length` 사전 검증, 다운로드 누적 50MB 캡, `Content-Type: image/*` 검증, 임시 파일 → atomic rename, 파일명 sanitize
+- URL import: HTTPS TLS 인증서 검증, `Content-Length` 사전 검증, 다운로드 누적 2 GiB 캡, Content-Type 허용 목록(image/video/audio) 검증, 임시 파일 → atomic rename, 파일명 sanitize, SSE `Cache-Control: no-cache` 및 즉시 Flush
 
 **하지 않을 것 (Never)**
 - TS 이외 포맷 트랜스코딩 (MP4/MKV/AVI는 원본 그대로 스트리밍)
 - 사용자 인증/권한 관리
 - 외부 CDN이나 클라우드 스토리지 연동
-- URL import: `Authorization`/쿠키 등 인증 헤더 자동 첨부, `http`/`https` 외 스킴 허용, 50MB 초과 다운로드, 비이미지 응답 저장, `Content-Length` 없는 응답 저장
+- URL import: `Authorization`/쿠키 등 인증 헤더 자동 첨부, `http`/`https` 외 스킴 허용, 2 GiB 초과 다운로드, 허용 목록 밖 Content-Type 저장, `Content-Length` 없는 응답 저장, 동시 다운로드(batch는 순차 처리)

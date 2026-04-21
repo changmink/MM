@@ -1004,3 +1004,277 @@ const urlConfirmBtn = document.getElementById('url-confirm-btn');
 - **위험: thumbPool 큐 가득** — 기존 동작 그대로 → `handleThumb` lazy 생성 fallback. 회귀 없음.
 - **위험: 외부 호출로 인한 응답 지연** — sequential 50개 = 최대 50분. 개인용 + UI 모달이라 사용자가 의도적으로 50개 동시 입력은 드물 것. 필요 시 semaphore(4) 도입.
 - **롤백:** Phase 9의 commit revert. `internal/urlfetch/` 디렉토리 삭제, handler.go 라우트/필드 제거, web/index.html·style.css·app.js의 url-modal 블록 제거. 기존 동작 영향 없음 (순수 추가 기능).
+
+---
+
+## Phase 10 — URL Import 확장: 동영상/음악 + SSE 프로그래스 (`feature/url-image-import` 연장)
+
+### 배경
+SPEC §2.6 / §5.1 개정. 기존 이미지 전용 URL import를:
+- Content-Type 허용 목록 확장 (video/* 4종 + audio/* 6종)
+- 크기 캡 50MB → **2 GiB**
+- 총 타임아웃 60s → **10분**
+- 응답을 JSON batch → **SSE 스트림** (URL별 `start`/`progress`/`done`/`error` + 마지막 `summary`)
+- UI는 URL별 프로그래스 바 실시간 업데이트
+
+Phase 9 구현 파일을 in-place 수정. 브랜치 유지 (`feature/url-image-import`), 기존 엔드포인트 API 계약 변경 (아직 main 머지 전이라 호환 불필요).
+
+### 결정 사항 (SPEC과 정렬)
+- **순차 batch 유지**: SSE 스트리밍으로 진행 가시성이 생기므로 동시성 병렬화 불필요. 단순성 우지.
+- **progress throttle**: 1 MiB 누적 또는 250 ms 경과 시점 먼저 도달한 쪽에서 방출. 동일 `received` 중복 제거.
+- **빈 파일명 fallback**: 타입별 기본값 (`image`/`video`/`audio`) + 확장자.
+- **썸네일**: 이미지·동영상만 `thumbPool.Submit`, 음악은 skip.
+- **SSE 4xx 처리**: 요청 자체가 거부되면 SSE 시작 전 일반 JSON 에러 응답 (400/404/405). 스트림 시작 후 문제는 `error` 이벤트로만 전달.
+
+### 의존성 그래프
+
+```
+URL-V1 (urlfetch 확장: Content-Type allowlist + 2 GiB + 10분 + progress 콜백)
+  └── URL-V2 (handler: SSE 스트리밍 응답)
+       └── URL-V3 (frontend: SSE 소비 + URL별 프로그래스 바)
+            └── URL-V4 (E2E 수동 검증)
+```
+
+URL-V1 → URL-V2 → URL-V3 순차. 각 단계에서 commit.
+체크포인트: URL-V2 완료 시 `curl -N`으로 SSE 이벤트 raw 확인 → 통과해야 URL-V3 진행.
+
+---
+
+### URL-V1: `urlfetch` 확장 — 미디어 타입 + 용량/시간 + progress
+
+**파일:** `internal/urlfetch/fetch.go`, `internal/urlfetch/fetch_test.go`
+
+**변경 — constants:**
+- `MaxBytes`: `50 << 20` → `2 << 30` (2 GiB = `2147483648`)
+- `TotalTimeout`: `60 * time.Second` → `10 * time.Minute`
+- `DialTimeout`: 10s 유지
+
+**변경 — Content-Type 맵 (`contentTypeToExt`):**
+```go
+var contentTypeToExt = map[string]string{
+    "image/jpeg":        ".jpg",
+    "image/png":         ".png",
+    "image/webp":        ".webp",
+    "image/gif":         ".gif",
+    "video/mp4":         ".mp4",
+    "video/x-matroska":  ".mkv",
+    "video/x-msvideo":   ".avi",
+    "video/mp2t":        ".ts",
+    "audio/mpeg":        ".mp3",
+    "audio/flac":        ".flac",
+    "audio/aac":         ".aac",
+    "audio/ogg":         ".ogg",
+    "audio/wav":         ".wav",
+    "audio/mp4":         ".m4a",
+}
+```
+
+**변경 — `Result.Type` 도출:** `media.DetectType(finalName)` 호출로 `"image"/"video"/"audio"` 자동 결정 (하드코딩 `"image"` 제거).
+
+**변경 — 빈 파일명 fallback:**
+```go
+defaultBase := map[string]string{
+    "image/": "image", "video/": "video", "audio/": "audio",
+}
+// sanitized가 비었으면 defaultBase[prefix] 사용
+```
+
+**신규 — progress 콜백 시그니처:**
+```go
+type ProgressFunc func(received int64)
+
+// Fetch 시그니처 확장 (progress는 nil 허용)
+func Fetch(ctx context.Context, client *http.Client,
+           rawURL, destDir, relDir string,
+           progress ProgressFunc) (*Result, *FetchError)
+```
+
+**구현 — throttled progress wrapper (internal):**
+- `io.Copy` 중 주기적으로 progress 보고
+- 방식: `progressReader`를 `tmpFile`과 `resp.Body` 사이에 끼우고, 내부에서 카운터 + 마지막 방출 시각/바이트 기록
+- 트리거: `received - lastEmitted >= 1 MiB` OR `time.Since(lastEmittedAt) >= 250 ms`
+- 동일 값이면 방출 안 함
+- `progress == nil`이면 일반 `io.Copy` 경로 (오버헤드 0)
+
+**테스트 추가 (`fetch_test.go`):**
+- `TestFetch_OK_MP4` — `video/mp4` 응답 → `type: "video"` + `.mp4` 저장
+- `TestFetch_OK_MP3` — `audio/mpeg` 응답 → `type: "audio"` + `.mp3` 저장
+- `TestFetch_OK_MKV` — `video/x-matroska` + URL `.mp4` → 확장자 교체 `.mkv` + `extension_replaced`
+- `TestFetch_DefaultName_Video` — URL `?id=x` + `video/mp4` → 저장명 `video.mp4`
+- `TestFetch_DefaultName_Audio` — URL `?id=x` + `audio/mpeg` → 저장명 `audio.mp3`
+- `TestFetch_ContentLengthTooLarge_2GiB` — Header = 2GiB+1 → `too_large`
+- `TestFetch_ContentLengthOk_2GiB` — Header = 2GiB 정확히 → 통과 (스트림 테스트는 skip — 실데이터 2GiB는 unit test 부적합; 스트림 초과는 작은 값으로 대체)
+- `TestFetch_Progress_Emitted_ForLargePayload` — 3 MiB 페이로드 + progress 콜백 → callback ≥ 1회 호출, `received` 단조 증가, 마지막 `received <= Result.Size`
+- `TestFetch_Progress_NotEmitted_ForSmallPayload` — 10 KiB + 250ms 완료 → callback 0~1회만
+- `TestFetch_Progress_NilCallback_OK` — callback nil → 에러 없음, 결과 정상
+
+**기존 테스트 호환성:**
+- `TestFetch_ContentLengthTooLarge` 등 50MB 경계 기반 케이스는 2 GiB 기준으로 숫자만 수정 (또는 작은 경계값으로 재구성: mock server에서 `Content-Length: 3145728` 선언 + 실제 4 MiB 스트림 → `too_large`, MaxBytes를 테스트 hook으로 덮지 않고 실제 상수 사용이면 너무 큼 — **결정: 테스트 전용 상수 override는 피하고, `too_large` 케이스는 header 값만 선언(`Content-Length: 3221225473`)해서 body 미전송 + 사전 거부로 검증**)
+- `TestFetch_NonImageContentType` → `TestFetch_UnsupportedContentType` 으로 이름 변경, `text/html` 그대로 유지
+
+**완료 기준:**
+- `go test ./internal/urlfetch/... -v` 전체 PASS (기존 + 신규)
+- `go build ./...` 성공
+- `Fetch` 시그니처 변경에 따른 `handler/import_url.go` 호출부 1군데 수정 (progress nil 전달하면 기존 동작 유지 — URL-V2에서 덮어씀)
+
+---
+
+### URL-V2: `handleImportURL` — SSE 스트리밍 응답
+
+**파일:** `internal/handler/import_url.go`, `internal/handler/import_url_test.go`
+
+**응답 전환:**
+- `Content-Type: text/event-stream`
+- `Cache-Control: no-cache`
+- `X-Accel-Buffering: no` (reverse proxy buffering 방지)
+- 각 이벤트: `data: {json}\n\n`, 이벤트 이름 생략
+- `http.Flusher` 캐스팅 후 매 이벤트 후 `Flush()` 호출
+
+**흐름:**
+1. 기존 4xx 분기(path/body/empty/too-many)는 그대로 JSON `{"error":"..."}` + 상태코드 반환 (SSE 시작 전)
+2. 검증 통과 후 SSE 헤더 기록 + Flush (응답 시작 표시)
+3. 각 URL 순차:
+   - `start` 이벤트 — 이 URL의 기초 정보. 다만 `total`/`type`은 `Fetch` 호출 후에야 알 수 있음 → 두 가지 옵션:
+     a. `start`를 `Fetch` 직전에 `{phase:"start", index, url}`만 방출, 진행 중 `progress` 방출, `done`에서 최종 정보 전달
+     b. `start`를 Content-Length 검증 통과 후 `urlfetch`가 콜백으로 알려줌 → 더 풍부한 `start` 가능
+   - **선택: 옵션 b**. `urlfetch.Fetch`에 `StartFunc func(total int64, mediaType string)` 콜백 추가 (nil 허용). progress와 별개.
+4. `progress` 이벤트 — URL-V1의 progress 콜백에서 `{phase:"progress", index, received}` 방출
+5. `done` 이벤트 — `Fetch` 성공 시 Result를 phase=done으로 직렬화. 이어서 `thumbPool.Submit` (이미지/동영상만)
+6. `error` 이벤트 — `FetchError` 시 `{phase:"error", index, url, error}` 방출
+7. 전체 루프 끝 후 `summary` 이벤트 방출
+
+**새로운 urlfetch API (V1이 시그니처 바꿨으므로 확정):**
+```go
+type Callbacks struct {
+    Start    func(total int64, mediaType string)
+    Progress func(received int64)
+}
+func Fetch(ctx, client, rawURL, destDir, relDir string, cb *Callbacks) (*Result, *FetchError)
+```
+→ URL-V1에서 `ProgressFunc`만 추가했지만 V2 설계와 정합을 위해 **URL-V1 단계에서 `*Callbacks` 구조체로 확정**. V1 테스트도 이 API로 작성.
+
+**취소 처리:**
+- 클라이언트 disconnect → `r.Context()` 취소 → 현재 `Fetch`의 `ctx` 취소 → `io.Copy` 중단 → `error` 이벤트 방출 시도 실패는 무시하고 함수 종료
+
+**테스트 (`import_url_test.go`):**
+- `parseSSEEvents(body string) []map[string]any` 헬퍼 추가
+- `TestImportURL_Single_OK` (기존) → SSE 파싱으로 재작성: `start`/`done`/`summary` 순서 + `done.path` 확인
+- `TestImportURL_Multiple_PartialSuccess` (기존) → SSE 파싱: 3개 URL 각각 이벤트 확인
+- `TestImportURL_Video_OK` — video mock origin → `start.type="video"` + `done.type="video"`
+- `TestImportURL_Audio_OK` — audio mock origin → `done.type="audio"` + `.thumb/` **미생성** (음악은 thumb skip)
+- `TestImportURL_Progress_Emitted` — 3 MiB 페이로드 → progress 이벤트 ≥1개 + `received` 단조 증가
+- `TestImportURL_Summary_Last` — 이벤트 순서: 마지막이 `summary`, `succeeded + failed == len(urls)`
+- `TestImportURL_EmptyArray` / `TooMany` / `PathTraversal` / `PathNotFound` / `MethodNotAllowed` / `InvalidBody` — 기존 JSON 에러 경로 유지 (변경 없음)
+
+**완료 기준:**
+- `go test ./internal/handler/... -v` 전체 PASS
+- `curl -N -X POST -H 'Content-Type: application/json' -d '{"urls":["https://example.com/img.jpg"]}' "http://localhost:8080/api/import-url?path=/"` → 이벤트 순차 출력 확인 (`start`/`done`/`summary`)
+
+**체크포인트:** SSE raw 검증 통과 후에만 URL-V3 진행.
+
+---
+
+### URL-V3: 프론트엔드 — SSE 소비 + 프로그래스 바
+
+**파일:** `web/index.html`, `web/style.css`, `web/app.js`
+
+**`index.html` 변경:**
+- 모달 hint 텍스트: "최대 50개, **2GB/파일**"
+- placeholder 예시 갱신: 이미지/동영상/음악 혼합 예
+- 버튼 라벨: "URL에서 이미지 가져오기" → **"URL에서 가져오기"**
+- `#url-result` 내부 구조 변경: 리스트가 아닌 **URL별 진행 행**:
+  ```html
+  <div class="url-row" data-index="0">
+    <div class="url-row-head">
+      <span class="url-row-name" title="{full}">...</span>
+      <span class="url-row-status">대기 중</span>
+    </div>
+    <div class="url-row-bar"><div class="url-row-fill" style="width:0%"></div></div>
+  </div>
+  ```
+
+**`style.css` 신규/수정:**
+- `.url-row` — 행 레이아웃
+- `.url-row-head` — 이름/상태 flex
+- `.url-row-bar` / `.url-row-fill` — 프로그래스 바 (상태별 색: 진행 중 accent, 완료 green, 실패 danger)
+- `.url-row.done .url-row-fill { background: var(--accent-success, #4caf50) }`
+- `.url-row.error .url-row-fill { background: var(--danger) }`
+- `.url-row-status` — 작은 폰트, 상태에 따라 색 변화
+
+**`app.js` 변경:**
+- `submitURLImport` 재작성:
+  ```js
+  const resp = await fetch('/api/import-url?path=...', {method:'POST', ...});
+  if (!resp.ok) { // 4xx JSON error
+    showURLError(await resp.text());
+    return;
+  }
+  // URL별 행 미리 렌더
+  urlResult.innerHTML = urls.map((u, i) => rowHTML(i, u)).join('');
+  urlResult.classList.remove('hidden');
+
+  // SSE 파서
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const {value, done} = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, {stream: true});
+    const frames = buffer.split('\n\n');
+    buffer = frames.pop(); // 미완성 마지막 프레임 보관
+    for (const f of frames) {
+      if (!f.startsWith('data:')) continue;
+      const ev = JSON.parse(f.slice(5).trim());
+      handleEvent(ev);
+    }
+  }
+  ```
+- `handleEvent(ev)`:
+  - `start`: 행의 total 저장, 상태 "다운로드 중", 파일명 표시 (`ev.name`), 총 크기 표시 (`ev.total`)
+  - `progress`: `received/total * 100`% → `url-row-fill.style.width`. total 없으면 indeterminate (CSS animation)
+  - `done`: 100%, `.url-row` 에 `done` 클래스, 상태 "완료 · {size}"
+  - `error`: `.url-row` 에 `error` 클래스, fill 100% + red, 상태 라벨 (기존 한국어 map 재사용 + 신규 코드 없음)
+  - `summary`: 모달 하단에 `성공 N개 · 실패 M개` 배지 표시, 버튼 라벨 원복
+- `closeURLModal`: 기존 로직 유지 (`urlAnySucceeded`면 browse 새로고침)
+- formatSize 헬퍼 활용 (기존 `formatSize` 있음 — app.js line 472)
+
+**검증:**
+- 브라우저에서 이미지 1개 → 행 하나 0→100% 빠르게 완료
+- 대용량 동영상 URL → 0→100% 실시간 증가 (progress 이벤트 반영)
+- 혼합 케이스: 행마다 상태/색상 분기
+- 4xx (빈 URL, 50+개): 인라인 에러만 (SSE 시작 전)
+
+**완료 기준:** 로컬 서버에서 수동 확인 + `?v=4` → `?v=5` 캐시 버스트.
+
+---
+
+### URL-V4: E2E 수동 검증 (체크포인트)
+
+1. `docker compose -p file_server up --build -d` 재빌드
+2. 모달 열기 → 버튼 라벨 "URL에서 가져오기" 확인, hint에 "2GB" 표시
+3. 이미지 URL 1개 → 행 표시 → 완료 → 닫기 → 그리드 반영 + 썸네일 생성
+4. MP4 동영상 URL (수백 MB) → 진행률 실시간 증가 → 완료 → `/data/{name}.mp4` 저장 + `.thumb/` 생성
+5. MP3 음악 URL → 완료 → `.thumb/` **생성 안 됨** 확인
+6. 혼합 배치 (이미지/동영상/음악/실패 1개) → 각 행 개별 상태 + summary 카운트 일치
+7. 2 GiB 초과 Content-Length 선언 URL → `error: too_large` + 행 빨강
+8. 지원 외 Content-Type (text/html) → `error: unsupported_content_type`
+9. 네트워크 타임아웃 (10분 초과 시뮬레이션) — optional: mock용 느린 origin 로컬 실행
+10. 모바일 뷰: 행 레이아웃 깨짐 없음, 프로그래스 바 가독성
+
+---
+
+### Out of scope (이번 단계도 제외)
+- 다운로드 중 취소 버튼 (행별 abort)
+- 병렬 다운로드
+- 재개 (Range resume)
+- duration_sec/동영상 썸네일 품질 검증 (기존 VT Phase에서 담당)
+- SSRF 강방어
+
+---
+
+### 위험 / 롤백
+- **위험: SSE 버퍼링** — nginx 등 프록시에서 `X-Accel-Buffering: no` 무시 시 progress 지연. 현재는 직접 연결이라 문제 없음. 배포 환경 바뀌면 확인.
+- **위험: 2 GiB 파일 장시간 점유** — 10분 타임아웃 내 완료 못 하면 실패. 의도된 UX (라인 속도 = 2GB/10min = 약 27 Mbps 필요). 필요 시 타임아웃 조정.
+- **위험: `io.Copy` 중 클라이언트 disconnect** — `r.Context()` 취소로 `ctx` 연쇄 취소 → `io.Copy` EOF → 다음 URL 진입 전 Fetch 루프 조기 종료. 서버 측 goroutine 누수 없음.
+- **롤백:** URL-V1~V3 commit revert. Phase 9 상태로 복귀 (이미지 전용 JSON batch). 기존 URL-V4 manual은 다시 필요.
