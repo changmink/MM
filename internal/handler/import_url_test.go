@@ -25,11 +25,23 @@ var jpegBody = []byte{
 func newOriginServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/big.jpg":
+			body := make([]byte, 3<<20) // 3 MiB → triggers ≥1 progress event
+			w.Header().Set("Content-Type", "image/jpeg")
+			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+			w.WriteHeader(http.StatusOK)
+			w.Write(body)
 		case strings.HasSuffix(r.URL.Path, ".jpg") || strings.HasSuffix(r.URL.Path, ".png"):
 			w.Header().Set("Content-Type", "image/jpeg")
 			w.Header().Set("Content-Length", strconv.Itoa(len(jpegBody)))
 			w.WriteHeader(http.StatusOK)
 			w.Write(jpegBody)
+		case strings.HasSuffix(r.URL.Path, ".mp3"):
+			body := []byte("fake-mp3-bytes")
+			w.Header().Set("Content-Type", "audio/mpeg")
+			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+			w.WriteHeader(http.StatusOK)
+			w.Write(body)
 		case strings.HasSuffix(r.URL.Path, ".html"):
 			body := []byte("<html></html>")
 			w.Header().Set("Content-Type", "text/html")
@@ -58,7 +70,42 @@ func postImport(t *testing.T, mux *http.ServeMux, path string, urls []string) *h
 	return rw
 }
 
-func TestImportURL_Single_OK(t *testing.T) {
+// parseSSEEvents splits an SSE response body into JSON payloads. It expects
+// each event to be a single `data: {json}\n\n` frame (no event names, no IDs)
+// and returns the parsed payloads in order. Malformed frames fail the test.
+func parseSSEEvents(t *testing.T, body string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, frame := range strings.Split(strings.TrimRight(body, "\n"), "\n\n") {
+		frame = strings.TrimSpace(frame)
+		if frame == "" {
+			continue
+		}
+		if !strings.HasPrefix(frame, "data:") {
+			t.Fatalf("frame missing data prefix: %q", frame)
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(frame, "data:"))
+		var ev map[string]any
+		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+			t.Fatalf("bad json in frame %q: %v", payload, err)
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+// phasesOf returns the phase string of each event in order.
+func phasesOf(events []map[string]any) []string {
+	out := make([]string, len(events))
+	for i, e := range events {
+		if p, ok := e["phase"].(string); ok {
+			out[i] = p
+		}
+	}
+	return out
+}
+
+func TestImportURL_SSE_Headers(t *testing.T) {
 	srv := newOriginServer()
 	defer srv.Close()
 
@@ -70,28 +117,72 @@ func TestImportURL_Single_OK(t *testing.T) {
 	if rw.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rw.Code, rw.Body.String())
 	}
-	var resp struct {
-		Succeeded []map[string]any `json:"succeeded"`
-		Failed    []map[string]any `json:"failed"`
+	if got := rw.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want text/event-stream", got)
 	}
-	if err := json.Unmarshal(rw.Body.Bytes(), &resp); err != nil {
-		t.Fatal(err)
+	if got := rw.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Errorf("Cache-Control = %q, want no-cache", got)
 	}
-	if len(resp.Succeeded) != 1 {
-		t.Fatalf("succeeded = %d, want 1: %v", len(resp.Succeeded), resp)
+	if got := rw.Header().Get("X-Accel-Buffering"); got != "no" {
+		t.Errorf("X-Accel-Buffering = %q, want no", got)
 	}
-	if len(resp.Failed) != 0 {
-		t.Fatalf("failed = %d, want 0: %v", len(resp.Failed), resp)
+}
+
+func TestImportURL_SSE_SingleImage_StartDoneSummary(t *testing.T) {
+	srv := newOriginServer()
+	defer srv.Close()
+
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, root, root)
+
+	rw := postImport(t, mux, "/", []string{srv.URL + "/cat.jpg"})
+	events := parseSSEEvents(t, rw.Body.String())
+	phases := phasesOf(events)
+
+	// start, done (no progress for tiny payload), summary.
+	if !equalSlices(phases, []string{"start", "done", "summary"}) {
+		t.Fatalf("phases = %v, want [start done summary]", phases)
 	}
-	if got := resp.Succeeded[0]["name"]; got != "cat.jpg" {
-		t.Errorf("name = %v, want cat.jpg", got)
+	if events[0]["name"] != "cat.jpg" || events[0]["type"] != "image" {
+		t.Errorf("start event = %v", events[0])
+	}
+	if events[1]["name"] != "cat.jpg" || events[1]["path"] != "/cat.jpg" {
+		t.Errorf("done event = %v", events[1])
+	}
+	if events[2]["succeeded"].(float64) != 1 || events[2]["failed"].(float64) != 0 {
+		t.Errorf("summary = %v, want {1, 0}", events[2])
 	}
 	if _, err := os.Stat(filepath.Join(root, "cat.jpg")); err != nil {
 		t.Errorf("file missing on disk: %v", err)
 	}
 }
 
-func TestImportURL_Multiple_PartialSuccess(t *testing.T) {
+func TestImportURL_SSE_HeaderError_NoStart(t *testing.T) {
+	srv := newOriginServer()
+	defer srv.Close()
+
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, root, root)
+
+	// page.html → unsupported_content_type rejected before Start fires.
+	rw := postImport(t, mux, "/", []string{srv.URL + "/page.html"})
+	events := parseSSEEvents(t, rw.Body.String())
+	phases := phasesOf(events)
+
+	if !equalSlices(phases, []string{"error", "summary"}) {
+		t.Fatalf("phases = %v, want [error summary]", phases)
+	}
+	if events[0]["error"] != "unsupported_content_type" {
+		t.Errorf("error code = %v, want unsupported_content_type", events[0]["error"])
+	}
+	if events[1]["succeeded"].(float64) != 0 || events[1]["failed"].(float64) != 1 {
+		t.Errorf("summary = %v, want {0, 1}", events[1])
+	}
+}
+
+func TestImportURL_SSE_Mixed_PartialSuccess(t *testing.T) {
 	srv := newOriginServer()
 	defer srv.Close()
 
@@ -101,31 +192,90 @@ func TestImportURL_Multiple_PartialSuccess(t *testing.T) {
 
 	rw := postImport(t, mux, "/", []string{
 		srv.URL + "/ok.jpg",
-		srv.URL + "/page.html", // unsupported_content_type
-		srv.URL + "/missing",   // http_error
+		srv.URL + "/page.html",
+		srv.URL + "/missing",
 	})
-	if rw.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rw.Code, rw.Body.String())
+	events := parseSSEEvents(t, rw.Body.String())
+
+	// Index-grouped expectations: index 0 → start+done, 1 → error, 2 → error, then summary.
+	byIndex := map[int][]string{}
+	var summary map[string]any
+	for _, e := range events {
+		if e["phase"] == "summary" {
+			summary = e
+			continue
+		}
+		idx := int(e["index"].(float64))
+		byIndex[idx] = append(byIndex[idx], e["phase"].(string))
 	}
-	var resp struct {
-		Succeeded []map[string]any  `json:"succeeded"`
-		Failed    []importFailure   `json:"failed"`
+	if !equalSlices(byIndex[0], []string{"start", "done"}) {
+		t.Errorf("index 0 phases = %v, want [start done]", byIndex[0])
 	}
-	if err := json.Unmarshal(rw.Body.Bytes(), &resp); err != nil {
-		t.Fatal(err)
+	if !equalSlices(byIndex[1], []string{"error"}) {
+		t.Errorf("index 1 phases = %v, want [error]", byIndex[1])
 	}
-	if len(resp.Succeeded) != 1 {
-		t.Errorf("succeeded = %d, want 1", len(resp.Succeeded))
+	if !equalSlices(byIndex[2], []string{"error"}) {
+		t.Errorf("index 2 phases = %v, want [error]", byIndex[2])
 	}
-	if len(resp.Failed) != 2 {
-		t.Fatalf("failed = %d, want 2", len(resp.Failed))
+	if summary == nil {
+		t.Fatal("summary event missing")
 	}
-	codes := []string{resp.Failed[0].Error, resp.Failed[1].Error}
-	if !contains(codes, "unsupported_content_type") {
-		t.Errorf("missing unsupported_content_type in %v", codes)
+	if summary["succeeded"].(float64) != 1 || summary["failed"].(float64) != 2 {
+		t.Errorf("summary = %v, want {1, 2}", summary)
 	}
-	if !contains(codes, "http_error") {
-		t.Errorf("missing http_error in %v", codes)
+}
+
+func TestImportURL_SSE_LargeFile_ProgressEmitted(t *testing.T) {
+	srv := newOriginServer()
+	defer srv.Close()
+
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, root, root)
+
+	rw := postImport(t, mux, "/", []string{srv.URL + "/big.jpg"})
+	events := parseSSEEvents(t, rw.Body.String())
+
+	var progressCount int
+	var lastReceived float64
+	for _, e := range events {
+		if e["phase"] != "progress" {
+			continue
+		}
+		progressCount++
+		got := e["received"].(float64)
+		if got < lastReceived {
+			t.Errorf("progress not monotonic: %v after %v", got, lastReceived)
+		}
+		lastReceived = got
+	}
+	if progressCount == 0 {
+		t.Errorf("expected ≥1 progress event for 3 MiB body, got 0")
+	}
+}
+
+func TestImportURL_SSE_AudioSkipsThumbPool(t *testing.T) {
+	srv := newOriginServer()
+	defer srv.Close()
+
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, root, root)
+
+	rw := postImport(t, mux, "/", []string{srv.URL + "/song.mp3"})
+	events := parseSSEEvents(t, rw.Body.String())
+	phases := phasesOf(events)
+	if !equalSlices(phases, []string{"start", "done", "summary"}) {
+		t.Fatalf("phases = %v, want [start done summary]", phases)
+	}
+	// Audio file should land on disk.
+	if _, err := os.Stat(filepath.Join(root, "song.mp3")); err != nil {
+		t.Errorf("song.mp3 missing: %v", err)
+	}
+	// .thumb/song.mp3.jpg must NOT exist (audio skips thumbnail generation).
+	thumbPath := filepath.Join(root, ".thumb", "song.mp3.jpg")
+	if _, err := os.Stat(thumbPath); !os.IsNotExist(err) {
+		t.Errorf("audio should not generate thumbnail, got err = %v", err)
 	}
 }
 
@@ -222,11 +372,14 @@ func TestImportURL_InvalidBody(t *testing.T) {
 	}
 }
 
-func contains(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
+func equalSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
 		}
 	}
-	return false
+	return true
 }
