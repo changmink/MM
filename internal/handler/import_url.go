@@ -8,16 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/chang/file_server/internal/media"
 	"github.com/chang/file_server/internal/urlfetch"
 )
 
-const (
-	maxImportURLs       = 50
-	importPerURLTimeout = 60 * time.Second
-)
+const maxImportURLs = 50
 
 type importRequest struct {
 	URLs []string `json:"urls"`
@@ -82,8 +78,8 @@ func (h *Handler) handleImportURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, u := range urls {
-		ctx, cancel := context.WithTimeout(r.Context(), importPerURLTimeout)
-		res, ferr := urlfetch.Fetch(ctx, h.urlClient, u, destAbs, rel)
+		ctx, cancel := context.WithTimeout(r.Context(), urlfetch.TotalTimeout)
+		res, ferr := urlfetch.Fetch(ctx, h.urlClient, u, destAbs, rel, nil)
 		cancel()
 		if ferr != nil {
 			resp.Failed = append(resp.Failed, importFailure{URL: u, Error: ferr.Code})

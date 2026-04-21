@@ -1,8 +1,10 @@
-// Package urlfetch downloads remote images into a destination directory while
-// enforcing size, content-type, and redirect policies. Designed for the
-// /api/import-url endpoint: each Fetch call streams a single URL to disk via a
-// temporary file and atomically renames it on success, choosing a unique name
-// if one already exists.
+// Package urlfetch downloads remote media (image/video/audio) into a
+// destination directory while enforcing size, content-type, and redirect
+// policies. Designed for the /api/import-url endpoint: each Fetch call streams
+// a single URL to disk via a temporary file and atomically renames it on
+// success, choosing a unique name if one already exists. Callers can observe
+// progress through the Callbacks hook so the handler can stream SSE events to
+// the client in real time.
 package urlfetch
 
 import (
@@ -20,17 +22,25 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/chang/file_server/internal/media"
 )
 
 const (
-	// MaxBytes caps downloaded payloads at 50 MiB.
-	MaxBytes = 50 << 20
+	// MaxBytes caps downloaded payloads at 2 GiB.
+	MaxBytes = 2 << 30
 	// MaxRedirects bounds redirect chains.
 	MaxRedirects = 5
 	// DialTimeout limits TCP connection establishment.
 	DialTimeout = 10 * time.Second
 	// TotalTimeout limits the entire request, including body read.
-	TotalTimeout = 60 * time.Second
+	TotalTimeout = 10 * time.Minute
+
+	// progressByteThreshold and progressTimeThreshold bound how often the
+	// Progress callback fires so a very fast download does not emit thousands
+	// of events per second.
+	progressByteThreshold = 1 << 20 // 1 MiB
+	progressTimeThreshold = 250 * time.Millisecond
 )
 
 // Result describes a successful import.
@@ -53,15 +63,35 @@ type FetchError struct {
 func (e *FetchError) Error() string { return e.Code }
 func (e *FetchError) Unwrap() error { return e.Err }
 
+// Callbacks lets a caller observe a Fetch in flight. Start fires once after
+// all header validation passes but before the body is read, so the caller
+// knows the payload's intended name, size (if declared), and file type.
+// Progress fires zero or more times during body streaming, throttled to avoid
+// flooding. Either field may be nil.
+type Callbacks struct {
+	Start    func(name string, total int64, fileType string)
+	Progress func(received int64)
+}
+
 var (
 	errTooManyRedirects = errors.New("too_many_redirects")
 	errInvalidScheme    = errors.New("invalid_scheme")
 
 	contentTypeToExt = map[string]string{
-		"image/jpeg": ".jpg",
-		"image/png":  ".png",
-		"image/webp": ".webp",
-		"image/gif":  ".gif",
+		"image/jpeg":       ".jpg",
+		"image/png":        ".png",
+		"image/webp":       ".webp",
+		"image/gif":        ".gif",
+		"video/mp4":        ".mp4",
+		"video/x-matroska": ".mkv",
+		"video/x-msvideo":  ".avi",
+		"video/mp2t":       ".ts",
+		"audio/mpeg":       ".mp3",
+		"audio/flac":       ".flac",
+		"audio/aac":        ".aac",
+		"audio/ogg":        ".ogg",
+		"audio/wav":        ".wav",
+		"audio/mp4":        ".m4a",
 	}
 
 	// urlExtToCanonical normalizes extension aliases so .jpeg and .jpg are
@@ -73,13 +103,23 @@ var (
 		".png":  ".png",
 		".webp": ".webp",
 		".gif":  ".gif",
+		".mp4":  ".mp4",
+		".mkv":  ".mkv",
+		".avi":  ".avi",
+		".ts":   ".ts",
+		".mp3":  ".mp3",
+		".flac": ".flac",
+		".aac":  ".aac",
+		".ogg":  ".ogg",
+		".wav":  ".wav",
+		".m4a":  ".m4a",
 	}
 )
 
 // NewClient returns the http.Client used by Fetch. It enforces a 10s dial
-// timeout, a 60s overall timeout, a 5-redirect cap, and refuses any redirect
-// hop whose scheme is not http/https. No cookie jar — auth headers and cookies
-// are never carried over by default.
+// timeout, a 10-minute overall timeout, a 5-redirect cap, and refuses any
+// redirect hop whose scheme is not http/https. No cookie jar — auth headers
+// and cookies are never carried over by default.
 func NewClient() *http.Client {
 	dialer := &net.Dialer{Timeout: DialTimeout}
 	return &http.Client{
@@ -102,8 +142,10 @@ func NewClient() *http.Client {
 
 // Fetch downloads rawURL into destDir (absolute path, caller-validated) and
 // returns the saved file's metadata. relDir is the slash-form prefix used to
-// build Result.Path. On any error no file remains under destDir.
-func Fetch(ctx context.Context, client *http.Client, rawURL, destDir, relDir string) (*Result, *FetchError) {
+// build Result.Path. If cb is non-nil, Start fires after header validation
+// and Progress fires during body streaming (throttled). On any error no file
+// remains under destDir.
+func Fetch(ctx context.Context, client *http.Client, rawURL, destDir, relDir string, cb *Callbacks) (*Result, *FetchError) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Scheme == "" {
 		return nil, &FetchError{Code: "invalid_url", Err: err}
@@ -161,6 +203,11 @@ func Fetch(ctx context.Context, client *http.Client, rawURL, destDir, relDir str
 	if replaced {
 		warnings = append(warnings, "extension_replaced")
 	}
+	fileType := string(media.DetectType(name))
+
+	if cb != nil && cb.Start != nil {
+		cb.Start(name, resp.ContentLength, fileType)
+	}
 
 	tmpFile, err := os.CreateTemp(destDir, ".urlimport-*.tmp")
 	if err != nil {
@@ -175,7 +222,11 @@ func Fetch(ctx context.Context, client *http.Client, rawURL, destDir, relDir str
 		}
 	}()
 
-	n, err := io.Copy(tmpFile, io.LimitReader(resp.Body, MaxBytes+1))
+	var src io.Reader = io.LimitReader(resp.Body, MaxBytes+1)
+	if cb != nil && cb.Progress != nil {
+		src = newProgressReader(src, cb.Progress)
+	}
+	n, err := io.Copy(tmpFile, src)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return nil, &FetchError{Code: "download_timeout", Err: err}
@@ -203,7 +254,7 @@ func Fetch(ctx context.Context, client *http.Client, rawURL, destDir, relDir str
 		Path:     path.Join(relDir, finalName),
 		Name:     finalName,
 		Size:     n,
-		Type:     "image",
+		Type:     string(media.DetectType(finalName)),
 		Warnings: warnings,
 	}, nil
 }
@@ -233,7 +284,8 @@ func classifyHTTPError(err error) *FetchError {
 
 // deriveFilename returns the basename to save plus a flag indicating whether
 // the extension was forced by the response Content-Type instead of preserved
-// from the URL.
+// from the URL. Empty or unsafe basenames fall back to a category-appropriate
+// default (image/video/audio) so the saved file has a sensible name.
 func deriveFilename(parsedURL *url.URL, mappedExt string) (string, bool) {
 	base := path.Base(parsedURL.Path)
 	if decoded, err := url.PathUnescape(base); err == nil {
@@ -243,7 +295,7 @@ func deriveFilename(parsedURL *url.URL, mappedExt string) (string, bool) {
 
 	stem := strings.TrimSuffix(base, path.Ext(base))
 	if stem == "" || stem == "." || stem == ".." {
-		return "image" + mappedExt, false
+		return defaultBaseForExt(mappedExt) + mappedExt, false
 	}
 
 	urlExt := strings.ToLower(path.Ext(base))
@@ -254,6 +306,19 @@ func deriveFilename(parsedURL *url.URL, mappedExt string) (string, bool) {
 		return stem + urlExt, false
 	}
 	return stem + mappedExt, true
+}
+
+// defaultBaseForExt picks a generic stem ("image"/"video"/"audio") for URLs
+// whose path contributes no usable filename.
+func defaultBaseForExt(ext string) string {
+	switch media.DetectType("x" + ext) {
+	case media.TypeVideo:
+		return "video"
+	case media.TypeAudio:
+		return "audio"
+	default:
+		return "image"
+	}
 }
 
 // sanitizeFilename strips path separators, control characters, and NULs so a
@@ -296,4 +361,43 @@ func renameUnique(tmpPath, destDir, name string) (string, bool, error) {
 		return candidate, i > 0, nil
 	}
 	return "", false, fmt.Errorf("could not find unique name for %s after %d attempts", name, maxAttempts)
+}
+
+// progressReader wraps an io.Reader and emits throttled progress notifications
+// through the supplied callback. Emission fires when either 1 MiB has arrived
+// since the last emit OR 250 ms has elapsed, whichever comes first. The clock
+// starts at construction, so small downloads that complete before the first
+// threshold may emit zero progress events — the caller should rely on the
+// final size from Result, not the last progress value.
+type progressReader struct {
+	inner        io.Reader
+	progress     func(int64)
+	received     int64
+	lastReceived int64
+	lastAt       time.Time
+}
+
+func newProgressReader(r io.Reader, progress func(int64)) *progressReader {
+	return &progressReader{
+		inner:    r,
+		progress: progress,
+		lastAt:   time.Now(),
+	}
+}
+
+func (p *progressReader) Read(buf []byte) (int, error) {
+	n, err := p.inner.Read(buf)
+	if n > 0 {
+		p.received += int64(n)
+		delta := p.received - p.lastReceived
+		if delta > 0 {
+			now := time.Now()
+			if delta >= progressByteThreshold || now.Sub(p.lastAt) >= progressTimeThreshold {
+				p.progress(p.received)
+				p.lastReceived = p.received
+				p.lastAt = now
+			}
+		}
+	}
+	return n, err
 }
