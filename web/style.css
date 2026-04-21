@@ -340,32 +340,65 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   border-radius: 6px;
   padding: 10px 12px;
   font-size: 0.85rem;
-  max-height: 200px;
+  max-height: 280px;
   overflow-y: auto;
 }
 .url-result.hidden { display: none; }
-.url-result-summary { font-weight: 600; margin-bottom: 6px; }
-.url-result-failed { list-style: none; }
-.url-result-failed li {
+
+.url-rows { display: flex; flex-direction: column; gap: 8px; }
+.url-row {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  background: var(--surface, #fff);
+}
+.url-row-head {
   display: flex;
   justify-content: space-between;
   gap: 8px;
-  padding: 4px 0;
-  border-top: 1px solid var(--border);
-  color: var(--danger);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.78rem;
+  margin-bottom: 4px;
 }
-.url-result-failed li .url-text {
+.url-row-name {
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
-.url-result-failed li .url-reason {
-  color: var(--text-dim);
-  white-space: nowrap;
+.url-row-status { color: var(--text-dim); white-space: nowrap; }
+
+.url-progress-bar {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
 }
+.url-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 150ms linear;
+}
+
+.url-row.status-pending .url-progress-fill { background: var(--text-dim); }
+.url-row.status-downloading .url-progress-fill { background: var(--accent); }
+.url-row.status-done .url-progress-fill { background: #22c55e; }
+.url-row.status-error .url-progress-fill { background: var(--danger); width: 100%; }
+.url-row.status-error .url-row-status { color: var(--danger); }
+.url-row.status-done .url-row-status { color: #16a34a; }
+
+.url-summary {
+  margin-top: 10px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-weight: 600;
+  text-align: center;
+}
+.url-summary.hidden { display: none; }
+.url-summary.status-done { background: #dcfce7; color: #166534; }
+.url-summary.status-error { background: #fee2e2; color: #991b1b; }
+.url-summary.status-mixed { background: #fef3c7; color: #92400e; }
 
 /* Responsive */
 @media (max-width: 600px) {
