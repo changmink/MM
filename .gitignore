@@ -1,0 +1,15 @@
+# IDE / tooling
+.claude/settings.local.json
+.idea/
+.vscode/
+
+# Build output
+/server
+/server.exe
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local data (never commit the media volume)
+/data/
