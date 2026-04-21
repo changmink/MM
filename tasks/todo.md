@@ -55,7 +55,7 @@
 - [x] UI-5: E2E 수동 검증 — 기본 이미지 다운로드 확인 완료 (Phase 10에서 확장 재검증)
 
 ## Phase 10 — URL Import 확장 (동영상/음악 + SSE progress)
-- [ ] URL-V1: `urlfetch` 확장 — Content-Type allowlist(image/video/audio) + 2 GiB 캡 + 10분 타임아웃 + `Callbacks{Start,Progress}` throttled 콜백 + 테스트 (기존 테스트 갱신 + 신규 9개 케이스)
-- [ ] URL-V2: `handleImportURL` SSE 전환 — `text/event-stream`, URL당 `start`/`progress`/`done`/`error`, 마지막 `summary`, 음악은 thumbPool skip, curl `-N`으로 단독 검증 후 URL-V3 진입
-- [ ] URL-V3: frontend — 버튼 라벨/hint 갱신, URL별 진행 행(이름/바/상태), SSE fetch+ReadableStream 파싱, 상태별 색, `summary` 배지
-- [ ] URL-V4: E2E 수동 검증 (이미지/동영상/MP3/혼합/2GiB 초과/unsupported/모바일)
+- [x] URL-V1: `urlfetch` 확장 — Content-Type allowlist(image/video/audio) + 2 GiB 캡 + 10분 타임아웃 + `Callbacks{Start,Progress}` throttled 콜백 + 테스트 (기존 테스트 갱신 + 신규 9개 케이스)
+- [x] URL-V2: `handleImportURL` SSE 전환 — `text/event-stream`, URL당 `start`/`progress`/`done`/`error`, 마지막 `summary`, 음악은 thumbPool skip, 클라이언트 취소 시 배치 조기 중단
+- [x] URL-V3: frontend — 버튼 라벨/hint 갱신, URL별 진행 행(이름/바/상태), SSE fetch+ReadableStream 파싱, 상태별 색, `summary` 배지
+- [x] URL-V4: E2E 수동 검증 (이미지/동영상/MP3/혼합/2GiB 초과/unsupported/모바일)
