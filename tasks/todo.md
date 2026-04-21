@@ -48,8 +48,8 @@
 - [ ] VD-4: E2E 수동 검증 (신규 / 기존 마이그레이션 / placeholder / 모바일 뷰)
 
 ## Phase 9 — URL Import (`feature/url-image-import`)
-- [ ] UI-1: `internal/urlfetch` 패키지 — `Fetch` + `NewClient` (스킴/헤더/사이즈/Content-Type 검증, 임시파일 → atomic rename, `_N` 충돌 회피, warnings) + `fetch_test.go` (httptest mock origin 13개 케이스)
-- [ ] UI-2: `handler.handleImportURL` (`POST /api/import-url`) — Handler에 `urlClient` 필드, batch sequential 처리, 성공 후 thumbPool 제출 + `import_url_test.go` 9개 케이스, 라우트 등록 → `curl` 단독 검증 통과 후 UI-4 진입
-- [ ] UI-3: `index.html` + `style.css` — "URL에서 가져오기" 버튼 + `#url-modal` (textarea + 결과 영역) + CSS
-- [ ] UI-4: `app.js` — DOM refs, openURLModal/closeURLModal/submitURLImport, error code → 한국어 라벨, 닫을 때 succeeded 있으면 browse 새로고침
+- [x] UI-1: `internal/urlfetch` 패키지 — `Fetch` + `NewClient` (스킴/헤더/사이즈/Content-Type 검증, 임시파일 → atomic rename, `_N` 충돌 회피, warnings) + `fetch_test.go` (httptest mock origin 13개 케이스)
+- [x] UI-2: `handler.handleImportURL` (`POST /api/import-url`) — Handler에 `urlClient` 필드, batch sequential 처리, 성공 후 thumbPool 제출 + `import_url_test.go` 9개 케이스, 라우트 등록 → `curl` 단독 검증 통과 후 UI-4 진입
+- [x] UI-3: `index.html` + `style.css` — "URL에서 가져오기" 버튼 + `#url-modal` (textarea + 결과 영역) + CSS
+- [x] UI-4: `app.js` — DOM refs, openURLModal/closeURLModal/submitURLImport, error code → 한국어 라벨, 닫을 때 succeeded 있으면 browse 새로고침
 - [ ] UI-5: E2E 수동 검증 (정상/부분실패/50MB초과/확장자교체/중복저장/모바일뷰)
