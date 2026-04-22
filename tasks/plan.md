@@ -677,3 +677,265 @@ if _, err := os.Stat(thumbPath); err == nil {
 - **위험:** ffprobe 미설치 환경 → 백필 silent fail, null 반환, UI 오버레이 숨김 (acceptable degradation)
 - **위험:** 사이드카 파싱 오류 → `(0, false)` 반환 → 다음 browse에서 재시도 (자가복구)
 - **롤백:** Phase 8의 commit 3개 revert. `.dur` 파일은 `.thumb/` 안에 있어 정적 서빙 안 됨 → 무해
+
+---
+
+## Phase 9 — 파일/폴더 이름 변경 (`feature/file-rename`)
+
+### 배경
+SPEC §2.1.1 추가. 파일/폴더 rename 기능. 파일은 확장자 고정, 이미지/동영상은 `.thumb/{name}.jpg` + `.jpg.dur` 사이드카 동기화. 충돌 시 409 (자동 suffix 없음).
+
+### 의존성 그래프
+
+```
+R-1 (backend: PATCH /api/file + 사이드카 rename + 단위/통합 테스트)
+R-2 (backend: PATCH /api/folder + 통합 테스트)      ← R-1과 병렬 가능
+  └─ R-3 (frontend: rename 모달 + 버튼 + JS 로직)   ← R-1·R-2 둘 다 완료 후
+       └─ R-4 (E2E 수동 검증 + 회귀 체크)
+```
+
+R-1과 R-2는 같은 파일(`files.go`)을 수정하므로 순차 진행 권장 (병합 충돌 회피). R-3는 R-1·R-2 완료 후. R-4는 체크포인트.
+
+### 영향 파일 범위
+
+| 파일 | 변경 내용 |
+|---|---|
+| `internal/handler/files.go` | `handleFile` 메서드 스위치 확장 (DELETE→DELETE/PATCH), `handleFolder`에 PATCH case 추가, `renameFile`/`renameFolder`/`validateName`(통합) 신규 |
+| `internal/handler/files_test.go` | rename 케이스 추가 (성공/409/400/404/traversal/사이드카) |
+| `web/index.html` | rename 모달 요소 추가 |
+| `web/style.css` | 기존 `.modal` 스타일 재사용, 필요 시 rename 버튼 아이콘만 |
+| `web/app.js` | `openRenameModal`/`submitRename` 함수, `buildTable`/`buildImageGrid`/`buildVideoGrid`에 rename 버튼 추가 |
+
+---
+
+### R-1: 백엔드 — PATCH /api/file (파일 rename + 사이드카)
+
+**파일:** `internal/handler/files.go`, `internal/handler/files_test.go`
+
+**handleFile 리팩토링:**
+```go
+func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
+    switch r.Method {
+    case http.MethodDelete:
+        h.deleteFile(w, r)    // 기존 로직 이동
+    case http.MethodPatch:
+        h.renameFile(w, r)
+    default:
+        writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
+    }
+}
+```
+
+**`renameFile` 동작 순서:**
+1. `media.SafePath(h.dataDir, rel)` → 원본 경로 검증
+2. JSON 바디 `{"name": "..."}` 파싱
+3. `os.Stat(srcAbs)` → 미존재 404, 디렉토리면 400 `"not a file"`
+4. 원본 확장자 추출: `origExt := filepath.Ext(filepath.Base(srcAbs))`
+5. 사용자 입력 base name 정제: `newBase := stripExt(body.Name)` (사용자가 확장자 포함 입력해도 무시)
+6. `validateName(newBase)` — 빈 문자열, `/`·`\\`, `.`/`..`, 길이 > 255 → 400 `"invalid name"`. 재부착 후 `len(newName) > 255` 다시 확인 (확장자 포함 길이 초과 방지)
+7. `newName := newBase + origExt`
+8. 동일 이름 검사: `newName == filepath.Base(srcAbs)` → 400 `"name unchanged"`
+9. `dstAbs := filepath.Join(filepath.Dir(srcAbs), newName)` + `media.SafePath` 재검증
+10. `os.Stat(dstAbs)` → 존재하면 409 `"already exists"`
+11. `os.Rename(srcAbs, dstAbs)` → 실패 시 500
+12. **사이드카 동기화** (이미지/동영상인 경우):
+    - `oldThumb := filepath.Join(filepath.Dir(srcAbs), ".thumb", oldName+".jpg")`
+    - `newThumb := filepath.Join(filepath.Dir(srcAbs), ".thumb", newName+".jpg")`
+    - `os.Rename(oldThumb, newThumb)` — `IsNotExist` 무시, 다른 에러는 `slog.Warn`만 (본 파일 rename은 성공)
+    - 동영상이면 `.jpg.dur` 사이드카도 동일 로직
+13. 응답: `200 OK`, `{"path": relResult, "name": newName}`
+
+**공용 검증 함수 추가:**
+```go
+func validateName(name string) error {
+    if name == "" || name == "." || name == ".." { return fmt.Errorf("invalid name") }
+    if len(name) > 255 { return fmt.Errorf("invalid name") }
+    for _, c := range name {
+        if c == '/' || c == '\\' { return fmt.Errorf("invalid name") }
+    }
+    return nil
+}
+// validateFolderName을 validateName으로 rename하여 폴더 생성·파일/폴더 rename 공용
+```
+
+**테스트 (`files_test.go`):**
+- `TestRenameFileSuccess` — 성공 시 200 + `{path, name}`, 원본 경로에 파일 없음, 신규 경로에 존재
+- `TestRenameFileExtensionPreserved` — 사용자가 `new.mp4` 입력, 원본 `.mkv` → 결과는 `new.mkv`
+- `TestRenameFileThumbFollows` — 이미지 rename 시 `.thumb/{new}.jpg` 이동 (이미지 픽스처 사용)
+- `TestRenameFileDurationSidecarFollows` — 동영상 rename 시 `.thumb/{new}.jpg.dur` 이동 (테스트용 사이드카 작성 후 검증)
+- `TestRenameFileMissingSidecarOK` — 사이드카 없어도 200 반환
+- `TestRenameFileConflict` — 동일 디렉토리에 같은 이름 있으면 409
+- `TestRenameFileNameUnchanged` — 새 이름 = 기존 이름이면 400 `name unchanged`
+- `TestRenameFileInvalidName` — 빈 문자열 / `.` / `..` / `a/b` → 400 `invalid name`
+- `TestRenameFileNotFound` — 미존재 경로 → 404
+- `TestRenameFileIsDir` — 디렉토리 경로 전달 → 400 `not a file`
+- `TestRenameFileTraversal` — `path=../escape`, `name`에 `\\` 포함 → 400 `invalid path` / `invalid name`
+
+**완료 기준:**
+- `go test ./internal/handler/... -v` 전체 PASS
+- `go build ./...` 성공
+- 수동 curl 예시:
+  ```
+  curl -X PATCH "http://localhost:8080/api/file?path=/movies/old.mp4" \
+    -H "Content-Type: application/json" -d '{"name":"new"}'
+  → 200 {"path":"/movies/new.mp4","name":"new.mp4"}
+  ```
+
+---
+
+### R-2: 백엔드 — PATCH /api/folder (폴더 rename)
+
+**파일:** `internal/handler/files.go`, `internal/handler/files_test.go`
+
+**handleFolder에 PATCH case 추가:**
+```go
+case http.MethodPatch:
+    h.renameFolder(w, r)
+```
+
+**`renameFolder` 동작 순서:**
+1. `media.SafePath(h.dataDir, rel)` → 원본 경로 검증
+2. `srcAbs == filepath.Clean(h.dataDir)` → 400 `"cannot rename root"`
+3. JSON 바디 파싱
+4. `validateName(body.Name)` → 400
+5. `os.Stat(srcAbs)` → 미존재 404, 파일이면 400 `"not a directory"`
+6. 동일 이름 검사 → 400 `"name unchanged"`
+7. `dstAbs := filepath.Join(filepath.Dir(srcAbs), body.Name)` + `media.SafePath` 재검증
+8. `os.Stat(dstAbs)` → 존재하면 409
+9. `os.Rename(srcAbs, dstAbs)` → 실패 시 500 (폴더 전체가 한 번에 이동, 하위 `.thumb/` 자동 동반)
+10. 응답: `200 OK`, `{"path": relResult, "name": body.Name}`
+
+**테스트:**
+- `TestRenameFolderSuccess` — 폴더 + 하위 파일 + `.thumb/` 존재 확인 후 rename, 새 경로에 모두 남아있음
+- `TestRenameFolderConflict` — 동일 디렉토리 내 같은 이름 폴더 있으면 409
+- `TestRenameFolderNotFound` — 404
+- `TestRenameFolderIsFile` — 파일 경로 전달 → 400 `not a directory`
+- `TestRenameFolderRoot` — 빈 path / `/` → 400 `cannot rename root`
+- `TestRenameFolderInvalidName` — 400
+- `TestRenameFolderNameUnchanged` — 400
+
+**완료 기준:**
+- `go test ./internal/handler/... -v` 전체 PASS
+- 수동 curl:
+  ```
+  curl -X PATCH "http://localhost:8080/api/folder?path=/movies" \
+    -H "Content-Type: application/json" -d '{"name":"films"}'
+  → 200 {"path":"/films","name":"films"}
+  ```
+
+---
+
+### R-3: 프론트엔드 — rename 모달 + 버튼 + JS 로직
+
+**파일:** `web/index.html`, `web/style.css`, `web/app.js`
+
+**`index.html` 변경:**
+- 기존 folder-create 모달 근처에 rename 모달 추가:
+  ```html
+  <div id="rename-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3 id="rename-title">이름 변경</h3>
+      <label id="rename-ext-hint" class="modal-hint"></label>
+      <input id="rename-input" type="text" />
+      <p id="rename-error" class="modal-error hidden"></p>
+      <div class="modal-actions">
+        <button id="rename-cancel">취소</button>
+        <button id="rename-confirm">변경</button>
+      </div>
+    </div>
+  </div>
+  ```
+
+**`style.css` 변경:**
+- 기존 `.modal-*` 스타일 재사용. 추가로:
+  - `.modal-hint { color: #888; font-size: 0.85rem; margin-bottom: 4px; }` — 확장자 안내 ("확장자: .mp4")
+  - rename 버튼 아이콘은 UTF `✎` 또는 이모지 없이 텍스트 "이름 변경" 사용 (기존 "삭제" 버튼과 동일 스타일)
+
+**`app.js` 변경:**
+
+1. 신규 함수:
+   ```js
+   function openRenameModal(entry) {
+     // entry: {name, path, is_dir, type}
+     const isFolder = entry.is_dir;
+     const baseName = isFolder ? entry.name : entry.name.replace(/\.[^.]+$/, '');
+     const ext = isFolder ? '' : entry.name.slice(baseName.length);
+     // title, hint, input 값 세팅, 모달 표시
+     // confirm 핸들러: PATCH /api/file or /api/folder
+   }
+
+   async function submitRename(entry, newBase) {
+     const url = entry.is_dir
+       ? `/api/folder?path=${encodeURIComponent(entry.path)}`
+       : `/api/file?path=${encodeURIComponent(entry.path)}`;
+     const res = await fetch(url, {
+       method: 'PATCH',
+       headers: {'Content-Type': 'application/json'},
+       body: JSON.stringify({name: newBase}),
+     });
+     if (res.ok) {
+       // 모달 닫기 + loadBrowse(currentPath)
+     } else {
+       const err = await res.json().catch(() => ({error: 'rename failed'}));
+       // 에러 메시지 표시, 모달 유지
+       // 409 → "이미 같은 이름이 있습니다"
+       // 400 name unchanged → "이름이 같습니다"
+       // 400 invalid name → "유효하지 않은 이름입니다"
+     }
+   }
+   ```
+
+2. `buildTable`, `buildImageGrid`, `buildVideoGrid` 수정:
+   - 각 행/카드의 action 영역에 "이름 변경" 버튼 추가, 클릭 시 `openRenameModal(entry)` 호출
+   - 기존 삭제 버튼 왼쪽에 배치
+   - 이벤트 버블링 방지: `e.stopPropagation()` (카드 클릭과 분리)
+
+3. 키보드 지원:
+   - Enter → confirm
+   - Escape → cancel
+
+**검증 (수동):**
+- 파일 rename: base name만 수정되고 확장자 유지
+- 이미지 rename 후 썸네일 유지 (깜빡임 없음)
+- 동영상 rename 후 duration 오버레이 유지
+- 폴더 rename 후 하위 파일 접근 가능
+- 409 메시지 모달에 표시, 모달 유지
+- 이름 미변경 시 400 메시지
+- Escape로 취소 시 아무 변화 없음
+
+**완료 기준:** 콘솔 에러 없이 브라우저 흐름 완료
+
+---
+
+### R-4: E2E 수동 검증 + 회귀 체크 (체크포인트)
+
+1. `go run ./cmd/server` (또는 `docker compose up --build`)
+2. **파일 rename:**
+   - `sample.mp4` 업로드 → 이름 변경 "demo" 입력 → `demo.mp4`로 표시
+   - 썸네일 + duration 오버레이 유지 확인
+   - 이미지 `photo.jpg` 동일하게 테스트 (썸네일 유지)
+3. **확장자 방어:** 이름 변경에 "new.mkv" 입력 → 결과 `new.mp4` (원본 확장자 유지)
+4. **충돌:** `a.mp4`, `b.mp4` 있을 때 `a.mp4`를 "b"로 변경 → 409 메시지
+5. **이름 미변경:** `a.mp4`를 "a"로 변경 → 400 메시지
+6. **폴더 rename:** `movies/` → `films/` 변경 → 하위 파일 접근 가능, 썸네일 유지
+7. **잘못된 입력:** 빈 문자열, `a/b`, `..` → 400 메시지
+8. **회귀 체크:**
+   - 파일/폴더 삭제 기존대로 동작
+   - 폴더 생성 기존대로 동작
+   - 업로드 기존대로 동작
+   - 스트리밍 기존대로 동작
+9. **모바일 뷰포트 (DevTools):** rename 버튼·모달 레이아웃 깨짐 없음
+
+---
+
+### Out of scope
+- 경로 이동 (cross-directory move) — 별도 기능
+- 여러 항목 일괄 rename
+- 확장자 변경 허용 (MIME 일관성 훼손 위험)
+- DB 메타데이터 캐시 (SPEC §5.3 노트대로 보류)
+
+### 위험 / 롤백
+- **위험 1:** rename 중 서버 크래시 → OS rename은 atomic하지만 사이드카는 별도 작업. 사이드카 rename 실패 시 원본 썸이 orphan으로 남음 → 다음 `/api/thumb` 호출 시 lazy 재생성으로 자가복구
+- **위험 2:** 사용자가 확장자 입력 시 혼란 → UI 힌트("확장자: .mp4")로 완화
+- **위험 3:** Windows의 대소문자 무시 파일시스템 → `a.mp4` → `A.mp4` rename은 OS가 no-op할 수 있음. 현재 스펙에서는 400 name unchanged로 거부 (case-sensitive 비교). 리눅스 컨테이너 환경이 주 대상이므로 acceptable.
+- **롤백:** Phase 9의 commit revert. 영속 데이터 변경 없음 (사이드카는 .thumb/ 내부, 정적 서빙 영향 없음)

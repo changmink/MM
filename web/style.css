@@ -104,10 +104,10 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.thumb-card .delete-btn {
+.thumb-card .delete-btn,
+.thumb-card .rename-btn {
   position: absolute;
   top: 4px;
-  right: 4px;
   background: rgba(0,0,0,0.6);
   border: none;
   color: var(--text);
@@ -120,7 +120,10 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   justify-content: center;
   font-size: 12px;
 }
-.thumb-card:hover .delete-btn { display: flex; }
+.thumb-card .delete-btn { right: 4px; }
+.thumb-card .rename-btn { right: 30px; }
+.thumb-card:hover .delete-btn,
+.thumb-card:hover .rename-btn { display: flex; }
 .thumb-card .duration-badge {
   position: absolute;
   bottom: 4px;
@@ -303,6 +306,8 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .modal-actions .btn-primary:hover { opacity: 0.85; background: var(--accent); color: white; }
 .modal-error { font-size: 0.8rem; color: var(--danger); }
 .modal-error.hidden { display: none; }
+.modal-hint { font-size: 0.8rem; color: var(--text-dim); margin-bottom: 2px; }
+.modal-hint.hidden { display: none; }
 
 /* Responsive */
 @media (max-width: 600px) {

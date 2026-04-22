@@ -53,6 +53,20 @@
     </div>
   </div>
 
-  <script src="/app.js?v=3"></script>
+  <!-- 이름 변경 모달 -->
+  <div id="rename-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3 id="rename-title">이름 변경</h3>
+      <p id="rename-hint" class="modal-hint hidden"></p>
+      <input id="rename-input" type="text" maxlength="255" autocomplete="off">
+      <p id="rename-error" class="modal-error hidden"></p>
+      <div class="modal-actions">
+        <button id="rename-cancel-btn">취소</button>
+        <button id="rename-confirm-btn" class="btn-primary">변경</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js?v=4"></script>
 </body>
 </html>

@@ -16,8 +16,30 @@
 - [ ] Docker volume에 마운트된 디렉토리(`/data`)에 파일 저장
 - [ ] 디렉토리 트리 탐색 (폴더 구조 그대로 노출)
 - [ ] 파일 삭제
+- [ ] 파일/폴더 이름 변경 (파일은 확장자 고정; 이미지/동영상은 썸네일·duration 사이드카 함께 rename)
 - [ ] 폴더 생성 (현재 탐색 경로 기준, 이름 입력 모달)
 - [ ] 폴더 삭제 (재귀 삭제 — 하위 파일/폴더 + `.thumb/` 디렉토리 포함)
+
+### 2.1.1 이름 변경 (Rename) 상세
+- **대상:** 파일 및 폴더 (데이터 루트 디렉토리 자체는 제외)
+- **파일 이름 규칙:**
+  - 확장자는 변경 불가 — 원본 확장자 유지 (MIME/타입 일관성 보장)
+  - 사용자 입력에 확장자가 포함되어 있어도 서버는 base name만 사용하고 원본 확장자를 재부착
+  - UI 모달은 확장자를 제외한 base name만 input에 표시·편집
+  - **Dotfile carveout:** 원본이 `.gitignore`처럼 선행 점이 있고 다른 점이 없는 이름이면 확장자가 없는 것으로 취급 (rename 시 원하지 않는 suffix 부착 방지). 서버·JS 클라이언트 일관.
+  - **Case-only rename:** 대소문자만 다른 rename(`a.txt` → `A.txt`)은 대소문자 무시 파일시스템에서도 동작 (기존 파일 존재 검사 skip + OS가 atomic하게 처리)
+- **폴더 이름 규칙:** 확장자 개념 없음. `validateName`과 동일 (빈 문자열/`.`/`..`/`/`/`\\` 불가, 최대 255자; 파일은 `base + origExt`가 255자 초과 시에도 400)
+- **scope:** 동일 부모 디렉토리 내에서만 rename. 경로 이동·디렉토리 간 이동은 별도 기능 (out of scope).
+- **충돌 처리:** 같은 이름이 이미 존재하면 `409 Conflict` 반환. 자동 `_1` suffix 없음 (rename은 사용자의 명시적 의도).
+- **동일 이름 입력:** 새 이름이 기존 이름과 동일(확장자 포함 비교)하면 `400 {"error": "name unchanged"}` 반환.
+- **사이드카 파일 동기화 (이미지/동영상 파일 rename 시):**
+  - `.thumb/{oldname}.jpg` → `.thumb/{newname}.jpg`
+  - `.thumb/{oldname}.jpg.dur` → `.thumb/{newname}.jpg.dur` (동영상만)
+  - 사이드카가 없으면 skip (오류 아님)
+  - 사이드카 rename 실패는 로그만 남기고 200 반환 — 썸네일은 다음 조회 시 on-demand 재생성됨 (기존 lazy 메커니즘)
+- **폴더 rename:** 폴더 내부의 `.thumb/` 디렉토리는 부모 폴더 rename과 함께 자동으로 따라감 (OS `rename` 한 번). 추가 처리 불필요.
+- **UI 트리거:** 각 entry 카드에 rename 버튼 (연필 아이콘), 기존 delete 버튼과 동일한 레이아웃에 추가
+- **UI 피드백:** 성공 시 `loadBrowse()`로 현재 경로 재조회. 409/400 에러는 모달 내부 메시지로 표시하고 모달 유지.
 
 ### 2.2 이미지
 - **지원 포맷:** JPG, PNG, WEBP, GIF
@@ -128,7 +150,9 @@ file_server/
 | GET | `/api/thumb?path=` | 섬네일 이미지 반환 |
 | POST | `/api/upload?path=` | 파일 업로드 |
 | DELETE | `/api/file?path=` | 파일 삭제 |
+| PATCH | `/api/file?path=` | 파일 이름 변경 (확장자 고정) |
 | POST | `/api/folder?path=` | 폴더 생성 |
+| PATCH | `/api/folder?path=` | 폴더 이름 변경 |
 | DELETE | `/api/folder?path=` | 폴더 재귀 삭제 (하위 내용 + `.thumb/` 포함) |
 | GET | `/` | 프론트엔드 SPA |
 
@@ -199,6 +223,23 @@ file_server/
 - 미존재: `404 {"error": "not found"}`
 - traversal: `400 {"error": "invalid path"}`
 
+#### PATCH /api/file
+- Body: `{"name": "new-base-name"}` (확장자 제외한 base name; 서버가 원본 확장자 재부착)
+  - 사용자 입력에 확장자가 포함되어 있으면 서버가 strip 후 원본 확장자 사용
+- 성공: `200 OK`
+  ```json
+  {
+    "path": "/movies/new-base-name.mp4",
+    "name": "new-base-name.mp4"
+  }
+  ```
+- 미존재: `404 {"error": "not found"}`
+- path가 디렉토리를 가리킴: `400 {"error": "not a file"}`
+- 유효하지 않은 이름 (빈 문자열, `/`·`\\` 포함, `.` or `..`, 길이 초과): `400 {"error": "invalid name"}`
+- 새 이름 = 기존 이름: `400 {"error": "name unchanged"}`
+- 충돌 (동일 디렉토리 내 동일 이름 존재): `409 {"error": "already exists"}`
+- traversal: `400 {"error": "invalid path"}`
+
 #### POST /api/folder
 - Body: `{"name": "new-folder"}` (현재 `path` 파라미터 경로 아래에 생성)
 - 성공: `201 Created`, `{"path": "/movies/new-folder"}`
@@ -211,6 +252,23 @@ file_server/
 - 성공: `204 No Content`
 - 미존재: `404 {"error": "not found"}`
 - path가 파일을 가리킴: `400 {"error": "not a directory"}`
+- traversal: `400 {"error": "invalid path"}`
+
+#### PATCH /api/folder
+- Body: `{"name": "new-folder-name"}`
+- 성공: `200 OK`
+  ```json
+  {
+    "path": "/movies/new-folder-name",
+    "name": "new-folder-name"
+  }
+  ```
+- 미존재: `404 {"error": "not found"}`
+- path가 파일을 가리킴: `400 {"error": "not a directory"}`
+- 루트 rename 시도 (path가 빈 문자열 또는 `/`): `400 {"error": "cannot rename root"}`
+- 유효하지 않은 이름: `400 {"error": "invalid name"}`
+- 새 이름 = 기존 이름: `400 {"error": "name unchanged"}`
+- 충돌: `409 {"error": "already exists"}`
 - traversal: `400 {"error": "invalid path"}`
 
 #### GET /api/stream
@@ -311,10 +369,19 @@ volumes:
 - 단위 테스트: 섬네일 생성, MIME 타입 감지, Range 파싱
 - 단위 테스트 (동영상 섬네일): `thumb.IsBlankFrame` 함수 — 전체 흑/백 판정 로직
 - 단위 테스트 (duration): 사이드카 read/write round-trip, `formatDuration` JS 함수 (`4:32`, `1:02:09`, 0/null 케이스)
+- 단위 테스트 (rename): 이름 검증 (확장자 strip 로직, 빈 문자열, `/`·`\\`, `.`/`..`, 길이 초과), 확장자 재부착 로직
 - 통합 테스트: HTTP 핸들러 (`net/http/httptest` 사용)
 - 통합 테스트 (동영상 섬네일): ffmpeg 없는 환경에서 placeholder 반환 확인
 - 통합 테스트 (duration): browse 응답에 동영상 entry의 `duration_sec` 포함 확인 (사이드카 있을 때 / 없을 때)
-- 수동 테스트: 브라우저에서 업로드→섬네일→스트리밍 전체 흐름 확인 (썸네일 우하단 시간 오버레이 확인)
+- 통합 테스트 (rename):
+  - `PATCH /api/file` 성공 시 파일 + `.thumb/{name}.jpg` + `.thumb/{name}.jpg.dur` 모두 신규 이름으로 이동 확인
+  - 사이드카가 일부만 있을 때(`.jpg`만 있고 `.dur` 없음) 에러 없이 200 반환
+  - 확장자 포함 입력(`new.mp4`)이 원본 확장자(`.mkv`)를 덮어쓰지 않음 확인
+  - 409 Conflict: 동일 디렉토리 내 기존 파일명으로 rename 시도
+  - 400 name unchanged: 새 이름이 기존 이름과 동일할 때
+  - `PATCH /api/folder` 성공 시 하위 내용(`.thumb/` 포함)이 새 경로에 그대로 존재 확인
+  - Path traversal 방지 (`name`에 `/`·`\\` 포함 시 400)
+- 수동 테스트: 브라우저에서 업로드→섬네일→스트리밍 전체 흐름 확인 (썸네일 우하단 시간 오버레이 확인). Rename 후 썸네일·duration 오버레이가 유지되는지 확인.
 
 ---
 
@@ -324,8 +391,16 @@ volumes:
 - Range 요청 지원 (스트리밍 seek 필수)
 - 업로드 파일은 `/data` 볼륨 내부에만 저장 (path traversal 방지)
 - 섬네일은 비동기로 생성 (업로드 응답 차단 안 함)
+- Rename 시 `media.SafePath`로 원본·대상 경로 모두 검증 (path traversal 방지)
+- Rename은 동일 부모 디렉토리 내에서만 허용 (경로 이동 금지)
+- File rename은 `os.Link` + `os.Remove`로 atomic EEXIST 보장 (TOCTOU 방지)
 
 **하지 않을 것 (Never)**
 - TS 이외 포맷 트랜스코딩 (MP4/MKV/AVI는 원본 그대로 스트리밍)
 - 사용자 인증/권한 관리
 - 외부 CDN이나 클라우드 스토리지 연동
+- Rename 시 확장자 변경 허용 (MIME/타입 감지 일관성 유지)
+- Rename 시 자동 suffix 부여 (`_1`, `_2` 등) — 충돌은 항상 409로 거부
+
+**Known limitations**
+- Folder rename은 `os.Stat` + `os.Rename` 순서로, 두 콜 사이에 동일 이름 폴더가 생성되면 race 발생 가능. 단일 사용자 배포 대상이므로 acceptable.

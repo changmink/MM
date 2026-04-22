@@ -29,6 +29,13 @@ const folderNameInput = document.getElementById('folder-name-input');
 const folderCancelBtn = document.getElementById('folder-cancel-btn');
 const folderConfirmBtn = document.getElementById('folder-confirm-btn');
 const folderError   = document.getElementById('folder-error');
+const renameModal       = document.getElementById('rename-modal');
+const renameTitle       = document.getElementById('rename-title');
+const renameHint        = document.getElementById('rename-hint');
+const renameInput       = document.getElementById('rename-input');
+const renameError       = document.getElementById('rename-error');
+const renameCancelBtn   = document.getElementById('rename-cancel-btn');
+const renameConfirmBtn  = document.getElementById('rename-confirm-btn');
 
 // ── Routing ───────────────────────────────────────────────────────────────────
 window.addEventListener('popstate', () => {
@@ -151,9 +158,14 @@ function buildImageGrid(images) {
     card.innerHTML = `
       <img src="${esc(thumbSrc)}" alt="${esc(entry.name)}" loading="lazy">
       <div class="thumb-name">${esc(entry.name)}</div>
-      <button class="delete-btn" title="삭제">✕</button>
+      <button class="rename-btn" title="이름 변경" aria-label="이름 변경">✎</button>
+      <button class="delete-btn" title="삭제" aria-label="삭제">✕</button>
     `;
     card.querySelector('img').addEventListener('click', () => openLightboxImage(i));
+    card.querySelector('.rename-btn').addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      openRenameModal(entry);
+    });
     card.querySelector('.delete-btn').addEventListener('click', (ev) => {
       ev.stopPropagation();
       deleteFile(entry.path);
@@ -178,9 +190,14 @@ function buildVideoGrid(videos) {
       <img src="${esc(thumbSrc)}" alt="${esc(entry.name)}" loading="lazy">
       <div class="thumb-name">${esc(entry.name)}</div>
       ${durBadge}
-      <button class="delete-btn" title="삭제">✕</button>
+      <button class="rename-btn" title="이름 변경" aria-label="이름 변경">✎</button>
+      <button class="delete-btn" title="삭제" aria-label="삭제">✕</button>
     `;
     card.querySelector('img').addEventListener('click', () => openLightboxVideo(entry));
+    card.querySelector('.rename-btn').addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      openRenameModal(entry);
+    });
     card.querySelector('.delete-btn').addEventListener('click', (ev) => {
       ev.stopPropagation();
       deleteFile(entry.path);
@@ -207,10 +224,14 @@ function buildTable(entries) {
     tr.innerHTML = `
       <td class="name-cell"><span class="icon">${icon}</span>${esc(entry.name)}</td>
       <td class="size-cell">${size}</td>
-      <td class="action-cell"><button title="삭제" data-path="${esc(entry.path)}">🗑</button></td>
+      <td class="action-cell">
+        <button class="rename-action" title="이름 변경" aria-label="이름 변경">✎</button>
+        <button class="delete-action" title="삭제" aria-label="삭제">🗑</button>
+      </td>
     `;
     tr.querySelector('.name-cell').addEventListener('click', () => handleClick(entry));
-    tr.querySelector('.action-cell button').addEventListener('click', () =>
+    tr.querySelector('.rename-action').addEventListener('click', () => openRenameModal(entry));
+    tr.querySelector('.delete-action').addEventListener('click', () =>
       entry.is_dir ? deleteFolder(entry.path) : deleteFile(entry.path)
     );
     tbody.appendChild(tr);
@@ -451,6 +472,95 @@ async function deleteFolder(path) {
   } else {
     alert('폴더 삭제 실패');
   }
+}
+
+// ── Rename ────────────────────────────────────────────────────────────────────
+let renameTarget = null;
+let renameSubmitting = false;
+
+renameCancelBtn.addEventListener('click', closeRenameModal);
+renameModal.addEventListener('click', e => { if (e.target === renameModal) closeRenameModal(); });
+renameConfirmBtn.addEventListener('click', submitRename);
+renameInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') submitRename();
+  if (e.key === 'Escape') closeRenameModal();
+});
+
+function splitExtension(name) {
+  // Mirror the server: filepath.Ext returns the final ".ext" or "".
+  // Folder names or extension-less files have ext = ''.
+  const dot = name.lastIndexOf('.');
+  if (dot <= 0 || dot === name.length - 1) return { base: name, ext: '' };
+  return { base: name.slice(0, dot), ext: name.slice(dot) };
+}
+
+function openRenameModal(entry) {
+  renameTarget = entry;
+  renameError.textContent = '';
+  renameError.classList.add('hidden');
+
+  const { base, ext } = entry.is_dir ? { base: entry.name, ext: '' } : splitExtension(entry.name);
+  renameTitle.textContent = entry.is_dir ? '폴더 이름 변경' : '파일 이름 변경';
+  if (ext) {
+    renameHint.textContent = `확장자: ${ext} (변경 불가)`;
+    renameHint.classList.remove('hidden');
+  } else {
+    renameHint.classList.add('hidden');
+  }
+  renameInput.value = base;
+  renameModal.classList.remove('hidden');
+  renameInput.focus();
+  renameInput.select();
+}
+
+function closeRenameModal() {
+  renameModal.classList.add('hidden');
+  renameTarget = null;
+}
+
+async function submitRename() {
+  if (renameSubmitting || !renameTarget) return;
+  const newBase = renameInput.value.trim();
+  if (!newBase) {
+    showRenameError('이름을 입력하세요.');
+    return;
+  }
+  const entry = renameTarget;
+  const url = entry.is_dir
+    ? '/api/folder?path=' + encodeURIComponent(entry.path)
+    : '/api/file?path=' + encodeURIComponent(entry.path);
+  renameSubmitting = true;
+  renameConfirmBtn.disabled = true;
+  try {
+    const res = await fetch(url, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newBase }),
+    });
+    if (res.ok) {
+      closeRenameModal();
+      browse(currentPath, false);
+      return;
+    }
+    const err = await res.json().catch(() => ({}));
+    if (res.status === 409) {
+      showRenameError('이미 같은 이름이 있습니다.');
+    } else if (res.status === 400 && err.error === 'name unchanged') {
+      showRenameError('이름이 같습니다.');
+    } else if (res.status === 404) {
+      showRenameError('대상을 찾을 수 없습니다.');
+    } else {
+      showRenameError('유효하지 않은 이름입니다.');
+    }
+  } finally {
+    renameSubmitting = false;
+    renameConfirmBtn.disabled = false;
+  }
+}
+
+function showRenameError(msg) {
+  renameError.textContent = msg;
+  renameError.classList.remove('hidden');
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
