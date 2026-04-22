@@ -111,6 +111,7 @@
   - **Image**: `image/jpeg`, `image/png`, `image/webp`, `image/gif`
   - **Video**: `video/mp4`, `video/x-matroska`, `video/x-msvideo`, `video/mp2t`
   - **Audio**: `audio/mpeg`, `audio/flac`, `audio/aac`, `audio/ogg`, `audio/wav`, `audio/mp4`
+  - **HLS 플레이리스트** (ffmpeg 리먹싱 후 `.mp4`로 저장): `application/vnd.apple.mpegurl`, `application/x-mpegurl` — 상세는 §2.6.1
 - [ ] **파일명 결정**:
   1. URL 마지막 경로 세그먼트 추출 (예: `https://x.com/a/foo.mp4` → `foo.mp4`)
   2. URL에 확장자 없거나 비표준이면 응답 `Content-Type` 헤더에서 결정 (`image/jpeg` → `.jpg`, `video/mp4` → `.mp4`, `audio/mpeg` → `.mp3`, `video/x-matroska` → `.mkv`, `audio/mp4` → `.m4a`, …)
@@ -125,7 +126,8 @@
   5. 요청 시 `Authorization` 등 인증 헤더 자동 첨부 안 함
   6. 응답 헤더 검증:
      - `Content-Type`이 위 허용 목록에 없으면 거부 (`error: "unsupported_content_type"`)
-     - `Content-Length` 헤더 **없으면 거부** (`error: "missing_content_length"`)
+     - **HLS 분기** (§2.6.1): Content-Type이 HLS 플레이리스트이거나, URL 경로가 `.m3u8`로 끝나고 Content-Type이 `text/plain` / `application/octet-stream` / 파싱 불가 → HLS 흐름으로 이탈하고 이하 §2.6 검증은 건너뜀
+     - `Content-Length` 헤더 **없으면 거부** (`error: "missing_content_length"`) — HLS 제외
      - `Content-Length` > **2 GiB** (2 × 1024³ = 2147483648 B)이면 다운로드 시작 전 거부 (`error: "too_large"`)
   7. 임시 파일에 스트리밍 저장
   8. 다운로드 중 누적 바이트가 2 GiB 초과하면 즉시 중단 + 임시 파일 삭제 (`error: "too_large"`)
@@ -135,6 +137,49 @@
 - [ ] **타임아웃**: 연결 10초 + 전체 다운로드 **10분** (개별 URL 단위). 초과 시 `error: "download_timeout"`
 - [ ] **SSRF 정책**: 약하게 — 사설 IP(127.0.0.1, 10.x, 172.16-31.x, 192.168.x, 169.254.x, ::1, fc00::/7, fe80::/10) 차단 안 함 (LAN 미디어 서버 자기 호출 등 정상 케이스 허용)
 - [ ] **인증/쿠키**: 자동 첨부 절대 안 함 (인증 필요한 URL은 실패 처리)
+
+### 2.6.1 HLS 스트림 다운로드
+
+HLS(`.m3u8`) 플레이리스트는 여러 개의 `.ts`/`.m4s` 세그먼트를 참조하는 색인 파일이라, 개별 세그먼트에는 Content-Length가 있어도 **스트림 전체 크기를 미리 알 수 없다.** 일반 다운로드 경로(`Content-Length` 사전 검증) 대신 ffmpeg 리먹싱 경로를 거쳐 단일 MP4 파일로 저장한다.
+
+- [ ] **감지 조건** (둘 중 하나 만족 시 HLS 분기):
+  1. 응답 `Content-Type` (media type만, 파라미터 무시, 대소문자 무시)이 `application/vnd.apple.mpegurl` 또는 `application/x-mpegurl`
+  2. URL 경로가 `.m3u8`(대소문자 무시)로 끝나고 `Content-Type`이 `text/plain`, `application/octet-stream`, 빈 값, 또는 파싱 실패 (CDN 오인식 폴백)
+- [ ] **마스터 플레이리스트 처리:**
+  - 초기 HTTP 응답 본문을 **최대 1 MiB**까지 읽어 플레이리스트 파싱 (초과 시 `error: "hls_playlist_too_large"`)
+  - `#EXT-X-STREAM-INF:`가 하나 이상 있으면 master playlist로 간주
+  - 각 variant의 `BANDWIDTH` 속성 비교 → **최고값** variant 선택 (동률은 먼저 선언된 것)
+  - `BANDWIDTH` 누락 variant는 0으로 간주 (후순위)
+  - variant URL이 상대 경로면 master URL 기준 resolve
+  - `#EXT-X-STREAM-INF`가 없으면 이미 media playlist — 원본 URL을 그대로 사용
+- [ ] **다운로드 흐름:**
+  1. HLS 감지 → 초기 응답 본문을 메모리로 읽고 즉시 연결 close
+  2. ffmpeg 프로세스 spawn: `ffmpeg -hide_banner -loglevel error -protocol_whitelist "http,https,tls,tcp,crypto" -i <variant_url> -c copy -bsf:a aac_adtstoasc -f mp4 -movflags +faststart <tmpPath>`
+     - 임시 파일 경로는 기존 `.urlimport-*.tmp` 패턴 재사용
+     - stderr는 버퍼링하여 실패 시 로그로 남김 (응답 본문으로는 노출 안 함)
+  3. 별도 goroutine에서 500 ms 주기로 임시 파일 `os.Stat` → 현재 크기 계산 → `progress` 이벤트 방출 (기존 1 MiB / 250 ms throttling 규칙 그대로 적용)
+  4. 임시 파일 크기가 2 GiB 초과 시 ffmpeg 프로세스 kill + 임시 파일 삭제 → `error: "too_large"`
+  5. `TotalTimeout`(10분) 또는 요청 context 취소 시 ffmpeg 프로세스 kill → `error: "download_timeout"` (또는 context에 따라 `network_error`)
+  6. ffmpeg exit code 0 → 임시 파일 → 최종 경로 atomic rename (기존 `renameUnique` 재사용)
+  7. ffmpeg exit code non-zero → `error: "ffmpeg_error"` + 임시 파일 삭제
+- [ ] **파일명 결정:**
+  - URL 마지막 경로 세그먼트가 `foo.m3u8` → base name `foo` + 강제 확장자 `.mp4`
+  - base name 추출 불가(빈 이름, `.`, `..`) → 기본값 `video.mp4`
+  - 확장자 교체가 발생하므로 항상 `warnings: ["extension_replaced"]` 추가
+  - 충돌 시 기존 `_1`, `_2` 자동 리네임 로직 그대로 적용
+- [ ] **타입 및 후속 처리:**
+  - `type: "video"` (항상)
+  - 성공 시 일반 동영상과 동일: `.thumb/{name}.jpg` 썸네일 풀 제출 + duration 사이드카 생성
+- [ ] **progress 이벤트 차이점:**
+  - `start` 이벤트: `total` 필드 **생략** (미상) — 기존 "알 수 없으면 생략" 규칙 준수
+  - `progress.received`: 출력 MP4 임시 파일의 현재 바이트 수 (수신 바이트 아님) — ffmpeg는 버퍼/remux 과정에서 수신 총량 ≠ 출력 총량
+  - `done.size`: 최종 MP4 파일 크기 (atomic rename 직후 `Stat`)
+- [ ] **보안:**
+  - ffmpeg `-protocol_whitelist "http,https,tls,tcp,crypto"` 로 제한 — m3u8 내부 세그먼트 URL이 `file:`, `rtp:`, `udp:` 등으로 LFI/포트스캔을 시도할 수 없게 차단
+  - variant/세그먼트 URL의 스킴은 ffmpeg가 화이트리스트로 강제하므로 Go 측 추가 검증 불필요 (단, master playlist 파싱 시 선택된 variant URL의 스킴이 `http`/`https`가 아니면 파싱 단계에서 거부 — 이중 방어)
+  - ffmpeg 호출 시 URL은 argv로 전달 (쉘 미개입) — shell injection 불가
+- [ ] **Live stream 처리:** 명시적 거부·감지 없음. 엔드리스 스트림은 `TotalTimeout`(10분) 또는 2 GiB 상한에서 자연 중단되고 `download_timeout`/`too_large`로 실패 처리. 부분적으로 기록된 임시 파일은 폐기.
+- [ ] **DRM/Fairplay/암호화 세그먼트:** 지원 안 함 — ffmpeg가 실패하면 그대로 `ffmpeg_error` 반환
 
 ---
 
@@ -367,7 +412,7 @@ file_server/
 - `warnings` 가능 값:
   - `"insecure_http"` — HTTP(비암호화) URL 사용
   - `"renamed"` — 파일명 충돌로 자동 리네임 (최종명은 `name`/`path` 반영)
-  - `"extension_replaced"` — URL 확장자와 `Content-Type` 불일치로 확장자 교체
+  - `"extension_replaced"` — URL 확장자와 `Content-Type` 불일치로 확장자 교체 (HLS는 항상 `.m3u8` → `.mp4` 교체이므로 함께 부착)
 - `error` 가능 값:
   - `"invalid_scheme"` — `http`/`https` 외 스킴
   - `"invalid_url"` — URL 파싱 실패
@@ -377,8 +422,10 @@ file_server/
   - `"tls_error"` — TLS 인증서 검증 실패
   - `"http_error"` — 4xx/5xx 응답
   - `"unsupported_content_type"` — 허용 Content-Type 목록 밖
-  - `"missing_content_length"` — `Content-Length` 헤더 없음
+  - `"missing_content_length"` — `Content-Length` 헤더 없음 (HLS 예외 — §2.6.1)
   - `"too_large"` — 2 GiB 초과
+  - `"hls_playlist_too_large"` — HLS 플레이리스트 본문이 1 MiB 초과 (§2.6.1)
+  - `"ffmpeg_error"` — HLS 리먹싱 중 ffmpeg 프로세스 실패 (non-zero exit)
   - `"network_error"` — 기타 네트워크 실패
   - `"write_error"` — 디스크 저장 실패
 - 4xx 케이스 (요청 자체 거부 — SSE 스트림 시작 전 일반 JSON 에러 응답):
@@ -516,6 +563,20 @@ volumes:
   - 부분 실패: 3개 URL 혼합 → 각 URL당 `done`/`error` 1개씩 + `summary` 1개
   - 리다이렉트 6회 → `error: "too_many_redirects"`
   - 큰 파일(>1 MiB) → `progress` 이벤트 ≥1개 포함, 각 이벤트의 `received` 단조 증가
+- 단위 테스트 (HLS 플레이리스트 파서):
+  - Master playlist에서 최고 `BANDWIDTH` variant 선택 (동률 시 선언 순서)
+  - `BANDWIDTH` 누락 variant는 후순위 처리
+  - variant URL 상대 경로 resolve (master URL base 기준)
+  - `#EXT-X-STREAM-INF` 없는 media playlist는 원본 URL 반환
+  - 1 MiB 초과 본문 → 파싱 단계에서 거부 (`hls_playlist_too_large`)
+- 통합 테스트 (HLS import): 모의 origin에 master.m3u8 + media.m3u8 + 세그먼트(.ts) 고정 파일 준비
+  - 표준 Content-Type(`application/vnd.apple.mpegurl`) + master playlist → 최고 비트레이트 variant의 세그먼트가 선택되어 MP4로 저장 확인 (파일 존재 + ffprobe로 "video/mp4" 확인 가능한 환경에서만)
+  - Content-Type `text/plain` + URL `.m3u8` 폴백 → 정상 HLS 분기 진입 확인
+  - `start` 이벤트에 `total` 필드 부재 확인 (`json.Marshal` 시 `omitempty` 동작)
+  - `progress.received`가 임시 파일 크기 기반으로 단조 증가 확인
+  - ffmpeg 종료 코드 non-zero 시뮬레이션 → `error: "ffmpeg_error"` + 임시 파일 정리 확인
+  - ffmpeg 미설치 환경: skip 또는 fake binary 주입으로 테스트 (CI 정책에 따름)
+  - 비 http/https variant URL(예: `file:///etc/passwd`를 담은 master playlist) → 파싱 단계에서 거부 (error) — ffmpeg까지 내려가지 않음
 - 수동 테스트: 브라우저에서 업로드→섬네일→스트리밍 전체 흐름 확인 (썸네일 우하단 시간 오버레이 확인). Rename 후 썸네일·duration 오버레이가 유지되는지 확인.
 - 수동 테스트 (URL import): 모달에서 URL 여러 개(이미지/동영상/음악 섞어) 입력 → URL별 프로그래스 바 실시간 진행 확인 → 완료 후 성공/실패 카운트 요약 확인
 
@@ -531,6 +592,7 @@ volumes:
 - Rename은 동일 부모 디렉토리 내에서만 허용 (경로 이동 금지)
 - File rename은 `os.Link` + `os.Remove`로 atomic EEXIST 보장 (TOCTOU 방지)
 - URL import: HTTPS TLS 인증서 검증, `Content-Length` 사전 검증, 다운로드 누적 2 GiB 캡, Content-Type 허용 목록(image/video/audio) 검증, 임시 파일 → atomic rename, 파일명 sanitize, SSE `Cache-Control: no-cache` 및 즉시 Flush
+- HLS import: ffmpeg `-protocol_whitelist "http,https,tls,tcp,crypto"` 강제, master playlist의 variant URL 스킴도 `http`/`https`만 허용(이중 검증), ffmpeg 프로세스는 context 취소·2 GiB 초과 시 kill, 출력 MP4는 기존 `renameUnique` 경로로 atomic rename
 
 **하지 않을 것 (Never)**
 - TS 이외 포맷 트랜스코딩 (MP4/MKV/AVI는 원본 그대로 스트리밍)
@@ -538,7 +600,10 @@ volumes:
 - 외부 CDN이나 클라우드 스토리지 연동
 - Rename 시 확장자 변경 허용 (MIME/타입 감지 일관성 유지)
 - Rename 시 자동 suffix 부여 (`_1`, `_2` 등) — 충돌은 항상 409로 거부
-- URL import: `Authorization`/쿠키 등 인증 헤더 자동 첨부, `http`/`https` 외 스킴 허용, 2 GiB 초과 다운로드, 허용 목록 밖 Content-Type 저장, `Content-Length` 없는 응답 저장, 동시 다운로드(batch는 순차 처리)
+- URL import: `Authorization`/쿠키 등 인증 헤더 자동 첨부, `http`/`https` 외 스킴 허용, 2 GiB 초과 다운로드, 허용 목록 밖 Content-Type 저장, `Content-Length` 없는 응답 저장(HLS 경로만 예외), 동시 다운로드(batch는 순차 처리)
+- HLS import: 재인코딩(`-c copy`로 리먹싱만, CPU 폭주 방지), DASH(`.mpd`) 지원, 원본 `.m3u8` + `.ts` 세그먼트를 그대로 저장, DRM/암호화 세그먼트 우회 시도, live stream 특별 처리(엔드리스 스트림은 공통 timeout/size 상한으로만 차단)
 
 **Known limitations**
 - Folder rename은 `os.Stat` + `os.Rename` 순서로, 두 콜 사이에 동일 이름 폴더가 생성되면 race 발생 가능. 단일 사용자 배포 대상이므로 acceptable.
+- HLS live stream은 `TotalTimeout`(10분) 또는 2 GiB 시점에 강제 종료 — 긴 live 컨텐츠는 끝까지 기록되지 않는다. 명시적 live 감지·분기는 없음.
+- HLS 다운로드는 `start` 이벤트에 `total`이 없어 클라이언트 프로그래스 바는 indeterminate(수치 없이 애니메이션) 표시가 필요. 기존 UI가 `total` 없음을 허용하는지 §2.5 모달 구현 시 확인.

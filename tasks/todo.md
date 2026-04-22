@@ -90,3 +90,12 @@
 - [x] T6+T7: 카드/행 dragstart, 사이드바·breadcrumb dropTarget, 커스텀 MIME으로 업로드 zone과 분리, `moveFile` PATCH 호출
 - [x] T8: 트리 fetch 실패 재시도 버튼, focus-visible outline, delete-btn aria-label
 - [x] T9: 트리 노드 hover/focus rename 버튼(✎) — 현재/조상 폴더 rename 시 currentPath 재작성 + rename 후 트리 reload
+
+## Phase 13 — HLS URL Import (`feature/hls-url-import`) — spec [`SPEC.md §2.6.1`](../SPEC.md)
+- [ ] H1: `internal/urlfetch/hls.go` — `isHLSResponse` + `parseMasterPlaylist` (BANDWIDTH 비교, 상대 URL resolve, 스킴 이중 검증) + `hls_test.go` (감지 7케이스 + 파서 8케이스)
+- [ ] H2: `runHLSRemux` — ffmpeg `-protocol_whitelist http,https,tls,tcp,crypto` spawn, 500ms size watcher, 2 GiB kill, ctx 취소 → 프로세스 종료 + 테스트 (ffmpeg skip 가드, 정상 remux, ctx cancel, MaxBytes override 오버플로, non-zero exit, progress ≥1)
+- [ ] H3: `Fetch` HLS 분기 통합 — 1 MiB 본문 cap, variant 선택, 파일명 `.mp4` 강제 + `extension_replaced` 항상 부착, type="video", tmp → atomic rename + 통합 테스트 (정상 media/master, text/plain 폴백, 대문자 확장자, 플레이리스트 초과, file:// variant, 빈 플레이리스트 → ffmpeg_error)
+  - **체크포인트**: 백엔드 완결. `curl -N` 으로 공개 HLS URL import 수동 검증
+- [ ] H4: `sseStart.Total` JSON 태그에 `omitempty` 부착 + 기존 테스트 회귀 체크 + `total` 필드 부재 검증 테스트
+- [ ] H5: frontend — `URL_ERROR_LABELS`에 `ffmpeg_error`/`hls_playlist_too_large` 추가, `total` 없을 때 `.url-row-indeterminate` 클래스 + CSS 좌→우 애니메이션, `app.js?v=N` 버전 bump
+- [ ] H6: E2E 수동 검증 — 공개 HLS URL (Mux test stream), master/media playlist, mislabel CT, live stream timeout, file:// variant 차단, 혼합 batch summary, 모바일 뷰, SSE `total` 부재 확인

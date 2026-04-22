@@ -1537,3 +1537,248 @@ func Fetch(ctx, client, rawURL, destDir, relDir string, cb *Callbacks) (*Result,
 - **위험: 2 GiB 파일 장시간 점유** — 10분 타임아웃 내 완료 못 하면 실패. 의도된 UX (라인 속도 = 2GB/10min = 약 27 Mbps 필요). 필요 시 타임아웃 조정.
 - **위험: `io.Copy` 중 클라이언트 disconnect** — `r.Context()` 취소로 `ctx` 연쇄 취소 → `io.Copy` EOF → 다음 URL 진입 전 Fetch 루프 조기 종료. 서버 측 goroutine 누수 없음.
 - **롤백:** URL-V1~V3 commit revert. Phase 9 상태로 복귀 (이미지 전용 JSON batch). 기존 URL-V4 manual은 다시 필요.
+
+---
+
+## Phase 13 — HLS URL Import (`feature/hls-url-import`)
+
+SPEC.md §2.6.1에 따라 HLS(`.m3u8`) 스트림을 URL Import 경로에 통합한다. `Content-Length` 사전 검증이 불가능한 HLS는 ffmpeg `-c copy` 리먹싱으로 단일 MP4로 저장한다.
+
+### 의존성 그래프
+
+```
+[urlfetch 확장 — 모두 순수 Go, 각 단계 단위 테스트 가능]
+  H1: HLS 감지 + 마스터 플레이리스트 파서
+       ↓
+  H2: ffmpeg 리먹싱 러너 (spawn / size watcher / kill / atomic rename)
+       ↓
+  H3: Fetch() 내부에 HLS 분기 통합 (H1 + H2 wiring, 파일명·warnings·type)
+       ↓
+[handler + 프론트엔드 — HLS가 `total`을 내지 않는 점을 반영]
+  H4: sseStart.Total json `omitempty` (HLS에서 0 → JSON에서 생략)
+       ↓
+  H5: frontend — `total` 부재 시 indeterminate 프로그래스, 신규 에러 라벨
+       ↓
+[검증]
+  H6: E2E 수동 검증 (공개 HLS 샘플 스트림 + mislabeled CT 케이스)
+```
+
+모든 변경은 기존 URL Import 경로(`Fetch`의 non-HLS 분기)를 건드리지 않도록, HLS 감지를 초기 분기점으로 추가한다.
+
+---
+
+### H1 — urlfetch: HLS 감지 + 마스터 플레이리스트 파서
+
+**파일:** `internal/urlfetch/hls.go` (신규), `internal/urlfetch/hls_test.go` (신규)
+
+**범위:**
+- `isHLSResponse(mediaType string, urlPath string) bool`
+  - `application/vnd.apple.mpegurl`, `application/x-mpegurl` (대소문자 무시)
+  - 폴백: `urlPath`가 `.m3u8`로 끝나고 `mediaType`이 `"", "text/plain", "application/octet-stream"` (및 파싱 실패로 빈 문자열 받은 경우)
+- `parseMasterPlaylist(body []byte, base *url.URL) (variantURL *url.URL, err error)`
+  - 본문 크기 ≤ 1 MiB 가정 (초과는 호출자가 사전 거부 — H3에서 `io.LimitReader`로 처리)
+  - `#EXT-X-STREAM-INF:` 라인 파싱 → 다음 URL 라인이 variant
+  - `BANDWIDTH=` 속성 비교 → 최고값 선택, 동률은 먼저 선언된 것 유지
+  - 누락 variant는 0으로 간주 (후순위)
+  - `#EXT-X-STREAM-INF`가 전혀 없으면 → `base` URL 그대로 반환 (media playlist로 간주)
+  - 상대 URL은 `base.ResolveReference(…)`로 절대화
+  - variant URL 스킴이 `http`/`https`가 아니면 에러 (이중 방어)
+- 전용 에러: `errHLSPlaylistTooLarge`, `errHLSVariantScheme` (FetchError 코드로 변환은 H3에서)
+
+**완료 기준:**
+- `go test ./internal/urlfetch -run TestHLS` 통과
+- 테스트 케이스:
+  - `isHLSResponse`: vnd CT / x-mpegurl CT / 대소문자 / 파라미터 포함 (`application/vnd.apple.mpegurl; charset=utf-8`) / `.m3u8` + text/plain 폴백 / `.m3u8` + octet-stream 폴백 / 폴백 Content-Type이 `video/mp4`면 거부 / `.m3u8` 대문자 확장자
+  - `parseMasterPlaylist`: 3개 variant 중 최고 BANDWIDTH 선택 / 동률 시 첫 번째 / BANDWIDTH 누락 variant 후순위 / 상대 URL resolve / 절대 URL 그대로 / `#EXT-X-STREAM-INF` 없으면 base 반환 / `file://` variant 거부 / 빈 본문 → base 반환 (media playlist 간주)
+
+**검증:** `go test ./internal/urlfetch/... -run TestHLS -v`
+
+**공개 API 변경 없음** — H1은 internal helper만 추가.
+
+---
+
+### H2 — urlfetch: ffmpeg 리먹싱 러너
+
+**파일:** `internal/urlfetch/hls.go` (H1에 추가)
+
+**범위:**
+- `runHLSRemux(ctx context.Context, variantURL string, tmpPath string, cb *Callbacks) error`
+  - `exec.CommandContext(ctx, "ffmpeg", …)` 로 spawn
+  - 인자: `-hide_banner -loglevel error -protocol_whitelist "http,https,tls,tcp,crypto" -i <variantURL> -c copy -bsf:a aac_adtstoasc -f mp4 -movflags +faststart <tmpPath>`
+  - stderr는 `bytes.Buffer`로 캡처 (실패 시 로그)
+  - **사이즈 watcher goroutine**: 500 ms 주기로 `os.Stat(tmpPath)` → 현재 크기를 `cb.Progress`로 전달 (throttling은 기존 `progressReader` 규칙과 동일 — H2 안에서 시간·바이트 두 threshold 체크)
+  - 사이즈가 `MaxBytes`(2 GiB) 초과 → `cmd.Process.Kill()` + 에러 반환 (`errTooLarge`)
+  - `ctx` 취소 → `CommandContext`가 자동 kill
+  - `cmd.Wait()` exit code non-zero → `errFFmpegExit{stderr}` 반환
+  - 호출자는 성공 시 파일 닫고 rename까지 책임
+- 스택가드:
+  - ffmpeg 미설치 환경 → `exec.LookPath` 단계에서 감지 → `errFFmpegMissing` (코드 변환: `ffmpeg_error`)
+  - 임시 파일 생성·정리는 H3(Fetch wiring)에서 — H2는 path만 받음
+
+**완료 기준:**
+- `go test ./internal/urlfetch -run TestHLSRemux` 통과
+- 테스트 전략:
+  - ffmpeg 미설치 시 `t.Skip("ffmpeg not found")` — 기존 stream_test.go와 동일 패턴
+  - 소형 HLS fixture 생성: ffmpeg로 테스트 시작 시 MP4 → TS 세그먼트 3개 + m3u8 playlist를 `httptest.Server`로 호스팅
+  - 케이스:
+    - 정상 리먹싱 → tmp 파일에 MP4 시그니처(`ftyp` box) 쓰여있음
+    - `ctx` 취소 → 프로세스 즉시 종료, 에러는 `context.Canceled`
+    - 2 GiB 초과 시뮬레이션: MaxBytes를 테스트에서 32 KiB로 override(테스트 전용 `WithMaxBytes` helper 추가) → kill + `errTooLarge` 반환
+    - ffmpeg 종료 코드 non-zero (잘못된 variant URL) → `errFFmpegExit`, stderr 메시지 포함
+    - progress 콜백 호출 ≥ 1회 (출력 파일이 1 MiB 이상일 때)
+
+**검증:** `go test ./internal/urlfetch/... -run TestHLSRemux -v`
+
+---
+
+### H3 — urlfetch.Fetch: HLS 분기 통합 (체크포인트)
+
+**파일:** `internal/urlfetch/fetch.go`, `internal/urlfetch/fetch_test.go`
+
+**변경:**
+- `Fetch`의 Content-Type 검증 전에 HLS 분기:
+  ```go
+  mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+  if isHLSResponse(mediaType, parsed.Path) {
+      return fetchHLS(ctx, resp, parsed, destDir, relDir, warnings, cb)
+  }
+  // 기존 흐름 (Content-Length, Content-Type 허용 목록, io.Copy)
+  ```
+- `fetchHLS(ctx, resp, parsed, destDir, relDir, warnings, cb)` 신규:
+  1. 본문을 `io.LimitReader(resp.Body, 1<<20 + 1)` 로 읽기 → 1 MiB 초과면 `FetchError{Code: "hls_playlist_too_large"}`
+  2. `parseMasterPlaylist(body, parsed)` 호출 → variant URL 획득 (실패 시 `ffmpeg_error` 또는 구분된 코드)
+  3. variant URL 스킴 재검증 (`http`/`https`만)
+  4. 파일명: URL 마지막 세그먼트에서 base name 추출 (`sanitizeFilename` + `TrimSuffix`로 확장자 제거) → `.mp4` 부착. 추출 불가 시 `video.mp4`
+  5. `warnings = append(warnings, "extension_replaced")` 항상 추가 (`.m3u8` → `.mp4`)
+  6. `fileType := "video"` 고정
+  7. `cb.Start(name, 0, "video")` — total을 0으로 전달 (H4에서 JSON `omitempty` 처리)
+  8. `os.CreateTemp(destDir, ".urlimport-*.tmp")` 생성, 경로만 `runHLSRemux`에 전달 (ffmpeg 자체가 파일을 열어 쓰기)
+     - 주의: ffmpeg가 파일을 열기 위해 tmp 파일을 먼저 삭제하거나 덮어써야 할 수 있음 → `tmpFile.Close()` 한 뒤 `os.Remove(tmpPath)` 하고 경로만 넘기는 방식이 안전. 최종 rename 직전 tmp 존재 확인.
+     - 또는: `-y` 플래그로 overwrite 허용
+  9. H2의 `runHLSRemux(ctx, variantURL.String(), tmpPath, cb)` 호출
+  10. 에러 매핑: `errTooLarge` → `too_large`, `errFFmpegMissing`/`errFFmpegExit` → `ffmpeg_error`, `errHLSPlaylistTooLarge` → `hls_playlist_too_large`, `errHLSVariantScheme` → `invalid_scheme`
+  11. 성공 시 `renameUnique(tmpPath, destDir, name)` 호출 (기존 함수 재사용)
+  12. 최종 크기는 `os.Stat`으로 확정, `Result{Size: stat.Size(), Type: "video", Warnings: warnings}` 반환
+- `FetchError` 코드 목록 업데이트 (문서용, 컴파일러가 강제 안 함)
+
+**완료 기준:**
+- 기존 `fetch_test.go` 모든 테스트 그대로 통과 (회귀 없음)
+- 신규 통합 테스트 (httptest.Server로 m3u8 + .ts 세그먼트 호스팅):
+  - 정상 media playlist + 3 세그먼트 → MP4 저장, `Result.Type == "video"`, `Result.Name == "<base>.mp4"`, warnings 에 `extension_replaced` 포함
+  - 정상 master playlist (2 variants) → 높은 BANDWIDTH의 media playlist 선택 후 세그먼트 다운로드 확인 (세그먼트 요청 로그로 검증)
+  - Content-Type `text/plain` + URL `.m3u8` → HLS 분기 진입 확인 (MP4 저장됨)
+  - 대문자 확장자 `.M3U8` → HLS 분기 진입 확인
+  - 1 MiB + 1 byte 본문 → `error: "hls_playlist_too_large"`
+  - master playlist의 variant가 `file:///etc/passwd` → `error: "invalid_scheme"`, tmp 정리 확인
+  - ffmpeg 미설치 시 skip (`t.Skip`)
+  - HLS 감지되지만 본문이 `#EXTM3U` 없이 빈 플레이리스트 → media playlist로 간주, ffmpeg가 실패 → `ffmpeg_error`
+- `go test ./... ./internal/urlfetch/...` 통과
+
+**검증 (체크포인트):**
+- `go test ./... -count=1`
+- 수동: `curl -N -X POST 'http://localhost:8080/api/import-url?path=/movies' -H 'Content-Type: application/json' -d '{"urls":["https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"]}'` 로 SSE 스트림 확인 (`start` 이벤트에 `total` 없음, `progress` 여러 번, `done` 이후 MP4 저장)
+- **여기까지 백엔드 완결** — H4/H5 진입 전 수동 검증으로 중단 가능
+
+---
+
+### H4 — sseStart.Total JSON `omitempty`
+
+**파일:** `internal/handler/import_url.go`, `internal/handler/import_url_test.go`
+
+**변경:**
+- `sseStart` 구조체:
+  ```go
+  type sseStart struct {
+      Phase string `json:"phase"`
+      Index int    `json:"index"`
+      URL   string `json:"url"`
+      Name  string `json:"name"`
+      Total int64  `json:"total,omitempty"`  // HLS 경로에서는 0 → 필드 생략
+      Type  string `json:"type"`
+  }
+  ```
+- SPEC.md §5.1의 "알 수 없으면 생략" 규칙에 부합 — 기존 동영상/이미지/음악은 Content-Length로 total>0이라 동작 변화 없음
+- 기존 테스트 중 `total` 을 0으로 넣어 검증하던 케이스가 있다면 수정 (`TestHandleImportURL_...` 전수 점검)
+
+**완료 기준:**
+- 기존 `import_url_test.go` 통과
+- 신규 단위 테스트: `sseStart{Total:0}` JSON 마샬 → `total` 키 부재 확인
+- 신규 통합 테스트 (HLS path): SSE 스트림의 `start` 이벤트에 `total` 필드 없음을 확인 (`json.RawMessage` 파싱 후 `_, ok := obj["total"]; !ok`)
+
+**검증:** `go test ./internal/handler/... -run TestHandleImportURL -count=1`
+
+---
+
+### H5 — frontend: indeterminate progress + 신규 에러 라벨
+
+**파일:** `web/app.js`, `web/style.css`, `web/index.html` (버전 쿼리 버스트)
+
+**변경:**
+- `URL_ERROR_LABELS`에 추가:
+  ```js
+  ffmpeg_error: 'HLS 리먹싱 실패',
+  hls_playlist_too_large: 'HLS 플레이리스트 크기 초과',
+  ```
+- `handleSSEEvent` `start` 분기:
+  - `ev.total` 이 undefined 또는 0 → 행에 `indeterminate` 클래스 추가 (`row.classList.add('url-row-indeterminate')`)
+  - status 텍스트: `${ev.type} · 크기 미상 (HLS)` (기존 `크기 미상` 문구 재사용, `type==='video'` 조건에서 HLS 라벨 추가는 optional)
+- `handleSSEEvent` `progress` 분기:
+  - total===0일 때 기존 코드가 이미 `received` 바이트만 표시 — 유지
+  - **indeterminate bar**: CSS animation으로 움직이는 스트라이프나 좁은 bar를 좌우로 shuttling
+- `handleSSEEvent` `done` 분기:
+  - `url-row-indeterminate` 클래스 제거 + fill width 100% 고정 (기존 동작 유지)
+- `style.css`:
+  ```css
+  .url-row-indeterminate .url-progress-fill {
+    width: 40% !important;
+    animation: url-indeterminate 1.2s ease-in-out infinite;
+    background: var(--accent, #4a90e2);
+  }
+  @keyframes url-indeterminate {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(250%); }
+  }
+  ```
+- `index.html` 의 `<script src="app.js?v=N">` 버전 번호 +1
+
+**완료 기준:**
+- 수동 테스트: total 없는 start 이벤트 → 바 왼→오 애니메이션 → done 시 고정
+- 에러 라벨 렌더: ffmpeg_error → `실패 · HLS 리먹싱 실패`
+
+**검증:**
+- Chrome DevTools로 SSE 이벤트 주입(`fetch` 모킹) 또는 실제 HLS URL 확인
+
+---
+
+### H6 — E2E 수동 검증 (체크포인트)
+
+1. `docker compose -p file_server up --build -d`
+2. 공개 HLS 샘플 URL로 모달에서 가져오기:
+   - `https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8` (master playlist, VOD)
+   - 기대: `start` → indeterminate 바 → 일정 시간 뒤 `done` → `/data/x36xhzz.mp4` 존재 + `.thumb/x36xhzz.mp4.jpg` 생성 + duration 사이드카 생성
+3. media playlist 단독 URL (master 없는 경우) — 예: 서버에 `test.m3u8` + .ts fixture를 로컬 호스팅 후 `http://localhost:9999/test.m3u8` 넣기
+4. CDN mislabel 시뮬: 로컬 origin이 `.m3u8`을 `text/plain`으로 내려주도록 설정 → 여전히 HLS 분기 진입
+5. Live stream — 예: `https://mux.com/…/live.m3u8` (없으면 생략). 10분 tick 도달 → `error: download_timeout`, tmp 정리 확인
+6. `file:///etc/passwd` 담긴 master playlist를 로컬에서 만들어 테스트 → `invalid_scheme` 에러
+7. 혼합 배치: 이미지 + HLS + 실패 URL → summary 카운트 일치, HLS만 indeterminate
+8. 모바일 뷰: indeterminate bar 가독성, 라벨 wrap
+9. DevTools로 네트워크 보며 SSE 이벤트 순서 확인 (start → progress 여러 개 → done) — `total` 필드 없음 검증
+
+**완료 기준:** 위 9개 케이스 모두 기대 동작 확인 + `git status` clean → PR 생성 가능.
+
+---
+
+### Out of scope (Phase 13)
+- DASH(`.mpd`) 지원 — SPEC Never 명시
+- DRM / FairPlay / HLS AES-128 암호화 세그먼트
+- Live HLS 특별 처리 (DVR window 인식, Re-run 등) — 공통 timeout으로만 cap
+- HLS 원본(`.m3u8` + `.ts`) 그대로 저장
+- variant 수동 선택 UI (항상 최고 BANDWIDTH)
+- ffmpeg 재인코딩 (`-c copy` 리먹싱만)
+
+### 위험 / 롤백
+- **위험: ffmpeg 없는 환경** — Alpine 이미지에 이미 설치되어 있음 (Phase 5). 로컬 개발용 Windows/Mac에서 ffmpeg 없으면 HLS import만 실패하고 기존 URL import는 그대로 동작.
+- **위험: HLS variant URL이 인증 필요** — 인증 헤더 자동 첨부 안 하므로 `ffmpeg_error` 로 실패. 의도된 동작.
+- **위험: ffmpeg가 세그먼트 스트림을 stdout이 아닌 파일로 쓰는 동안 tmp 파일 크기 급증** — 2 GiB watcher가 500 ms 주기로 감시 → 약 2 GiB 근처까지는 초과 가능. 허용 오차 수준.
+- **위험: 1 MiB 제한이 실전 master playlist에 너무 타이트?** — 실전은 보통 수 KiB. 1 MiB는 defense-in-depth, 실 부족 사례 발견 시 조정.
+- **롤백:** H1~H5 commit revert → Phase 12 상태 (이미지/동영상/음악 URL import, HLS 거부) 복귀. 기존 테스트 그대로.
