@@ -87,6 +87,29 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   color: var(--danger);
   font-size: 0.8rem;
   padding: 8px 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+.tree-retry {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.tree-retry:hover { border-color: var(--accent); color: var(--accent); }
+
+.tree-label:focus-visible,
+.tree-chevron:focus-visible,
+.tree-retry:focus-visible,
+.sidebar-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 3px;
 }
 
 /* Tree nodes */

@@ -168,7 +168,7 @@ function buildImageGrid(images) {
     card.innerHTML = `
       <img src="${esc(thumbSrc)}" alt="${esc(entry.name)}" loading="lazy">
       <div class="thumb-name">${esc(entry.name)}</div>
-      <button class="delete-btn" title="삭제">✕</button>
+      <button class="delete-btn" title="삭제" aria-label="삭제">✕</button>
     `;
     card.querySelector('img').addEventListener('click', () => openLightboxImage(i));
     card.querySelector('.delete-btn').addEventListener('click', (ev) => {
@@ -196,7 +196,7 @@ function buildVideoGrid(videos) {
       <img src="${esc(thumbSrc)}" alt="${esc(entry.name)}" loading="lazy">
       <div class="thumb-name">${esc(entry.name)}</div>
       ${durBadge}
-      <button class="delete-btn" title="삭제">✕</button>
+      <button class="delete-btn" title="삭제" aria-label="삭제">✕</button>
     `;
     card.querySelector('img').addEventListener('click', () => openLightboxVideo(entry));
     card.querySelector('.delete-btn').addEventListener('click', (ev) => {
@@ -608,6 +608,7 @@ function esc(str) {
 
 // ── Folder Tree (sidebar) ────────────────────────────────────────────────────
 async function loadTree() {
+  treeRoot.setAttribute('aria-busy', 'true');
   treeRoot.innerHTML = '<div class="tree-empty">로딩 중...</div>';
   try {
     const res = await fetch(`/api/tree?path=/&depth=${TREE_INIT_DEPTH}`);
@@ -621,8 +622,30 @@ async function loadTree() {
     renderTreeChildren(root.children, treeRoot, 0);
     highlightTreeCurrent();
   } catch (e) {
-    treeRoot.innerHTML = `<div class="tree-error">트리 로드 실패: ${esc(e.message)}</div>`;
+    showTreeError(e.message);
+  } finally {
+    treeRoot.setAttribute('aria-busy', 'false');
   }
+}
+
+function showTreeError(message) {
+  treeRoot.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'tree-error';
+  wrap.setAttribute('role', 'alert');
+
+  const text = document.createElement('span');
+  text.textContent = `트리 로드 실패: ${message}`;
+  wrap.appendChild(text);
+
+  const retry = document.createElement('button');
+  retry.type = 'button';
+  retry.className = 'tree-retry';
+  retry.textContent = '다시 시도';
+  retry.addEventListener('click', loadTree);
+  wrap.appendChild(retry);
+
+  treeRoot.appendChild(wrap);
 }
 
 function renderTreeChildren(children, container, depth) {
