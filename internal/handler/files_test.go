@@ -353,6 +353,181 @@ func TestConcurrentUploadSameNameNoClobber(t *testing.T) {
 	}
 }
 
+func TestRenameFile(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, root, root)
+
+	jsonBody := func(name string) *bytes.Buffer {
+		b := &bytes.Buffer{}
+		json.NewEncoder(b).Encode(map[string]string{"name": name})
+		return b
+	}
+	patch := func(path, name string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("PATCH", "/api/file?path="+path, jsonBody(name))
+		req.Header.Set("Content-Type", "application/json")
+		rw := httptest.NewRecorder()
+		mux.ServeHTTP(rw, req)
+		return rw
+	}
+
+	t.Run("rename success", func(t *testing.T) {
+		os.WriteFile(filepath.Join(root, "old.txt"), []byte("hi"), 0644)
+		rw := patch("/old.txt", "new")
+		if rw.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rw.Code, rw.Body.String())
+		}
+		var resp map[string]string
+		json.NewDecoder(rw.Body).Decode(&resp)
+		if resp["name"] != "new.txt" {
+			t.Errorf("name = %q, want new.txt", resp["name"])
+		}
+		if resp["path"] != "/new.txt" {
+			t.Errorf("path = %q, want /new.txt", resp["path"])
+		}
+		if _, err := os.Stat(filepath.Join(root, "old.txt")); !os.IsNotExist(err) {
+			t.Error("old file should be gone")
+		}
+		if _, err := os.Stat(filepath.Join(root, "new.txt")); err != nil {
+			t.Errorf("new file missing: %v", err)
+		}
+	})
+
+	t.Run("user-supplied extension is stripped and original kept", func(t *testing.T) {
+		os.WriteFile(filepath.Join(root, "clip.mp4"), []byte("v"), 0644)
+		rw := patch("/clip.mp4", "movie.mkv")
+		if rw.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rw.Code, rw.Body.String())
+		}
+		var resp map[string]string
+		json.NewDecoder(rw.Body).Decode(&resp)
+		if resp["name"] != "movie.mp4" {
+			t.Errorf("name = %q, want movie.mp4 (original ext preserved)", resp["name"])
+		}
+		if _, err := os.Stat(filepath.Join(root, "movie.mp4")); err != nil {
+			t.Errorf("new file missing: %v", err)
+		}
+	})
+
+	t.Run("image thumbnail follows rename", func(t *testing.T) {
+		sub := filepath.Join(root, "imgdir")
+		thumbDir := filepath.Join(sub, ".thumb")
+		os.MkdirAll(thumbDir, 0755)
+		os.WriteFile(filepath.Join(sub, "a.jpg"), []byte("img"), 0644)
+		os.WriteFile(filepath.Join(thumbDir, "a.jpg.jpg"), []byte("thumb"), 0644)
+
+		rw := patch("/imgdir/a.jpg", "b")
+		if rw.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rw.Code, rw.Body.String())
+		}
+		if _, err := os.Stat(filepath.Join(thumbDir, "a.jpg.jpg")); !os.IsNotExist(err) {
+			t.Error("old thumb should be gone")
+		}
+		if _, err := os.Stat(filepath.Join(thumbDir, "b.jpg.jpg")); err != nil {
+			t.Errorf("new thumb missing: %v", err)
+		}
+	})
+
+	t.Run("video duration sidecar follows rename", func(t *testing.T) {
+		sub := filepath.Join(root, "viddir")
+		thumbDir := filepath.Join(sub, ".thumb")
+		os.MkdirAll(thumbDir, 0755)
+		os.WriteFile(filepath.Join(sub, "x.mp4"), []byte("v"), 0644)
+		os.WriteFile(filepath.Join(thumbDir, "x.mp4.jpg"), []byte("thumb"), 0644)
+		os.WriteFile(filepath.Join(thumbDir, "x.mp4.jpg.dur"), []byte("273.456"), 0644)
+
+		rw := patch("/viddir/x.mp4", "y")
+		if rw.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rw.Code, rw.Body.String())
+		}
+		if _, err := os.Stat(filepath.Join(thumbDir, "y.mp4.jpg")); err != nil {
+			t.Errorf("new thumb missing: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(thumbDir, "y.mp4.jpg.dur")); err != nil {
+			t.Errorf("new duration sidecar missing: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(thumbDir, "x.mp4.jpg.dur")); !os.IsNotExist(err) {
+			t.Error("old duration sidecar should be gone")
+		}
+	})
+
+	t.Run("missing sidecar is not an error", func(t *testing.T) {
+		sub := filepath.Join(root, "nothumb")
+		os.MkdirAll(sub, 0755)
+		os.WriteFile(filepath.Join(sub, "orig.jpg"), []byte("img"), 0644)
+
+		rw := patch("/nothumb/orig.jpg", "renamed")
+		if rw.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rw.Code, rw.Body.String())
+		}
+	})
+
+	t.Run("conflict returns 409", func(t *testing.T) {
+		sub := filepath.Join(root, "conf")
+		os.MkdirAll(sub, 0755)
+		os.WriteFile(filepath.Join(sub, "a.txt"), []byte("a"), 0644)
+		os.WriteFile(filepath.Join(sub, "b.txt"), []byte("b"), 0644)
+		rw := patch("/conf/a.txt", "b")
+		if rw.Code != http.StatusConflict {
+			t.Errorf("expected 409, got %d", rw.Code)
+		}
+	})
+
+	t.Run("name unchanged returns 400", func(t *testing.T) {
+		os.WriteFile(filepath.Join(root, "same.txt"), []byte("x"), 0644)
+		rw := patch("/same.txt", "same")
+		if rw.Code != http.StatusBadRequest {
+			t.Errorf("expected 400, got %d: %s", rw.Code, rw.Body.String())
+		}
+	})
+
+	t.Run("empty name returns 400", func(t *testing.T) {
+		os.WriteFile(filepath.Join(root, "named.txt"), []byte("x"), 0644)
+		rw := patch("/named.txt", "")
+		if rw.Code != http.StatusBadRequest {
+			t.Errorf("expected 400, got %d", rw.Code)
+		}
+	})
+
+	t.Run("slash in name returns 400", func(t *testing.T) {
+		os.WriteFile(filepath.Join(root, "hasslash.txt"), []byte("x"), 0644)
+		rw := patch("/hasslash.txt", "a/b")
+		if rw.Code != http.StatusBadRequest {
+			t.Errorf("expected 400, got %d", rw.Code)
+		}
+	})
+
+	t.Run("dotdot in name returns 400", func(t *testing.T) {
+		os.WriteFile(filepath.Join(root, "hasdotdot.txt"), []byte("x"), 0644)
+		rw := patch("/hasdotdot.txt", "..")
+		if rw.Code != http.StatusBadRequest {
+			t.Errorf("expected 400, got %d", rw.Code)
+		}
+	})
+
+	t.Run("nonexistent returns 404", func(t *testing.T) {
+		rw := patch("/ghost.txt", "renamed")
+		if rw.Code != http.StatusNotFound {
+			t.Errorf("expected 404, got %d", rw.Code)
+		}
+	})
+
+	t.Run("directory returns 400", func(t *testing.T) {
+		os.MkdirAll(filepath.Join(root, "adir"), 0755)
+		rw := patch("/adir", "newdir")
+		if rw.Code != http.StatusBadRequest {
+			t.Errorf("expected 400, got %d: %s", rw.Code, rw.Body.String())
+		}
+	})
+
+	t.Run("traversal in path returns 400", func(t *testing.T) {
+		rw := patch("../../etc/passwd", "pwned")
+		if rw.Code != http.StatusBadRequest {
+			t.Errorf("expected 400, got %d", rw.Code)
+		}
+	})
+}
+
 func TestDelete(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
