@@ -29,6 +29,8 @@ const folderNameInput = document.getElementById('folder-name-input');
 const folderCancelBtn = document.getElementById('folder-cancel-btn');
 const folderConfirmBtn = document.getElementById('folder-confirm-btn');
 const folderError   = document.getElementById('folder-error');
+const sidebarToggle = document.getElementById('sidebar-toggle');
+const sidebarBackdrop = document.getElementById('sidebar-backdrop');
 
 // ── Routing ───────────────────────────────────────────────────────────────────
 window.addEventListener('popstate', () => {
@@ -98,16 +100,13 @@ function renderBreadcrumb(path) {
 function renderFileList(entries) {
   fileList.innerHTML = '';
 
-  const dirs   = entries.filter(e => e.is_dir);
+  // Folders intentionally omitted from the main list — the sidebar tree is
+  // the single navigation surface. Files-only sections below.
   const images = entries.filter(e => e.type === 'image');
   const videos = entries.filter(e => e.type === 'video');
   const audios = entries.filter(e => e.type === 'audio');
   const others = entries.filter(e => e.type === 'other');
 
-  if (dirs.length) {
-    fileList.appendChild(sectionTitle('폴더'));
-    fileList.appendChild(buildTable(dirs));
-  }
   if (images.length) {
     fileList.appendChild(sectionTitle('이미지'));
     fileList.appendChild(buildImageGrid(images));
@@ -125,8 +124,9 @@ function renderFileList(entries) {
     fileList.appendChild(buildTable(others));
   }
 
-  if (!entries.length) {
-    fileList.innerHTML = '<p style="color:var(--text-dim);padding:20px 0">비어있습니다.</p>';
+  const fileCount = images.length + videos.length + audios.length + others.length;
+  if (!fileCount) {
+    fileList.innerHTML = '<p style="color:var(--text-dim);padding:20px 0">파일이 없습니다.</p>';
   }
 }
 
@@ -490,6 +490,19 @@ function esc(str) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
+
+// ── Sidebar toggle (mobile) ──────────────────────────────────────────────────
+function setSidebarOpen(open) {
+  document.body.classList.toggle('sidebar-open', open);
+  sidebarToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  sidebarToggle.setAttribute('aria-label', open ? '폴더 메뉴 닫기' : '폴더 메뉴 열기');
+  sidebarBackdrop.classList.toggle('hidden', !open);
+}
+
+sidebarToggle.addEventListener('click', () => {
+  setSidebarOpen(!document.body.classList.contains('sidebar-open'));
+});
+sidebarBackdrop.addEventListener('click', () => setSidebarOpen(false));
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 const initPath = new URLSearchParams(location.search).get('path') || '/';

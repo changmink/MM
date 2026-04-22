@@ -8,6 +8,8 @@
   --text: #e0e0e0;
   --text-dim: #888;
   --danger: #e05555;
+  --sidebar-w: 240px;
+  --header-h: 57px;
 }
 
 body {
@@ -58,6 +60,54 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .progress-item { margin: 4px 0; font-size: 0.8rem; }
 .progress-item .bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 2px; }
 .progress-item .bar-fill { height: 100%; background: var(--accent); transition: width 0.2s; }
+
+/* App body grid: sidebar + main content */
+.app-body {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  align-items: start;
+}
+
+.sidebar {
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  padding: 12px 8px;
+  position: sticky;
+  top: var(--header-h);
+  height: calc(100vh - var(--header-h));
+  overflow-y: auto;
+  font-size: 0.875rem;
+}
+.sidebar .tree-empty {
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  padding: 8px 6px;
+}
+
+/* Hamburger toggle (mobile only) */
+.sidebar-toggle {
+  display: none;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text);
+  width: 34px;
+  height: 34px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 1.1rem;
+  align-items: center;
+  justify-content: center;
+}
+.sidebar-toggle:hover { border-color: var(--accent); }
+
+/* Mobile-only backdrop behind the sidebar drawer */
+.sidebar-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 80;
+}
+.sidebar-backdrop.hidden { display: none; }
 
 /* File list */
 #file-list { padding: 0 24px; }
@@ -311,4 +361,24 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   .upload-zone { margin: 12px 16px; }
   .image-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
   .file-table .size-cell, .file-table th:nth-child(3) { display: none; }
+
+  /* Sidebar collapses into a left drawer; toggle is the only entry. */
+  .sidebar-toggle { display: inline-flex; }
+  .app-body { grid-template-columns: 1fr; }
+  .sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    width: 280px;
+    height: 100vh;
+    z-index: 90;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    border-right: 1px solid var(--border);
+    padding-top: 16px;
+  }
+  body.sidebar-open .sidebar {
+    transform: translateX(0);
+    box-shadow: 4px 0 16px rgba(0,0,0,0.5);
+  }
 }
