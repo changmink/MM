@@ -89,4 +89,4 @@
 - [x] T5: 트리 렌더 + lazy expand (depth=2 init, chevron으로 lazy) + 현재 위치 하이라이트 + 폴더 변경 후 reload
 - [x] T6+T7: 카드/행 dragstart, 사이드바·breadcrumb dropTarget, 커스텀 MIME으로 업로드 zone과 분리, `moveFile` PATCH 호출
 - [x] T8: 트리 fetch 실패 재시도 버튼, focus-visible outline, delete-btn aria-label
-- [ ] **알려진 회귀 (후속 처리 필요)**: 메인 폴더 섹션이 사라져 폴더 rename UI가 사이드바에 없음 — 트리 노드 우클릭/별도 버튼 추가 필요
+- [x] T9: 트리 노드 hover/focus rename 버튼(✎) — 현재/조상 폴더 rename 시 currentPath 재작성 + rename 후 트리 reload

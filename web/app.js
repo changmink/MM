@@ -872,7 +872,21 @@ async function submitRename() {
     });
     if (res.ok) {
       closeRenameModal();
-      browse(currentPath, false);
+      if (entry.is_dir) {
+        const data = await res.json().catch(() => null);
+        const newPath = data && data.path ? data.path : entry.path;
+        // If the renamed folder is currentPath or an ancestor of it, the
+        // browser is sitting on a now-defunct URL — rewrite to the new prefix.
+        const target = rewritePathAfterFolderRename(entry.path, newPath, currentPath);
+        if (target !== currentPath) {
+          browse(target);
+        } else {
+          browse(currentPath, false);
+        }
+        loadTree();
+      } else {
+        browse(currentPath, false);
+      }
       return;
     }
     const err = await res.json().catch(() => ({}));
@@ -894,6 +908,14 @@ async function submitRename() {
 function showRenameError(msg) {
   renameError.textContent = msg;
   renameError.classList.remove('hidden');
+}
+
+function rewritePathAfterFolderRename(oldPath, newPath, current) {
+  if (current === oldPath) return newPath;
+  if (current.startsWith(oldPath + '/')) {
+    return newPath + current.substring(oldPath.length);
+  }
+  return current;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1018,8 +1040,20 @@ function buildTreeNode(node, depth) {
     }
   });
 
+  const renameBtn = document.createElement('button');
+  renameBtn.className = 'tree-rename';
+  renameBtn.type = 'button';
+  renameBtn.title = '이름 변경';
+  renameBtn.setAttribute('aria-label', `${node.name} 이름 변경`);
+  renameBtn.textContent = '✎';
+  renameBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    openRenameModal({ name: node.name, path: node.path, is_dir: true });
+  });
+
   row.appendChild(chevron);
   row.appendChild(label);
+  row.appendChild(renameBtn);
   wrap.appendChild(row);
   attachDropHandlers(row, node.path);
 

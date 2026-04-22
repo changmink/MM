@@ -159,6 +159,29 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 }
 .tree-children.collapsed { display: none; }
 
+/* Per-node rename button — hover/focus only to avoid visual noise. */
+.tree-rename {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0 4px;
+  font-size: 0.85rem;
+  flex-shrink: 0;
+  display: none;
+  border-radius: 3px;
+}
+.tree-node-row:hover .tree-rename,
+.tree-node-row:focus-within .tree-rename {
+  display: inline-block;
+}
+.tree-rename:hover { color: var(--accent); }
+.tree-node-row.active .tree-rename { color: white; opacity: 0.9; }
+.tree-rename:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 /* Drag and drop visuals */
 .dragging { opacity: 0.4; }
 
