@@ -37,6 +37,15 @@ const treeRoot       = document.getElementById('tree-root');
 // per user spec (Q1=opt3). Deeper nodes lazy-load on chevron click.
 const TREE_INIT_DEPTH = 2;
 
+// Custom MIME isolates internal file moves from external OS file uploads.
+// Both share dragover semantics, so the upload zone checks for 'Files' instead.
+const DND_MIME = 'application/x-fileserver-move';
+
+// Tracks the currently dragged file path. Needed at dragover time because
+// dataTransfer.getData() is only readable on drop; types[] is readable
+// always but doesn't include the value.
+let dragSrcPath = null;
+
 // ── Routing ───────────────────────────────────────────────────────────────────
 window.addEventListener('popstate', () => {
   const p = new URLSearchParams(location.search).get('path') || '/';
@@ -77,6 +86,7 @@ function renderBreadcrumb(path) {
   home.href = 'javascript:void(0)';
   home.textContent = '홈';
   home.addEventListener('click', () => browse('/'));
+  attachDropHandlers(home, '/');
   breadcrumb.appendChild(home);
 
   const parts = path.split('/').filter(Boolean);
@@ -98,6 +108,7 @@ function renderBreadcrumb(path) {
       a.textContent = part;
       const p = accumulated;
       a.addEventListener('click', () => browse(p));
+      attachDropHandlers(a, p);
       breadcrumb.appendChild(a);
     }
   });
@@ -164,6 +175,7 @@ function buildImageGrid(images) {
       ev.stopPropagation();
       deleteFile(entry.path);
     });
+    attachDragHandlers(card, entry);
     grid.appendChild(card);
   });
   return grid;
@@ -191,6 +203,7 @@ function buildVideoGrid(videos) {
       ev.stopPropagation();
       deleteFile(entry.path);
     });
+    attachDragHandlers(card, entry);
     grid.appendChild(card);
   });
   return grid;
@@ -219,6 +232,9 @@ function buildTable(entries) {
     tr.querySelector('.action-cell button').addEventListener('click', () =>
       entry.is_dir ? deleteFolder(entry.path) : deleteFile(entry.path)
     );
+    if (!entry.is_dir) {
+      attachDragHandlers(tr, entry);
+    }
     tbody.appendChild(tr);
   });
 
@@ -328,12 +344,21 @@ audioEl.addEventListener('ended', () => {
 });
 
 // ── Upload ────────────────────────────────────────────────────────────────────
+// Internal card drags carry our custom MIME but no Files; external OS drags
+// carry Files. Gate on Files so dragging an internal file over the upload
+// zone doesn't light it up.
+function isExternalFileDrag(e) {
+  return Array.from(e.dataTransfer.types).includes('Files');
+}
+
 uploadZone.addEventListener('dragover', e => {
+  if (!isExternalFileDrag(e)) return;
   e.preventDefault();
   uploadZone.classList.add('drag-over');
 });
 uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
 uploadZone.addEventListener('drop', e => {
+  if (!isExternalFileDrag(e)) return;
   e.preventDefault();
   uploadZone.classList.remove('drag-over');
   uploadFiles(e.dataTransfer.files);
@@ -461,6 +486,88 @@ async function deleteFolder(path) {
   }
 }
 
+// ── Drag and Drop (file move) ────────────────────────────────────────────────
+function parentDir(p) {
+  if (!p || p === '/') return '/';
+  const i = p.lastIndexOf('/');
+  return i <= 0 ? '/' : p.substring(0, i);
+}
+
+function isInternalMove(e) {
+  return Array.from(e.dataTransfer.types).includes(DND_MIME);
+}
+
+function attachDragHandlers(el, entry) {
+  el.draggable = true;
+  el.addEventListener('dragstart', e => {
+    dragSrcPath = entry.path;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData(DND_MIME, JSON.stringify({ src: entry.path }));
+    // Firefox won't initiate a drag without text/plain or text/uri-list set.
+    e.dataTransfer.setData('text/plain', entry.path);
+    el.classList.add('dragging');
+  });
+  el.addEventListener('dragend', () => {
+    dragSrcPath = null;
+    el.classList.remove('dragging');
+  });
+}
+
+function attachDropHandlers(el, destPath) {
+  el.addEventListener('dragenter', e => {
+    if (!isInternalMove(e)) return;
+    if (dragSrcPath && parentDir(dragSrcPath) === destPath) return;
+    e.preventDefault();
+    el.classList.add('drop-target');
+  });
+  el.addEventListener('dragover', e => {
+    if (!isInternalMove(e)) return;
+    if (dragSrcPath && parentDir(dragSrcPath) === destPath) {
+      e.dataTransfer.dropEffect = 'none';
+      return;
+    }
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  });
+  el.addEventListener('dragleave', () => {
+    el.classList.remove('drop-target');
+  });
+  el.addEventListener('drop', e => {
+    if (!isInternalMove(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    el.classList.remove('drop-target');
+    let payload;
+    try {
+      payload = JSON.parse(e.dataTransfer.getData(DND_MIME));
+    } catch {
+      return;
+    }
+    if (!payload || !payload.src) return;
+    if (parentDir(payload.src) === destPath) return; // defensive — also blocked by backend
+    moveFile(payload.src, destPath);
+  });
+}
+
+async function moveFile(srcPath, destDir) {
+  try {
+    const res = await fetch('/api/file?path=' + encodeURIComponent(srcPath), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: destDir }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      alert('이동 실패: ' + (data.error || res.statusText));
+      return;
+    }
+    // Folder structure unchanged on file move; only the listing needs a refresh.
+    browse(currentPath, false);
+  } catch (e) {
+    alert('이동 실패: ' + e.message);
+  }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function iconFor(type, isDir) {
   if (isDir) return '📁';
@@ -563,6 +670,7 @@ function buildTreeNode(node, depth) {
   row.appendChild(chevron);
   row.appendChild(label);
   wrap.appendChild(row);
+  attachDropHandlers(row, node.path);
 
   const kids = document.createElement('div');
   kids.className = 'tree-children';
