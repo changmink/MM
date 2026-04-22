@@ -528,6 +528,111 @@ func TestRenameFile(t *testing.T) {
 	})
 }
 
+func TestRenameFolder(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, root, root)
+
+	jsonBody := func(name string) *bytes.Buffer {
+		b := &bytes.Buffer{}
+		json.NewEncoder(b).Encode(map[string]string{"name": name})
+		return b
+	}
+	patch := func(path, name string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("PATCH", "/api/folder?path="+path, jsonBody(name))
+		req.Header.Set("Content-Type", "application/json")
+		rw := httptest.NewRecorder()
+		mux.ServeHTTP(rw, req)
+		return rw
+	}
+
+	t.Run("rename folder with contents", func(t *testing.T) {
+		dir := filepath.Join(root, "movies")
+		thumbDir := filepath.Join(dir, ".thumb")
+		os.MkdirAll(thumbDir, 0755)
+		os.WriteFile(filepath.Join(dir, "film.mp4"), []byte("v"), 0644)
+		os.WriteFile(filepath.Join(thumbDir, "film.mp4.jpg"), []byte("t"), 0644)
+
+		rw := patch("/movies", "films")
+		if rw.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rw.Code, rw.Body.String())
+		}
+		var resp map[string]string
+		json.NewDecoder(rw.Body).Decode(&resp)
+		if resp["path"] != "/films" {
+			t.Errorf("path = %q, want /films", resp["path"])
+		}
+		if resp["name"] != "films" {
+			t.Errorf("name = %q, want films", resp["name"])
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Error("old folder should be gone")
+		}
+		if _, err := os.Stat(filepath.Join(root, "films", "film.mp4")); err != nil {
+			t.Errorf("inner file missing after rename: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(root, "films", ".thumb", "film.mp4.jpg")); err != nil {
+			t.Errorf("thumb dir not carried with folder: %v", err)
+		}
+	})
+
+	t.Run("conflict returns 409", func(t *testing.T) {
+		os.MkdirAll(filepath.Join(root, "a"), 0755)
+		os.MkdirAll(filepath.Join(root, "b"), 0755)
+		rw := patch("/a", "b")
+		if rw.Code != http.StatusConflict {
+			t.Errorf("expected 409, got %d", rw.Code)
+		}
+	})
+
+	t.Run("nonexistent returns 404", func(t *testing.T) {
+		rw := patch("/ghost-folder", "renamed")
+		if rw.Code != http.StatusNotFound {
+			t.Errorf("expected 404, got %d", rw.Code)
+		}
+	})
+
+	t.Run("file path returns 400 not a directory", func(t *testing.T) {
+		os.WriteFile(filepath.Join(root, "actually-a-file.txt"), []byte("x"), 0644)
+		rw := patch("/actually-a-file.txt", "renamed")
+		if rw.Code != http.StatusBadRequest {
+			t.Errorf("expected 400, got %d: %s", rw.Code, rw.Body.String())
+		}
+	})
+
+	t.Run("root rename is rejected", func(t *testing.T) {
+		rw := patch("/", "anything")
+		if rw.Code != http.StatusBadRequest {
+			t.Errorf("expected 400 for root rename, got %d", rw.Code)
+		}
+	})
+
+	t.Run("invalid name returns 400", func(t *testing.T) {
+		os.MkdirAll(filepath.Join(root, "tobe"), 0755)
+		for _, name := range []string{"", ".", "..", "a/b"} {
+			rw := patch("/tobe", name)
+			if rw.Code != http.StatusBadRequest {
+				t.Errorf("name %q: expected 400, got %d", name, rw.Code)
+			}
+		}
+	})
+
+	t.Run("name unchanged returns 400", func(t *testing.T) {
+		os.MkdirAll(filepath.Join(root, "samename"), 0755)
+		rw := patch("/samename", "samename")
+		if rw.Code != http.StatusBadRequest {
+			t.Errorf("expected 400, got %d: %s", rw.Code, rw.Body.String())
+		}
+	})
+
+	t.Run("traversal returns 400", func(t *testing.T) {
+		rw := patch("../../etc", "evil")
+		if rw.Code != http.StatusBadRequest {
+			t.Errorf("expected 400, got %d", rw.Code)
+		}
+	})
+}
+
 func TestDelete(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()

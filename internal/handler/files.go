@@ -262,9 +262,86 @@ func (h *Handler) handleFolder(w http.ResponseWriter, r *http.Request) {
 		h.createFolder(w, r)
 	case http.MethodDelete:
 		h.deleteFolder(w, r)
+	case http.MethodPatch:
+		h.renameFolder(w, r)
 	default:
 		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
 	}
+}
+
+func (h *Handler) renameFolder(w http.ResponseWriter, r *http.Request) {
+	rel := r.URL.Query().Get("path")
+	srcAbs, err := media.SafePath(h.dataDir, rel)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid path", err)
+		return
+	}
+
+	if srcAbs == filepath.Clean(h.dataDir) {
+		writeError(w, r, http.StatusBadRequest, "cannot rename root", nil)
+		return
+	}
+
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid body", err)
+		return
+	}
+
+	if err := validateName(body.Name); err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error(), nil)
+		return
+	}
+
+	fi, err := os.Stat(srcAbs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, r, http.StatusNotFound, "not found", nil)
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "stat failed", err)
+		return
+	}
+	if !fi.IsDir() {
+		writeError(w, r, http.StatusBadRequest, "not a directory", nil)
+		return
+	}
+
+	if body.Name == fi.Name() {
+		writeError(w, r, http.StatusBadRequest, "name unchanged", nil)
+		return
+	}
+
+	// parentAbs was safe-checked via srcAbs; body.Name has no separators
+	// per validateName; join cannot escape the root.
+	dstAbs := filepath.Join(filepath.Dir(srcAbs), body.Name)
+
+	if _, err := os.Stat(dstAbs); err == nil {
+		writeError(w, r, http.StatusConflict, "already exists", nil)
+		return
+	}
+
+	// Single OS rename moves the directory atomically; contents (including
+	// .thumb/ subdirectory) follow automatically — no sidecar bookkeeping.
+	if err := os.Rename(srcAbs, dstAbs); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "rename failed", err)
+		return
+	}
+
+	dstRel, err := filepath.Rel(h.dataDir, dstAbs)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "path failed", err)
+		return
+	}
+	relResult := "/" + filepath.ToSlash(dstRel)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"path": relResult,
+		"name": body.Name,
+	})
 }
 
 func (h *Handler) createFolder(w http.ResponseWriter, r *http.Request) {
