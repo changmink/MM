@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/chang/file_server/internal/media"
 )
@@ -108,11 +110,17 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
+	switch r.Method {
+	case http.MethodDelete:
+		h.deleteFile(w, r)
+	case http.MethodPatch:
+		h.moveFile(w, r)
+	default:
 		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
-		return
 	}
+}
 
+func (h *Handler) deleteFile(w http.ResponseWriter, r *http.Request) {
 	rel := r.URL.Query().Get("path")
 	abs, err := media.SafePath(h.dataDir, rel)
 	if err != nil {
@@ -147,6 +155,63 @@ func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) moveFile(w http.ResponseWriter, r *http.Request) {
+	rel := r.URL.Query().Get("path")
+	srcAbs, err := media.SafePath(h.dataDir, rel)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid path", err)
+		return
+	}
+
+	var body struct {
+		To string `json:"to"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid body", err)
+		return
+	}
+
+	destAbs, err := media.SafePath(h.dataDir, body.To)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid destination", err)
+		return
+	}
+
+	// Reject moving into the same directory: it's almost always a UI mistake,
+	// and silently succeeding would still apply a _N suffix (cosmetic noise).
+	if filepath.Clean(filepath.Dir(srcAbs)) == filepath.Clean(destAbs) {
+		writeError(w, r, http.StatusBadRequest, "same directory", nil)
+		return
+	}
+
+	finalAbs, err := media.MoveFile(srcAbs, destAbs)
+	if err != nil {
+		switch {
+		case errors.Is(err, media.ErrSrcNotFound):
+			writeError(w, r, http.StatusNotFound, "not found", nil)
+		case errors.Is(err, media.ErrSrcIsDir):
+			writeError(w, r, http.StatusBadRequest, "cannot move directory", nil)
+		case errors.Is(err, media.ErrDestNotFound), errors.Is(err, media.ErrDestNotDir):
+			writeError(w, r, http.StatusBadRequest, "invalid destination", nil)
+		default:
+			writeError(w, r, http.StatusInternalServerError, "move failed", err)
+		}
+		return
+	}
+
+	finalName := filepath.Base(finalAbs)
+	finalRel := filepath.ToSlash(filepath.Join(body.To, finalName))
+	if !strings.HasPrefix(finalRel, "/") {
+		finalRel = "/" + finalRel
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"path": finalRel,
+		"name": finalName,
+	})
 }
 
 func (h *Handler) handleFolder(w http.ResponseWriter, r *http.Request) {
