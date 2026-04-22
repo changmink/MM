@@ -31,6 +31,11 @@ const folderConfirmBtn = document.getElementById('folder-confirm-btn');
 const folderError   = document.getElementById('folder-error');
 const sidebarToggle = document.getElementById('sidebar-toggle');
 const sidebarBackdrop = document.getElementById('sidebar-backdrop');
+const treeRoot       = document.getElementById('tree-root');
+
+// Initial tree fetch depth — root + children + grandchildren in one round trip
+// per user spec (Q1=opt3). Deeper nodes lazy-load on chevron click.
+const TREE_INIT_DEPTH = 2;
 
 // ── Routing ───────────────────────────────────────────────────────────────────
 window.addEventListener('popstate', () => {
@@ -62,6 +67,7 @@ async function browse(path, pushState = true) {
   playlist = entries.filter(e => e.type === 'audio');
 
   renderFileList(entries);
+  highlightTreeCurrent();
 }
 
 function renderBreadcrumb(path) {
@@ -416,6 +422,7 @@ async function submitCreateFolder() {
     if (res.status === 201) {
       closeFolderModal();
       browse(currentPath, false);
+      loadTree();
     } else if (res.status === 409) {
       showFolderError('이미 존재하는 폴더입니다.');
     } else {
@@ -448,6 +455,7 @@ async function deleteFolder(path) {
   const res = await fetch('/api/folder?path=' + encodeURIComponent(path), { method: 'DELETE' });
   if (res.ok) {
     browse(currentPath, false);
+    loadTree();
   } else {
     alert('폴더 삭제 실패');
   }
@@ -491,6 +499,124 @@ function esc(str) {
     .replace(/'/g, '&#39;');
 }
 
+// ── Folder Tree (sidebar) ────────────────────────────────────────────────────
+async function loadTree() {
+  treeRoot.innerHTML = '<div class="tree-empty">로딩 중...</div>';
+  try {
+    const res = await fetch(`/api/tree?path=/&depth=${TREE_INIT_DEPTH}`);
+    if (!res.ok) throw new Error(await res.text());
+    const root = await res.json();
+    treeRoot.innerHTML = '';
+    if (!root.has_children) {
+      treeRoot.innerHTML = '<div class="tree-empty">폴더가 없습니다.</div>';
+      return;
+    }
+    renderTreeChildren(root.children, treeRoot, 0);
+    highlightTreeCurrent();
+  } catch (e) {
+    treeRoot.innerHTML = `<div class="tree-error">트리 로드 실패: ${esc(e.message)}</div>`;
+  }
+}
+
+function renderTreeChildren(children, container, depth) {
+  if (!children) return;
+  children.forEach(node => container.appendChild(buildTreeNode(node, depth)));
+}
+
+function buildTreeNode(node, depth) {
+  const wrap = document.createElement('div');
+  wrap.className = 'tree-node';
+  wrap.dataset.path = node.path;
+
+  const row = document.createElement('div');
+  row.className = 'tree-node-row';
+  row.style.paddingLeft = (depth * 14 + 6) + 'px';
+
+  const chevron = document.createElement('button');
+  chevron.className = 'tree-chevron';
+  chevron.type = 'button';
+  if (node.has_children) {
+    const expanded = node.children !== null;
+    chevron.textContent = expanded ? '▼' : '▶';
+    chevron.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    chevron.addEventListener('click', e => {
+      e.stopPropagation();
+      toggleNode(wrap, node, depth);
+    });
+  } else {
+    chevron.textContent = '·';
+    chevron.disabled = true;
+  }
+
+  const label = document.createElement('button');
+  label.className = 'tree-label';
+  label.type = 'button';
+  label.textContent = node.name;
+  label.title = node.path;
+  label.addEventListener('click', () => {
+    browse(node.path);
+    if (window.matchMedia('(max-width: 600px)').matches) {
+      setSidebarOpen(false);
+    }
+  });
+
+  row.appendChild(chevron);
+  row.appendChild(label);
+  wrap.appendChild(row);
+
+  const kids = document.createElement('div');
+  kids.className = 'tree-children';
+  if (node.children !== null) {
+    renderTreeChildren(node.children, kids, depth + 1);
+  } else {
+    kids.classList.add('collapsed'); // not loaded yet
+  }
+  wrap.appendChild(kids);
+  return wrap;
+}
+
+async function toggleNode(wrapEl, node, depth) {
+  const kids = wrapEl.querySelector(':scope > .tree-children');
+  const chevron = wrapEl.querySelector(':scope > .tree-node-row > .tree-chevron');
+  const collapsed = kids.classList.contains('collapsed');
+
+  // First-time expand of a not-yet-loaded subtree: fetch one level.
+  if (collapsed && kids.childElementCount === 0) {
+    chevron.textContent = '…';
+    try {
+      const res = await fetch(`/api/tree?path=${encodeURIComponent(node.path)}&depth=1`);
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      renderTreeChildren(data.children, kids, depth + 1);
+      highlightTreeCurrent();
+    } catch (e) {
+      chevron.textContent = '▶';
+      alert('하위 폴더 로드 실패: ' + e.message);
+      return;
+    }
+  }
+
+  if (collapsed) {
+    kids.classList.remove('collapsed');
+    chevron.textContent = '▼';
+    chevron.setAttribute('aria-expanded', 'true');
+  } else {
+    kids.classList.add('collapsed');
+    chevron.textContent = '▶';
+    chevron.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function highlightTreeCurrent() {
+  treeRoot.querySelectorAll('.tree-node-row.active')
+    .forEach(el => el.classList.remove('active'));
+  if (currentPath === '/' || !currentPath) return;
+  // CSS.escape handles slashes/quotes safely; required for arbitrary paths.
+  const sel = `.tree-node[data-path="${CSS.escape(currentPath)}"] > .tree-node-row`;
+  const target = treeRoot.querySelector(sel);
+  if (target) target.classList.add('active');
+}
+
 // ── Sidebar toggle (mobile) ──────────────────────────────────────────────────
 function setSidebarOpen(open) {
   document.body.classList.toggle('sidebar-open', open);
@@ -507,3 +633,4 @@ sidebarBackdrop.addEventListener('click', () => setSidebarOpen(false));
 // ── Init ──────────────────────────────────────────────────────────────────────
 const initPath = new URLSearchParams(location.search).get('path') || '/';
 browse(initPath, false);
+loadTree();

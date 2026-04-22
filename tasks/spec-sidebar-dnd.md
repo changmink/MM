@@ -65,7 +65,7 @@
 - 빈 폴더는 펼치기 chevron 비활성
 
 ### 3.2 트리 동작
-- 기본 상태: 루트(`/`)와 그 직계 자식(depth=1)까지 펼쳐서 표시
+- 기본 상태: 루트(`/`) + 직계 자식 + 손주(depth=2)까지 펼쳐서 표시 (사용자 답변 Q1=opt3)
 - 폴더 옆 ▶ chevron 클릭 → expand. 첫 expand 시 `GET /api/tree?path=<that>&depth=1`로 lazy load
 - 노드 텍스트(이름) 클릭 → 해당 폴더로 `browse()` 이동, breadcrumb·메인 갱신
 - 폴더 생성/삭제 시 사이드바 트리에서 해당 부분 갱신 (전체 reload 가능 — 작은 트리는 단순함이 우선)

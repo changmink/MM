@@ -123,7 +123,7 @@ Backend 두 슬라이스(A: move, B: tree)는 독립이므로 병렬 가능. 프
 #### Task 5: 트리 렌더링 + lazy expand + 현재 위치 하이라이트
 **Description:** `loadTree()` / `renderTree()` / `expandNode()` 추가. 폴더 생성/삭제 후 트리 reload. 현재 폴더 노드 하이라이트.
 **Acceptance:**
-- [ ] 페이지 로드 시 `GET /api/tree?path=/&depth=1` 호출
+- [ ] 페이지 로드 시 `GET /api/tree?path=/&depth=2` 호출 (사용자 답변 Q1=opt3)
 - [ ] chevron 클릭 시 자식 fetch (`children:null`이었던 노드만)
 - [ ] 노드 텍스트 클릭 시 `browse(path)` (모바일이면 사이드바 닫힘)
 - [ ] 현재 `currentPath`와 일치하는 노드 하이라이트 (browse 호출 시 갱신)
