@@ -32,6 +32,22 @@ const folderError   = document.getElementById('folder-error');
 const sidebarToggle = document.getElementById('sidebar-toggle');
 const sidebarBackdrop = document.getElementById('sidebar-backdrop');
 const treeRoot       = document.getElementById('tree-root');
+const renameModal       = document.getElementById('rename-modal');
+const renameTitle       = document.getElementById('rename-title');
+const renameHint        = document.getElementById('rename-hint');
+const renameInput       = document.getElementById('rename-input');
+const renameError       = document.getElementById('rename-error');
+const renameCancelBtn   = document.getElementById('rename-cancel-btn');
+const renameConfirmBtn  = document.getElementById('rename-confirm-btn');
+const urlImportBtn  = document.getElementById('url-import-btn');
+const urlModal      = document.getElementById('url-modal');
+const urlInput      = document.getElementById('url-input');
+const urlError      = document.getElementById('url-error');
+const urlRows       = document.getElementById('url-rows');
+const urlSummary    = document.getElementById('url-summary');
+const urlResult     = document.getElementById('url-result');
+const urlCancelBtn  = document.getElementById('url-cancel-btn');
+const urlConfirmBtn = document.getElementById('url-confirm-btn');
 
 // Initial tree fetch depth — root + children + grandchildren in one round trip
 // per user spec (Q1=opt3). Deeper nodes lazy-load on chevron click.
@@ -168,9 +184,14 @@ function buildImageGrid(images) {
     card.innerHTML = `
       <img src="${esc(thumbSrc)}" alt="${esc(entry.name)}" loading="lazy">
       <div class="thumb-name">${esc(entry.name)}</div>
+      <button class="rename-btn" title="이름 변경" aria-label="이름 변경">✎</button>
       <button class="delete-btn" title="삭제" aria-label="삭제">✕</button>
     `;
     card.querySelector('img').addEventListener('click', () => openLightboxImage(i));
+    card.querySelector('.rename-btn').addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      openRenameModal(entry);
+    });
     card.querySelector('.delete-btn').addEventListener('click', (ev) => {
       ev.stopPropagation();
       deleteFile(entry.path);
@@ -196,9 +217,14 @@ function buildVideoGrid(videos) {
       <img src="${esc(thumbSrc)}" alt="${esc(entry.name)}" loading="lazy">
       <div class="thumb-name">${esc(entry.name)}</div>
       ${durBadge}
+      <button class="rename-btn" title="이름 변경" aria-label="이름 변경">✎</button>
       <button class="delete-btn" title="삭제" aria-label="삭제">✕</button>
     `;
     card.querySelector('img').addEventListener('click', () => openLightboxVideo(entry));
+    card.querySelector('.rename-btn').addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      openRenameModal(entry);
+    });
     card.querySelector('.delete-btn').addEventListener('click', (ev) => {
       ev.stopPropagation();
       deleteFile(entry.path);
@@ -226,10 +252,14 @@ function buildTable(entries) {
     tr.innerHTML = `
       <td class="name-cell"><span class="icon">${icon}</span>${esc(entry.name)}</td>
       <td class="size-cell">${size}</td>
-      <td class="action-cell"><button title="삭제" data-path="${esc(entry.path)}">🗑</button></td>
+      <td class="action-cell">
+        <button class="rename-action" title="이름 변경" aria-label="이름 변경">✎</button>
+        <button class="delete-action" title="삭제" aria-label="삭제">🗑</button>
+      </td>
     `;
     tr.querySelector('.name-cell').addEventListener('click', () => handleClick(entry));
-    tr.querySelector('.action-cell button').addEventListener('click', () =>
+    tr.querySelector('.rename-action').addEventListener('click', () => openRenameModal(entry));
+    tr.querySelector('.delete-action').addEventListener('click', () =>
       entry.is_dir ? deleteFolder(entry.path) : deleteFile(entry.path)
     );
     if (!entry.is_dir) {
@@ -464,6 +494,215 @@ function showFolderError(msg) {
   folderError.classList.remove('hidden');
 }
 
+// ── URL Import ────────────────────────────────────────────────────────────────
+const URL_ERROR_LABELS = {
+  missing_content_length: 'Content-Length 헤더 없음',
+  too_large: '2GB 초과',
+  unsupported_content_type: '지원하지 않는 미디어 타입',
+  invalid_scheme: '지원하지 않는 스킴',
+  invalid_url: '잘못된 URL',
+  http_error: 'HTTP 응답 에러',
+  connect_timeout: '연결 타임아웃',
+  download_timeout: '다운로드 타임아웃 (10분)',
+  tls_error: 'TLS 검증 실패',
+  too_many_redirects: '리다이렉트 과다',
+  network_error: '네트워크 오류',
+  write_error: '저장 실패',
+};
+
+let urlSubmitting = false;
+let urlAnySucceeded = false;
+
+urlImportBtn.addEventListener('click', openURLModal);
+urlCancelBtn.addEventListener('click', closeURLModal);
+urlConfirmBtn.addEventListener('click', submitURLImport);
+urlModal.addEventListener('click', e => { if (e.target === urlModal) closeURLModal(); });
+document.addEventListener('keydown', e => {
+  if (urlModal.classList.contains('hidden')) return;
+  if (e.key === 'Escape') closeURLModal();
+});
+
+function openURLModal() {
+  urlInput.value = '';
+  urlError.textContent = '';
+  urlError.classList.add('hidden');
+  urlRows.innerHTML = '';
+  urlSummary.textContent = '';
+  urlSummary.className = 'url-summary hidden';
+  urlResult.classList.add('hidden');
+  urlAnySucceeded = false;
+  urlModal.classList.remove('hidden');
+  urlInput.focus();
+}
+
+function closeURLModal() {
+  urlModal.classList.add('hidden');
+  if (urlAnySucceeded) {
+    urlAnySucceeded = false;
+    browse(currentPath, false);
+  }
+}
+
+async function submitURLImport() {
+  if (urlSubmitting) return;
+  const urls = urlInput.value
+    .split('\n')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  if (urls.length === 0) {
+    showURLError('URL을 한 줄에 하나씩 입력하세요.');
+    return;
+  }
+  if (urls.length > 50) {
+    showURLError('한 번에 최대 50개까지 입력할 수 있습니다.');
+    return;
+  }
+
+  urlError.classList.add('hidden');
+  urlRows.innerHTML = '';
+  urlSummary.textContent = '';
+  urlSummary.className = 'url-summary hidden';
+  urlResult.classList.remove('hidden');
+  // Pre-create one pending row per URL so users see immediate feedback even
+  // before the first SSE event arrives.
+  urls.forEach((u, i) => ensureURLRow(i, u));
+  urlSubmitting = true;
+  urlConfirmBtn.disabled = true;
+  urlConfirmBtn.textContent = '가져오는 중...';
+
+  try {
+    const res = await fetch('/api/import-url?path=' + encodeURIComponent(currentPath), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+      body: JSON.stringify({ urls }),
+    });
+    if (!res.ok) {
+      let msg = '';
+      try { msg = (await res.json()).error || ''; } catch { /* not JSON */ }
+      if (!msg) msg = `요청 실패 (${res.status})`;
+      showURLError(msg);
+      urlResult.classList.add('hidden');
+      return;
+    }
+    await consumeSSE(res);
+  } catch (e) {
+    showURLError('요청 실패: ' + e.message);
+  } finally {
+    urlSubmitting = false;
+    urlConfirmBtn.disabled = false;
+    urlConfirmBtn.textContent = '가져오기';
+  }
+}
+
+// consumeSSE reads the response body as a stream of `data: {json}\n\n` frames
+// and dispatches each parsed event to handleSSEEvent. A trailing partial frame
+// (no terminating blank line) is intentionally dropped — the server always
+// flushes complete frames, so anything left over is corruption we ignore.
+async function consumeSSE(res) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) !== -1) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      const line = frame.trim();
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      try {
+        handleSSEEvent(JSON.parse(payload));
+      } catch (e) {
+        console.warn('bad sse frame', payload, e);
+      }
+    }
+  }
+}
+
+function ensureURLRow(index, fallbackUrl) {
+  let row = urlRows.querySelector(`[data-index="${index}"]`);
+  if (row) return row;
+  row = document.createElement('div');
+  row.className = 'url-row status-pending';
+  row.dataset.index = String(index);
+  row.dataset.total = '0';
+  row.innerHTML = `
+    <div class="url-row-head">
+      <span class="url-row-name">${esc(fallbackUrl || '')}</span>
+      <span class="url-row-status">대기 중</span>
+    </div>
+    <div class="url-progress-bar"><div class="url-progress-fill"></div></div>
+  `;
+  urlRows.appendChild(row);
+  return row;
+}
+
+function setRowStatus(row, statusClass, statusText) {
+  row.classList.remove('status-pending', 'status-downloading', 'status-done', 'status-error');
+  row.classList.add(statusClass);
+  row.querySelector('.url-row-status').textContent = statusText;
+}
+
+function handleSSEEvent(ev) {
+  switch (ev.phase) {
+    case 'start': {
+      const row = ensureURLRow(ev.index, ev.url);
+      row.querySelector('.url-row-name').textContent = ev.name || ev.url;
+      row.dataset.total = String(ev.total || 0);
+      const sizeText = ev.total > 0 ? formatSize(ev.total) : '크기 미상';
+      const typePart = ev.type ? `${ev.type} · ` : '';
+      setRowStatus(row, 'status-downloading', typePart + sizeText);
+      break;
+    }
+    case 'progress': {
+      const row = urlRows.querySelector(`[data-index="${ev.index}"]`);
+      if (!row) return;
+      const total = Number(row.dataset.total) || 0;
+      if (total > 0) {
+        const pct = Math.min(100, (ev.received / total) * 100);
+        row.querySelector('.url-progress-fill').style.width = pct.toFixed(1) + '%';
+        row.querySelector('.url-row-status').textContent =
+          `${formatSize(ev.received)} / ${formatSize(total)} · ${Math.floor(pct)}%`;
+      } else {
+        row.querySelector('.url-row-status').textContent = formatSize(ev.received);
+      }
+      break;
+    }
+    case 'done': {
+      const row = ensureURLRow(ev.index, ev.url);
+      row.querySelector('.url-row-name').textContent = ev.name || ev.url;
+      row.querySelector('.url-progress-fill').style.width = '100%';
+      const warn = (ev.warnings && ev.warnings.length > 0) ? ` · ${ev.warnings.join(', ')}` : '';
+      setRowStatus(row, 'status-done', `완료 (${formatSize(ev.size)})${warn}`);
+      urlAnySucceeded = true;
+      break;
+    }
+    case 'error': {
+      const row = ensureURLRow(ev.index, ev.url);
+      const label = URL_ERROR_LABELS[ev.error] || ev.error || '알 수 없는 오류';
+      setRowStatus(row, 'status-error', '실패 · ' + label);
+      break;
+    }
+    case 'summary': {
+      const cls = ev.failed === 0 ? 'status-done'
+                : ev.succeeded === 0 ? 'status-error'
+                : 'status-mixed';
+      urlSummary.className = 'url-summary ' + cls;
+      urlSummary.textContent = `성공 ${ev.succeeded}개 · 실패 ${ev.failed}개`;
+      break;
+    }
+  }
+}
+
+function showURLError(msg) {
+  urlError.textContent = msg;
+  urlError.classList.remove('hidden');
+}
+
 // ── Delete ────────────────────────────────────────────────────────────────────
 async function deleteFile(path) {
   if (!confirm(`삭제하시겠습니까?\n${path}`)) return;
@@ -566,6 +805,95 @@ async function moveFile(srcPath, destDir) {
   } catch (e) {
     alert('이동 실패: ' + e.message);
   }
+}
+
+// ── Rename ────────────────────────────────────────────────────────────────────
+let renameTarget = null;
+let renameSubmitting = false;
+
+renameCancelBtn.addEventListener('click', closeRenameModal);
+renameModal.addEventListener('click', e => { if (e.target === renameModal) closeRenameModal(); });
+renameConfirmBtn.addEventListener('click', submitRename);
+renameInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') submitRename();
+  if (e.key === 'Escape') closeRenameModal();
+});
+
+function splitExtension(name) {
+  // Mirror the server: filepath.Ext returns the final ".ext" or "".
+  // Folder names or extension-less files have ext = ''.
+  const dot = name.lastIndexOf('.');
+  if (dot <= 0 || dot === name.length - 1) return { base: name, ext: '' };
+  return { base: name.slice(0, dot), ext: name.slice(dot) };
+}
+
+function openRenameModal(entry) {
+  renameTarget = entry;
+  renameError.textContent = '';
+  renameError.classList.add('hidden');
+
+  const { base, ext } = entry.is_dir ? { base: entry.name, ext: '' } : splitExtension(entry.name);
+  renameTitle.textContent = entry.is_dir ? '폴더 이름 변경' : '파일 이름 변경';
+  if (ext) {
+    renameHint.textContent = `확장자: ${ext} (변경 불가)`;
+    renameHint.classList.remove('hidden');
+  } else {
+    renameHint.classList.add('hidden');
+  }
+  renameInput.value = base;
+  renameModal.classList.remove('hidden');
+  renameInput.focus();
+  renameInput.select();
+}
+
+function closeRenameModal() {
+  renameModal.classList.add('hidden');
+  renameTarget = null;
+}
+
+async function submitRename() {
+  if (renameSubmitting || !renameTarget) return;
+  const newBase = renameInput.value.trim();
+  if (!newBase) {
+    showRenameError('이름을 입력하세요.');
+    return;
+  }
+  const entry = renameTarget;
+  const url = entry.is_dir
+    ? '/api/folder?path=' + encodeURIComponent(entry.path)
+    : '/api/file?path=' + encodeURIComponent(entry.path);
+  renameSubmitting = true;
+  renameConfirmBtn.disabled = true;
+  try {
+    const res = await fetch(url, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newBase }),
+    });
+    if (res.ok) {
+      closeRenameModal();
+      browse(currentPath, false);
+      return;
+    }
+    const err = await res.json().catch(() => ({}));
+    if (res.status === 409) {
+      showRenameError('이미 같은 이름이 있습니다.');
+    } else if (res.status === 400 && err.error === 'name unchanged') {
+      showRenameError('이름이 같습니다.');
+    } else if (res.status === 404) {
+      showRenameError('대상을 찾을 수 없습니다.');
+    } else {
+      showRenameError('유효하지 않은 이름입니다.');
+    }
+  } finally {
+    renameSubmitting = false;
+    renameConfirmBtn.disabled = false;
+  }
+}
+
+function showRenameError(msg) {
+  renameError.textContent = msg;
+  renameError.classList.remove('hidden');
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

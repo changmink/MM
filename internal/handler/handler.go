@@ -8,11 +8,13 @@ import (
 	"sync"
 
 	"github.com/chang/file_server/internal/thumb"
+	"github.com/chang/file_server/internal/urlfetch"
 )
 
 type Handler struct {
 	dataDir     string
 	thumbPool   *thumb.Pool
+	urlClient   *http.Client
 	streamLocks sync.Map // cachePath -> *sync.Mutex; serializes ffmpeg per cache key
 }
 
@@ -20,6 +22,7 @@ func Register(mux *http.ServeMux, dataDir, webDir string) *Handler {
 	h := &Handler{
 		dataDir:   dataDir,
 		thumbPool: thumb.NewPool(runtime.NumCPU()),
+		urlClient: urlfetch.NewClient(),
 	}
 
 	mux.HandleFunc("/api/browse", h.handleBrowse)
@@ -29,6 +32,7 @@ func Register(mux *http.ServeMux, dataDir, webDir string) *Handler {
 	mux.HandleFunc("/api/upload", h.handleUpload)
 	mux.HandleFunc("/api/file", h.handleFile)
 	mux.HandleFunc("/api/folder", h.handleFolder)
+	mux.HandleFunc("/api/import-url", h.handleImportURL)
 
 	mux.Handle("/", http.FileServer(http.Dir(webDir)))
 	return h

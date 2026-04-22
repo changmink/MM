@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/chang/file_server/internal/media"
 )
 
 // Pool serializes thumbnail generation through a bounded set of workers so
@@ -36,7 +38,15 @@ func (p *Pool) worker() {
 	defer p.wg.Done()
 	for j := range p.jobs {
 		_ = os.MkdirAll(filepath.Dir(j.dst), 0755)
-		_ = Generate(j.src, j.dst)
+		// Dispatch by source type so videos take the ffmpeg path instead of
+		// the image decoder. Errors are swallowed here (best-effort async
+		// generation); handleThumb regenerates lazily on first view.
+		switch {
+		case media.IsVideo(j.src):
+			_ = GenerateFromVideo(j.src, j.dst)
+		case media.IsImage(j.src):
+			_ = Generate(j.src, j.dst)
+		}
 	}
 }
 
