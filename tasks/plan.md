@@ -700,11 +700,11 @@ R-1과 R-2는 같은 파일(`files.go`)을 수정하므로 순차 진행 권장 
 
 | 파일 | 변경 내용 |
 |---|---|
-| `internal/handler/files.go` | `handleFile` 메서드 스위치 확장 (DELETE→DELETE/PATCH), `handleFolder`에 PATCH case 추가, `renameFile`/`renameFolder`/`validateRenameName` 신규 |
+| `internal/handler/files.go` | `handleFile` 메서드 스위치 확장 (DELETE→DELETE/PATCH), `handleFolder`에 PATCH case 추가, `renameFile`/`renameFolder`/`validateName`(통합) 신규 |
 | `internal/handler/files_test.go` | rename 케이스 추가 (성공/409/400/404/traversal/사이드카) |
 | `web/index.html` | rename 모달 요소 추가 |
 | `web/style.css` | 기존 `.modal` 스타일 재사용, 필요 시 rename 버튼 아이콘만 |
-| `web/app.js` | `renameEntry(entry)` 함수, `buildTable`/`buildImageGrid`/`buildVideoGrid`에 rename 버튼 추가 |
+| `web/app.js` | `openRenameModal`/`submitRename` 함수, `buildTable`/`buildImageGrid`/`buildVideoGrid`에 rename 버튼 추가 |
 
 ---
 
@@ -732,7 +732,7 @@ func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 3. `os.Stat(srcAbs)` → 미존재 404, 디렉토리면 400 `"not a file"`
 4. 원본 확장자 추출: `origExt := filepath.Ext(filepath.Base(srcAbs))`
 5. 사용자 입력 base name 정제: `newBase := stripExt(body.Name)` (사용자가 확장자 포함 입력해도 무시)
-6. `validateRenameName(newBase)` — 빈 문자열, `/`·`\\`, `.`/`..`, 길이 > 255 → 400 `"invalid name"`
+6. `validateName(newBase)` — 빈 문자열, `/`·`\\`, `.`/`..`, 길이 > 255 → 400 `"invalid name"`. 재부착 후 `len(newName) > 255` 다시 확인 (확장자 포함 길이 초과 방지)
 7. `newName := newBase + origExt`
 8. 동일 이름 검사: `newName == filepath.Base(srcAbs)` → 400 `"name unchanged"`
 9. `dstAbs := filepath.Join(filepath.Dir(srcAbs), newName)` + `media.SafePath` 재검증
@@ -747,7 +747,7 @@ func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 
 **공용 검증 함수 추가:**
 ```go
-func validateRenameName(name string) error {
+func validateName(name string) error {
     if name == "" || name == "." || name == ".." { return fmt.Errorf("invalid name") }
     if len(name) > 255 { return fmt.Errorf("invalid name") }
     for _, c := range name {
@@ -755,7 +755,7 @@ func validateRenameName(name string) error {
     }
     return nil
 }
-// 기존 validateFolderName은 삭제하고 validateRenameName으로 통합 가능 (같은 규칙)
+// validateFolderName을 validateName으로 rename하여 폴더 생성·파일/폴더 rename 공용
 ```
 
 **테스트 (`files_test.go`):**
@@ -797,7 +797,7 @@ case http.MethodPatch:
 1. `media.SafePath(h.dataDir, rel)` → 원본 경로 검증
 2. `srcAbs == filepath.Clean(h.dataDir)` → 400 `"cannot rename root"`
 3. JSON 바디 파싱
-4. `validateRenameName(body.Name)` → 400
+4. `validateName(body.Name)` → 400
 5. `os.Stat(srcAbs)` → 미존재 404, 파일이면 400 `"not a directory"`
 6. 동일 이름 검사 → 400 `"name unchanged"`
 7. `dstAbs := filepath.Join(filepath.Dir(srcAbs), body.Name)` + `media.SafePath` 재검증

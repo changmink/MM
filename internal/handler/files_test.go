@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -524,6 +525,52 @@ func TestRenameFile(t *testing.T) {
 		rw := patch("../../etc/passwd", "pwned")
 		if rw.Code != http.StatusBadRequest {
 			t.Errorf("expected 400, got %d", rw.Code)
+		}
+	})
+
+	// Phase 9.1 hardening — dotfile, case, length, empty-after-strip
+
+	t.Run("dotfile rename preserves intent (no ext auto-reattach)", func(t *testing.T) {
+		os.WriteFile(filepath.Join(root, ".gitignore"), []byte("x"), 0644)
+		rw := patch("/.gitignore", "config")
+		if rw.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rw.Code, rw.Body.String())
+		}
+		var resp map[string]string
+		json.NewDecoder(rw.Body).Decode(&resp)
+		if resp["name"] != "config" {
+			t.Errorf("name = %q, want config (no .gitignore reattachment)", resp["name"])
+		}
+		if _, err := os.Stat(filepath.Join(root, "config")); err != nil {
+			t.Errorf("new file missing: %v", err)
+		}
+	})
+
+	t.Run("case-only rename succeeds", func(t *testing.T) {
+		sub := filepath.Join(root, "casesub")
+		os.MkdirAll(sub, 0755)
+		os.WriteFile(filepath.Join(sub, "readme.md"), []byte("x"), 0644)
+		rw := patch("/casesub/readme.md", "README")
+		if rw.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rw.Code, rw.Body.String())
+		}
+		// On case-sensitive FS both names coexist; on case-insensitive, casing changes.
+		// The important invariant: no 409 was returned for a case-only change.
+	})
+
+	t.Run("stripped-to-empty input returns 400", func(t *testing.T) {
+		os.WriteFile(filepath.Join(root, "keep.mp4"), []byte("x"), 0644)
+		rw := patch("/keep.mp4", ".mp4")
+		if rw.Code != http.StatusBadRequest {
+			t.Errorf("expected 400, got %d: %s", rw.Code, rw.Body.String())
+		}
+	})
+
+	t.Run("length overflow after reattaching extension returns 400", func(t *testing.T) {
+		os.WriteFile(filepath.Join(root, "lg.webp"), []byte("x"), 0644)
+		rw := patch("/lg.webp", strings.Repeat("a", 253)) // 253 + ".webp"(5) = 258 > 255
+		if rw.Code != http.StatusBadRequest {
+			t.Errorf("expected 400, got %d: %s", rw.Code, rw.Body.String())
 		}
 	})
 }

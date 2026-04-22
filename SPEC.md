@@ -26,7 +26,9 @@
   - 확장자는 변경 불가 — 원본 확장자 유지 (MIME/타입 일관성 보장)
   - 사용자 입력에 확장자가 포함되어 있어도 서버는 base name만 사용하고 원본 확장자를 재부착
   - UI 모달은 확장자를 제외한 base name만 input에 표시·편집
-- **폴더 이름 규칙:** 확장자 개념 없음. 기존 `validateFolderName`과 동일 (빈 문자열/`.`/`..`/`/`/`\\` 불가, 최대 255자)
+  - **Dotfile carveout:** 원본이 `.gitignore`처럼 선행 점이 있고 다른 점이 없는 이름이면 확장자가 없는 것으로 취급 (rename 시 원하지 않는 suffix 부착 방지). 서버·JS 클라이언트 일관.
+  - **Case-only rename:** 대소문자만 다른 rename(`a.txt` → `A.txt`)은 대소문자 무시 파일시스템에서도 동작 (기존 파일 존재 검사 skip + OS가 atomic하게 처리)
+- **폴더 이름 규칙:** 확장자 개념 없음. `validateName`과 동일 (빈 문자열/`.`/`..`/`/`/`\\` 불가, 최대 255자; 파일은 `base + origExt`가 255자 초과 시에도 400)
 - **scope:** 동일 부모 디렉토리 내에서만 rename. 경로 이동·디렉토리 간 이동은 별도 기능 (out of scope).
 - **충돌 처리:** 같은 이름이 이미 존재하면 `409 Conflict` 반환. 자동 `_1` suffix 없음 (rename은 사용자의 명시적 의도).
 - **동일 이름 입력:** 새 이름이 기존 이름과 동일(확장자 포함 비교)하면 `400 {"error": "name unchanged"}` 반환.
@@ -391,6 +393,7 @@ volumes:
 - 섬네일은 비동기로 생성 (업로드 응답 차단 안 함)
 - Rename 시 `media.SafePath`로 원본·대상 경로 모두 검증 (path traversal 방지)
 - Rename은 동일 부모 디렉토리 내에서만 허용 (경로 이동 금지)
+- File rename은 `os.Link` + `os.Remove`로 atomic EEXIST 보장 (TOCTOU 방지)
 
 **하지 않을 것 (Never)**
 - TS 이외 포맷 트랜스코딩 (MP4/MKV/AVI는 원본 그대로 스트리밍)
@@ -398,3 +401,6 @@ volumes:
 - 외부 CDN이나 클라우드 스토리지 연동
 - Rename 시 확장자 변경 허용 (MIME/타입 감지 일관성 유지)
 - Rename 시 자동 suffix 부여 (`_1`, `_2` 등) — 충돌은 항상 409로 거부
+
+**Known limitations**
+- Folder rename은 `os.Stat` + `os.Rename` 순서로, 두 콜 사이에 동일 이름 폴더가 생성되면 race 발생 가능. 단일 사용자 배포 대상이므로 acceptable.
