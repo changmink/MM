@@ -59,4 +59,4 @@
 - [x] R-1: 백엔드 PATCH /api/file — handleFile 메서드 스위치, renameFile (확장자 고정 + 사이드카 rename), validateName, 테스트 (성공/확장자/사이드카/409/400/404/traversal)
 - [x] R-2: 백엔드 PATCH /api/folder — handleFolder에 PATCH case, renameFolder (루트 차단), 테스트
 - [x] R-3: 프론트엔드 — rename 모달 (index.html + style.css), app.js의 openRenameModal/submitRename, buildTable/buildImageGrid/buildVideoGrid에 "이름 변경" 버튼 추가, 키보드 Enter/Escape 지원
-- [ ] R-4: E2E 수동 검증 — 파일/폴더 rename, 확장자 방어, 409/400 메시지, 썸네일·duration 오버레이 유지, 회귀 체크 (삭제/업로드/스트리밍)
+- [x] R-4: E2E 수동 검증 — 파일/폴더 rename, 확장자 방어, 409/400 메시지, 썸네일·duration 오버레이 유지, 회귀 체크 (삭제/업로드/스트리밍)
