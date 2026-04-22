@@ -23,6 +23,7 @@ func Register(mux *http.ServeMux, dataDir, webDir string) *Handler {
 	}
 
 	mux.HandleFunc("/api/browse", h.handleBrowse)
+	mux.HandleFunc("/api/tree", h.handleTree)
 	mux.HandleFunc("/api/stream", h.handleStream)
 	mux.HandleFunc("/api/thumb", h.handleThumb)
 	mux.HandleFunc("/api/upload", h.handleUpload)
