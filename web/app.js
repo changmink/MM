@@ -36,6 +36,15 @@ const renameInput       = document.getElementById('rename-input');
 const renameError       = document.getElementById('rename-error');
 const renameCancelBtn   = document.getElementById('rename-cancel-btn');
 const renameConfirmBtn  = document.getElementById('rename-confirm-btn');
+const urlImportBtn  = document.getElementById('url-import-btn');
+const urlModal      = document.getElementById('url-modal');
+const urlInput      = document.getElementById('url-input');
+const urlError      = document.getElementById('url-error');
+const urlRows       = document.getElementById('url-rows');
+const urlSummary    = document.getElementById('url-summary');
+const urlResult     = document.getElementById('url-result');
+const urlCancelBtn  = document.getElementById('url-cancel-btn');
+const urlConfirmBtn = document.getElementById('url-confirm-btn');
 
 // ── Routing ───────────────────────────────────────────────────────────────────
 window.addEventListener('popstate', () => {
@@ -451,6 +460,215 @@ async function submitCreateFolder() {
 function showFolderError(msg) {
   folderError.textContent = msg;
   folderError.classList.remove('hidden');
+}
+
+// ── URL Import ────────────────────────────────────────────────────────────────
+const URL_ERROR_LABELS = {
+  missing_content_length: 'Content-Length 헤더 없음',
+  too_large: '2GB 초과',
+  unsupported_content_type: '지원하지 않는 미디어 타입',
+  invalid_scheme: '지원하지 않는 스킴',
+  invalid_url: '잘못된 URL',
+  http_error: 'HTTP 응답 에러',
+  connect_timeout: '연결 타임아웃',
+  download_timeout: '다운로드 타임아웃 (10분)',
+  tls_error: 'TLS 검증 실패',
+  too_many_redirects: '리다이렉트 과다',
+  network_error: '네트워크 오류',
+  write_error: '저장 실패',
+};
+
+let urlSubmitting = false;
+let urlAnySucceeded = false;
+
+urlImportBtn.addEventListener('click', openURLModal);
+urlCancelBtn.addEventListener('click', closeURLModal);
+urlConfirmBtn.addEventListener('click', submitURLImport);
+urlModal.addEventListener('click', e => { if (e.target === urlModal) closeURLModal(); });
+document.addEventListener('keydown', e => {
+  if (urlModal.classList.contains('hidden')) return;
+  if (e.key === 'Escape') closeURLModal();
+});
+
+function openURLModal() {
+  urlInput.value = '';
+  urlError.textContent = '';
+  urlError.classList.add('hidden');
+  urlRows.innerHTML = '';
+  urlSummary.textContent = '';
+  urlSummary.className = 'url-summary hidden';
+  urlResult.classList.add('hidden');
+  urlAnySucceeded = false;
+  urlModal.classList.remove('hidden');
+  urlInput.focus();
+}
+
+function closeURLModal() {
+  urlModal.classList.add('hidden');
+  if (urlAnySucceeded) {
+    urlAnySucceeded = false;
+    browse(currentPath, false);
+  }
+}
+
+async function submitURLImport() {
+  if (urlSubmitting) return;
+  const urls = urlInput.value
+    .split('\n')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  if (urls.length === 0) {
+    showURLError('URL을 한 줄에 하나씩 입력하세요.');
+    return;
+  }
+  if (urls.length > 50) {
+    showURLError('한 번에 최대 50개까지 입력할 수 있습니다.');
+    return;
+  }
+
+  urlError.classList.add('hidden');
+  urlRows.innerHTML = '';
+  urlSummary.textContent = '';
+  urlSummary.className = 'url-summary hidden';
+  urlResult.classList.remove('hidden');
+  // Pre-create one pending row per URL so users see immediate feedback even
+  // before the first SSE event arrives.
+  urls.forEach((u, i) => ensureURLRow(i, u));
+  urlSubmitting = true;
+  urlConfirmBtn.disabled = true;
+  urlConfirmBtn.textContent = '가져오는 중...';
+
+  try {
+    const res = await fetch('/api/import-url?path=' + encodeURIComponent(currentPath), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+      body: JSON.stringify({ urls }),
+    });
+    if (!res.ok) {
+      let msg = '';
+      try { msg = (await res.json()).error || ''; } catch { /* not JSON */ }
+      if (!msg) msg = `요청 실패 (${res.status})`;
+      showURLError(msg);
+      urlResult.classList.add('hidden');
+      return;
+    }
+    await consumeSSE(res);
+  } catch (e) {
+    showURLError('요청 실패: ' + e.message);
+  } finally {
+    urlSubmitting = false;
+    urlConfirmBtn.disabled = false;
+    urlConfirmBtn.textContent = '가져오기';
+  }
+}
+
+// consumeSSE reads the response body as a stream of `data: {json}\n\n` frames
+// and dispatches each parsed event to handleSSEEvent. A trailing partial frame
+// (no terminating blank line) is intentionally dropped — the server always
+// flushes complete frames, so anything left over is corruption we ignore.
+async function consumeSSE(res) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) !== -1) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      const line = frame.trim();
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      try {
+        handleSSEEvent(JSON.parse(payload));
+      } catch (e) {
+        console.warn('bad sse frame', payload, e);
+      }
+    }
+  }
+}
+
+function ensureURLRow(index, fallbackUrl) {
+  let row = urlRows.querySelector(`[data-index="${index}"]`);
+  if (row) return row;
+  row = document.createElement('div');
+  row.className = 'url-row status-pending';
+  row.dataset.index = String(index);
+  row.dataset.total = '0';
+  row.innerHTML = `
+    <div class="url-row-head">
+      <span class="url-row-name">${esc(fallbackUrl || '')}</span>
+      <span class="url-row-status">대기 중</span>
+    </div>
+    <div class="url-progress-bar"><div class="url-progress-fill"></div></div>
+  `;
+  urlRows.appendChild(row);
+  return row;
+}
+
+function setRowStatus(row, statusClass, statusText) {
+  row.classList.remove('status-pending', 'status-downloading', 'status-done', 'status-error');
+  row.classList.add(statusClass);
+  row.querySelector('.url-row-status').textContent = statusText;
+}
+
+function handleSSEEvent(ev) {
+  switch (ev.phase) {
+    case 'start': {
+      const row = ensureURLRow(ev.index, ev.url);
+      row.querySelector('.url-row-name').textContent = ev.name || ev.url;
+      row.dataset.total = String(ev.total || 0);
+      const sizeText = ev.total > 0 ? formatSize(ev.total) : '크기 미상';
+      const typePart = ev.type ? `${ev.type} · ` : '';
+      setRowStatus(row, 'status-downloading', typePart + sizeText);
+      break;
+    }
+    case 'progress': {
+      const row = urlRows.querySelector(`[data-index="${ev.index}"]`);
+      if (!row) return;
+      const total = Number(row.dataset.total) || 0;
+      if (total > 0) {
+        const pct = Math.min(100, (ev.received / total) * 100);
+        row.querySelector('.url-progress-fill').style.width = pct.toFixed(1) + '%';
+        row.querySelector('.url-row-status').textContent =
+          `${formatSize(ev.received)} / ${formatSize(total)} · ${Math.floor(pct)}%`;
+      } else {
+        row.querySelector('.url-row-status').textContent = formatSize(ev.received);
+      }
+      break;
+    }
+    case 'done': {
+      const row = ensureURLRow(ev.index, ev.url);
+      row.querySelector('.url-row-name').textContent = ev.name || ev.url;
+      row.querySelector('.url-progress-fill').style.width = '100%';
+      const warn = (ev.warnings && ev.warnings.length > 0) ? ` · ${ev.warnings.join(', ')}` : '';
+      setRowStatus(row, 'status-done', `완료 (${formatSize(ev.size)})${warn}`);
+      urlAnySucceeded = true;
+      break;
+    }
+    case 'error': {
+      const row = ensureURLRow(ev.index, ev.url);
+      const label = URL_ERROR_LABELS[ev.error] || ev.error || '알 수 없는 오류';
+      setRowStatus(row, 'status-error', '실패 · ' + label);
+      break;
+    }
+    case 'summary': {
+      const cls = ev.failed === 0 ? 'status-done'
+                : ev.succeeded === 0 ? 'status-error'
+                : 'status-mixed';
+      urlSummary.className = 'url-summary ' + cls;
+      urlSummary.textContent = `성공 ${ev.succeeded}개 · 실패 ${ev.failed}개`;
+      break;
+    }
+  }
+}
+
+function showURLError(msg) {
+  urlError.textContent = msg;
+  urlError.classList.remove('hidden');
 }
 
 // ── Delete ────────────────────────────────────────────────────────────────────

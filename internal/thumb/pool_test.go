@@ -23,6 +23,22 @@ func TestPoolGeneratesThumbnails(t *testing.T) {
 	}
 }
 
+func TestPoolDispatchesVideoThumbnails(t *testing.T) {
+	dir := t.TempDir()
+	src := makeTestMP4(t, dir) // skips if ffmpeg unavailable
+	dst := filepath.Join(dir, ".thumb", "clip.mp4.jpg")
+
+	p := NewPool(1)
+	if !p.Submit(src, dst) {
+		t.Fatal("Submit returned false on empty queue")
+	}
+	p.Shutdown()
+
+	if _, err := os.Stat(dst); err != nil {
+		t.Fatalf("video thumbnail not generated: %v", err)
+	}
+}
+
 func TestPoolShutdownDrains(t *testing.T) {
 	dir := t.TempDir()
 	p := NewPool(2)

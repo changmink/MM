@@ -16,6 +16,7 @@
   <main>
     <section id="upload-zone" class="upload-zone">
       <p>파일을 드래그하거나 <label for="file-input" class="upload-label">클릭하여 업로드</label></p>
+      <p><button id="url-import-btn" class="link-btn" type="button">URL에서 가져오기</button></p>
       <input type="file" id="file-input" multiple hidden>
       <div id="upload-progress"></div>
     </section>
@@ -67,6 +68,24 @@
     </div>
   </div>
 
-  <script src="/app.js?v=4"></script>
+  <!-- URL import 모달 -->
+  <div id="url-modal" class="modal-overlay hidden">
+    <div class="modal modal-wide">
+      <h3>URL에서 가져오기</h3>
+      <p class="modal-hint">한 줄에 하나씩 입력 (최대 50개, 2GB/파일 · 이미지·동영상·음악)</p>
+      <textarea id="url-input" rows="6" placeholder="https://example.com/clip.mp4" autocomplete="off" spellcheck="false"></textarea>
+      <p id="url-error" class="modal-error hidden"></p>
+      <div id="url-result" class="url-result hidden">
+        <div id="url-rows" class="url-rows"></div>
+        <div id="url-summary" class="url-summary hidden"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="url-cancel-btn">닫기</button>
+        <button id="url-confirm-btn" class="btn-primary">가져오기</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js?v=6"></script>
 </body>
 </html>
