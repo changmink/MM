@@ -425,7 +425,8 @@ file_server/
   - `"missing_content_length"` — `Content-Length` 헤더 없음 (HLS 예외 — §2.6.1)
   - `"too_large"` — 2 GiB 초과
   - `"hls_playlist_too_large"` — HLS 플레이리스트 본문이 1 MiB 초과 (§2.6.1)
-  - `"ffmpeg_error"` — HLS 리먹싱 중 ffmpeg 프로세스 실패 (non-zero exit)
+  - `"ffmpeg_error"` — HLS 리먹싱 중 ffmpeg 프로세스 실패 (non-zero exit, 입력 스트림 문제)
+  - `"ffmpeg_missing"` — ffmpeg 바이너리가 서버 PATH에 없음 (운영자 설치 필요) — `ffmpeg_error`와 구분됨
   - `"network_error"` — 기타 네트워크 실패
   - `"write_error"` — 디스크 저장 실패
 - 4xx 케이스 (요청 자체 거부 — SSE 스트림 시작 전 일반 JSON 에러 응답):
@@ -592,7 +593,7 @@ volumes:
 - Rename은 동일 부모 디렉토리 내에서만 허용 (경로 이동 금지)
 - File rename은 `os.Link` + `os.Remove`로 atomic EEXIST 보장 (TOCTOU 방지)
 - URL import: HTTPS TLS 인증서 검증, `Content-Length` 사전 검증, 다운로드 누적 2 GiB 캡, Content-Type 허용 목록(image/video/audio) 검증, 임시 파일 → atomic rename, 파일명 sanitize, SSE `Cache-Control: no-cache` 및 즉시 Flush
-- HLS import: ffmpeg `-protocol_whitelist "http,https,tls,tcp,crypto"` 강제, master playlist의 variant URL 스킴도 `http`/`https`만 허용(이중 검증), ffmpeg 프로세스는 context 취소·2 GiB 초과 시 kill, 출력 MP4는 기존 `renameUnique` 경로로 atomic rename
+- HLS import: ffmpeg `-protocol_whitelist "http,https,tls,tcp,crypto"` 강제, ffmpeg `-rw_timeout 30000000`(30s)로 slow-loris 방어, master playlist의 variant URL 스킴도 `http`/`https`만 허용(이중 검증), variant가 master 자기자신으로 resolve되면 media playlist로 fallback(loop 방지), ffmpeg 프로세스는 context 취소·2 GiB 초과 시 kill, 출력 MP4는 기존 `renameUnique` 경로로 atomic rename, 실패 시 stderr는 서버 로그에만 기록(SSE 클라이언트로는 안전한 code만 노출)
 
 **하지 않을 것 (Never)**
 - TS 이외 포맷 트랜스코딩 (MP4/MKV/AVI는 원본 그대로 스트리밍)
@@ -607,3 +608,5 @@ volumes:
 - Folder rename은 `os.Stat` + `os.Rename` 순서로, 두 콜 사이에 동일 이름 폴더가 생성되면 race 발생 가능. 단일 사용자 배포 대상이므로 acceptable.
 - HLS live stream은 `TotalTimeout`(10분) 또는 2 GiB 시점에 강제 종료 — 긴 live 컨텐츠는 끝까지 기록되지 않는다. 명시적 live 감지·분기는 없음.
 - HLS 다운로드는 `start` 이벤트에 `total`이 없어 클라이언트 프로그래스 바는 indeterminate(수치 없이 애니메이션) 표시가 필요. 기존 UI가 `total` 없음을 허용하는지 §2.5 모달 구현 시 확인.
+- HLS 임시 파일 TOCTOU: `os.CreateTemp` → `Close` → ffmpeg `-y` 재오픈 사이에 동일 경로 write 권한을 가진 로컬 프로세스가 symlink로 대체하는 이론적 race 창이 존재. 단일 사용자 자기-호스팅 모델에서 `destDir` write 권한자는 사용자 본인이므로 실제 위협 없음 — 다중 사용자 배포로 확장 시 `O_NOFOLLOW` 또는 ffmpeg stdout 파이프 방식 재검토 필요.
+- URL import SSRF 정책(약함)은 설계상 선택. 사설 IP(`127.0.0.1`, `10.x`, `192.168.x`, `169.254.169.254` 등)은 호스트 검증 없이 그대로 fetch 허용 — LAN 미디어 서버 호출 등 정상 케이스 허용이 우선. VPS/다중 사용자 호스팅으로 확장 시 cloud metadata endpoint(`169.254.169.254`)는 무조건 차단 권장.

@@ -509,6 +509,7 @@ const URL_ERROR_LABELS = {
   network_error: '네트워크 오류',
   write_error: '저장 실패',
   ffmpeg_error: 'HLS 리먹싱 실패',
+  ffmpeg_missing: 'ffmpeg 미설치 (서버 설정 필요)',
   hls_playlist_too_large: 'HLS 플레이리스트 크기 초과',
 };
 

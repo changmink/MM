@@ -19,13 +19,13 @@ import (
 	"time"
 )
 
-// Sentinel errors for HLS handling. Fetch maps these to user-facing FetchError
-// codes (hls_playlist_too_large / invalid_scheme / ffmpeg_error / too_large).
+// Sentinel errors for HLS handling. classifyHLSRemuxError maps these plus
+// context.Canceled / context.DeadlineExceeded to stable FetchError.Code values
+// documented in SPEC §5.1.
 var (
-	errHLSPlaylistTooLarge = errors.New("hls_playlist_too_large")
-	errHLSVariantScheme    = errors.New("invalid_scheme")
-	errFFmpegMissing       = errors.New("ffmpeg_missing")
-	errHLSTooLarge         = errors.New("hls_too_large")
+	errHLSVariantScheme = errors.New("invalid_scheme")
+	errFFmpegMissing    = errors.New("ffmpeg_missing")
+	errHLSTooLarge      = errors.New("hls_too_large")
 )
 
 // ffmpegExitError wraps a non-zero ffmpeg termination with captured stderr so
@@ -131,7 +131,24 @@ func parseMasterPlaylist(body []byte, base *url.URL) (*url.URL, error) {
 	if scheme != "http" && scheme != "https" {
 		return nil, errHLSVariantScheme
 	}
+	// Guard against a (hostile or broken) master playlist whose chosen variant
+	// resolves back to itself: handing the same URL to ffmpeg would loop
+	// through the same master again. Fall back to treating it as a media
+	// playlist — ffmpeg will then either succeed if it is one, or fail with
+	// ffmpeg_error, which is the right outcome either way.
+	if sameURL(resolved, base) {
+		return base, nil
+	}
 	return resolved, nil
+}
+
+// sameURL compares two URLs by scheme/host/path — query/fragment ignored — so
+// a variant link with a differing token still counts as the same endpoint for
+// loop detection.
+func sameURL(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Host, b.Host) &&
+		a.Path == b.Path
 }
 
 func extractBandwidth(line string) int64 {
@@ -151,8 +168,9 @@ func extractBandwidth(line string) int64 {
 // using the same throttling rules as progressReader (byte OR time threshold).
 //
 // Returns one of: nil on exit 0; errHLSTooLarge if the cap was breached;
-// ctx.Err() on external cancel; *ffmpegExitError on non-zero exit with stderr
-// captured; errFFmpegMissing if the binary is not on PATH.
+// ctx.Err() on external cancel or deadline; *ffmpegExitError on non-zero exit
+// with stderr captured; errFFmpegMissing if the ffmpeg binary is not on PATH.
+// classifyHLSRemuxError translates these to public FetchError.Code values.
 //
 // Note on observability in practice: ffmpeg's MP4 muxer buffers packets until
 // it can finalize headers, so for small remuxes (under a few hundred KiB of
@@ -168,9 +186,13 @@ func runHLSRemux(ctx context.Context, variantURL, tmpPath string, cb *Callbacks,
 	// -protocol_whitelist blocks file:, rtp:, udp:, data: and other schemes
 	// ffmpeg would otherwise follow from inside the playlist — essential
 	// defense against SSRF/LFI via a hostile master or media playlist.
+	// -rw_timeout bounds per-I/O read/write wait (microseconds) so a
+	// slow-loris origin cannot burn the whole TotalTimeout budget by
+	// feeding the segment connection at one byte/sec.
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-hide_banner", "-loglevel", "error",
 		"-protocol_whitelist", "http,https,tls,tcp,crypto",
+		"-rw_timeout", "30000000",
 		"-i", variantURL,
 		"-c", "copy",
 		"-bsf:a", "aac_adtstoasc",
@@ -185,15 +207,20 @@ func runHLSRemux(ctx context.Context, variantURL, tmpPath string, cb *Callbacks,
 		return err
 	}
 
-	// watchCtx is decoupled from ctx so the watcher survives until cmd.Wait()
-	// returns — otherwise we would race with the final Stat and lose the
-	// last progress sample.
+	// watchCtx is decoupled from parent ctx: we want the watcher to keep
+	// polling until we explicitly cancel it after cmd.Wait() returns, so a
+	// client-initiated ctx cancel does not stop the final size sample from
+	// landing. The watcher is the only goroutine allowed to kill the ffmpeg
+	// process by itself (size-cap path); ctx cancel goes through
+	// exec.CommandContext.
 	watchCtx, cancelWatch := context.WithCancel(context.Background())
 	var sizeExceeded atomic.Bool
 	watchDone := make(chan struct{})
 	go func() {
 		defer close(watchDone)
 		watchOutputFile(watchCtx, tmpPath, hlsWatchInterval, maxOutputBytes, cb, func() {
+			// Kill.Process.Kill() is safe to call even if the process has
+			// already exited — it just returns ErrProcessDone.
 			sizeExceeded.Store(true)
 			_ = cmd.Process.Kill()
 		})
@@ -266,7 +293,14 @@ func fetchHLS(
 		return nil, &FetchError{Code: "write_error", Err: err}
 	}
 	tmpPath := tmpFile.Name()
-	_ = tmpFile.Close()
+	// Close the handle before ffmpeg reopens the path with -y. On Windows a
+	// lingering handle makes the subsequent ffmpeg open or os.Rename fail
+	// with sharing-violation errors, so treat any Close failure as a write
+	// error rather than silently carrying on.
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return nil, &FetchError{Code: "write_error", Err: err}
+	}
 	renamed := false
 	defer func() {
 		if !renamed {
@@ -320,25 +354,24 @@ func deriveHLSFilename(parsed *url.URL) string {
 
 // classifyHLSRemuxError maps runHLSRemux sentinels to public FetchError codes.
 // ctx.Err() is checked first so cancels/timeouts surface correctly even when
-// ffmpeg returns a non-zero exit alongside a cancellation.
+// ffmpeg returns a non-zero exit alongside a cancellation. ffmpeg_missing is
+// a distinct code from ffmpeg_error: the former is a server-side
+// misconfiguration (operator should install ffmpeg), the latter is a stream
+// or input failure the user can do nothing about on their side.
 func classifyHLSRemuxError(err error) *FetchError {
-	if errors.Is(err, context.DeadlineExceeded) {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
 		return &FetchError{Code: "download_timeout", Err: err}
-	}
-	if errors.Is(err, context.Canceled) {
+	case errors.Is(err, context.Canceled):
 		return &FetchError{Code: "network_error", Err: err}
-	}
-	if errors.Is(err, errHLSTooLarge) {
+	case errors.Is(err, errHLSTooLarge):
 		return &FetchError{Code: "too_large", Err: err}
-	}
-	if errors.Is(err, errFFmpegMissing) {
+	case errors.Is(err, errFFmpegMissing):
+		return &FetchError{Code: "ffmpeg_missing", Err: err}
+	default:
+		// Includes *ffmpegExitError and any other ffmpeg-layer failure.
 		return &FetchError{Code: "ffmpeg_error", Err: err}
 	}
-	var exitErr *ffmpegExitError
-	if errors.As(err, &exitErr) {
-		return &FetchError{Code: "ffmpeg_error", Err: err}
-	}
-	return &FetchError{Code: "ffmpeg_error", Err: err}
 }
 
 // watchOutputFile polls tmpPath for growth until ctx cancels. When the file
