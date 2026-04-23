@@ -508,6 +508,8 @@ const URL_ERROR_LABELS = {
   too_many_redirects: '리다이렉트 과다',
   network_error: '네트워크 오류',
   write_error: '저장 실패',
+  ffmpeg_error: 'HLS 리먹싱 실패',
+  hls_playlist_too_large: 'HLS 플레이리스트 크기 초과',
 };
 
 let urlSubmitting = false;
@@ -652,8 +654,13 @@ function handleSSEEvent(ev) {
     case 'start': {
       const row = ensureURLRow(ev.index, ev.url);
       row.querySelector('.url-row-name').textContent = ev.name || ev.url;
-      row.dataset.total = String(ev.total || 0);
-      const sizeText = ev.total > 0 ? formatSize(ev.total) : '크기 미상';
+      const total = Number(ev.total) || 0;
+      row.dataset.total = String(total);
+      // HLS imports omit `total` (unknown length) — flip the row into
+      // indeterminate mode so CSS runs the shuttle animation instead of
+      // pinning the bar at 0%.
+      row.classList.toggle('url-row-indeterminate', total === 0);
+      const sizeText = total > 0 ? formatSize(total) : '크기 미상';
       const typePart = ev.type ? `${ev.type} · ` : '';
       setRowStatus(row, 'status-downloading', typePart + sizeText);
       break;
@@ -675,6 +682,7 @@ function handleSSEEvent(ev) {
     case 'done': {
       const row = ensureURLRow(ev.index, ev.url);
       row.querySelector('.url-row-name').textContent = ev.name || ev.url;
+      row.classList.remove('url-row-indeterminate');
       row.querySelector('.url-progress-fill').style.width = '100%';
       const warn = (ev.warnings && ev.warnings.length > 0) ? ` · ${ev.warnings.join(', ')}` : '';
       setRowStatus(row, 'status-done', `완료 (${formatSize(ev.size)})${warn}`);
@@ -683,6 +691,7 @@ function handleSSEEvent(ev) {
     }
     case 'error': {
       const row = ensureURLRow(ev.index, ev.url);
+      row.classList.remove('url-row-indeterminate');
       const label = URL_ERROR_LABELS[ev.error] || ev.error || '알 수 없는 오류';
       setRowStatus(row, 'status-error', '실패 · ' + label);
       break;

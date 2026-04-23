@@ -557,6 +557,20 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .url-row.status-error .url-row-status { color: var(--danger); }
 .url-row.status-done .url-row-status { color: #16a34a; }
 
+/* Indeterminate mode: HLS imports have no known total, so the fill
+   shuttles left-to-right instead of pinning to 0%. The fixed 40% width
+   + translateX animation is the standard "material"-style indeterminate
+   bar — cheap to run on the GPU and obvious to the user. */
+.url-row-indeterminate .url-progress-fill {
+  width: 40%;
+  animation: url-indeterminate 1.2s ease-in-out infinite;
+  transition: none;
+}
+@keyframes url-indeterminate {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+
 .url-summary {
   margin-top: 10px;
   padding: 6px 10px;
