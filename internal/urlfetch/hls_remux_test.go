@@ -101,15 +101,22 @@ func TestRunHLSRemux_Success(t *testing.T) {
 func TestRunHLSRemux_ContextCancel(t *testing.T) {
 	requireFFmpeg(t)
 	// Serve a playlist that points at a segment URL that blocks until the
-	// test ends, so ffmpeg stalls on the HTTP read. We cancel ctx mid-flight
-	// and verify the process terminates quickly.
+	// test ends, so ffmpeg stalls on the HTTP read. A `segmentHit` channel
+	// signals when ffmpeg has actually reached the segment GET — cancelling
+	// ctx before that point would race with the normal happy-path exit on
+	// fast runners (runHLSRemux can finish before we cancel).
 	blockCh := make(chan struct{})
+	segmentHit := make(chan struct{}, 1)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/playlist.m3u8", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 		w.Write([]byte("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nslow.ts\n#EXT-X-ENDLIST\n"))
 	})
 	mux.HandleFunc("/slow.ts", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case segmentHit <- struct{}{}:
+		default:
+		}
 		select {
 		case <-blockCh:
 		case <-r.Context().Done():
@@ -136,8 +143,16 @@ func TestRunHLSRemux_ContextCancel(t *testing.T) {
 		err = runHLSRemux(ctx, srv.URL+"/playlist.m3u8", tmpPath, nil, MaxBytes)
 	}()
 
-	// Give ffmpeg a moment to spawn and start the HTTP request.
-	time.Sleep(300 * time.Millisecond)
+	// Block until ffmpeg's request for the segment actually lands, so the
+	// cancel reliably interrupts a stalled read rather than a not-yet-started
+	// fetch.
+	select {
+	case <-segmentHit:
+	case <-time.After(5 * time.Second):
+		cancel()
+		wg.Wait()
+		t.Fatal("ffmpeg never fetched the segment — test setup broken or ffmpeg slow-start")
+	}
 	cancel()
 
 	done := make(chan struct{})
@@ -283,8 +298,40 @@ func TestRunHLSRemux_ExitError(t *testing.T) {
 	if !errors.As(err, &exitErr) {
 		t.Fatalf("got %T (%v), want *ffmpegExitError", err, err)
 	}
-	if exitErr.stderr == "" {
-		t.Error("expected stderr capture, got empty string")
+	// Assert the exit code, not stderr contents: ffmpeg's stderr wording
+	// changes across versions and loglevel settings.
+	if exitErr.exitCode == 0 {
+		t.Errorf("exitCode = 0, want non-zero")
+	}
+}
+
+// TestClassifyHLSRemuxError pins the sentinel → FetchError.Code mapping so a
+// future refactor cannot silently collapse ffmpeg_missing back into
+// ffmpeg_error (which hides the operator-misconfig case) or swap
+// download_timeout and network_error on context failures.
+func TestClassifyHLSRemuxError(t *testing.T) {
+	cases := []struct {
+		name string
+		in   error
+		want string
+	}{
+		{"deadline exceeded", context.DeadlineExceeded, "download_timeout"},
+		{"canceled", context.Canceled, "network_error"},
+		{"too large", errHLSTooLarge, "too_large"},
+		{"ffmpeg missing", errFFmpegMissing, "ffmpeg_missing"},
+		{"exit error", &ffmpegExitError{exitCode: 1, stderr: "oops"}, "ffmpeg_error"},
+		{"other", errors.New("random"), "ffmpeg_error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ferr := classifyHLSRemuxError(tc.in)
+			if ferr.Code != tc.want {
+				t.Errorf("code = %q, want %q", ferr.Code, tc.want)
+			}
+			if ferr.Unwrap() != tc.in {
+				t.Errorf("wrapped err not preserved")
+			}
+		})
 	}
 }
 

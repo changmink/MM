@@ -167,6 +167,45 @@ func TestParseMasterPlaylist_EmptyBodyReturnsBase(t *testing.T) {
 	}
 }
 
+// TestParseMasterPlaylist_VariantSelfLoopReturnsBase covers the guard that
+// prevents ffmpeg from looping on a master playlist whose chosen variant URL
+// resolves back to the master itself (hostile input or misconfigured CDN).
+func TestParseMasterPlaylist_VariantSelfLoopReturnsBase(t *testing.T) {
+	body := []byte(`#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1000000
+master.m3u8
+`)
+	base, _ := url.Parse("https://cdn.example.com/master.m3u8")
+	got, err := parseMasterPlaylist(body, base)
+	if err != nil {
+		t.Fatalf("parseMasterPlaylist: %v", err)
+	}
+	// Must fall back to base so ffmpeg treats it as a media playlist instead
+	// of chasing the same URL again.
+	if got.String() != base.String() {
+		t.Errorf("self-loop variant: got %q, want base %q", got.String(), base.String())
+	}
+}
+
+// TestParseMasterPlaylist_PreservesVariantQuery ensures CDN tokens attached to
+// the variant URL (common for signed HLS manifests) survive through the
+// parser into the ffmpeg input argument.
+func TestParseMasterPlaylist_PreservesVariantQuery(t *testing.T) {
+	body := []byte(`#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1000000
+variant.m3u8?token=abc&sig=xyz
+`)
+	base, _ := url.Parse("https://cdn.example.com/master.m3u8")
+	got, err := parseMasterPlaylist(body, base)
+	if err != nil {
+		t.Fatalf("parseMasterPlaylist: %v", err)
+	}
+	want := "https://cdn.example.com/variant.m3u8?token=abc&sig=xyz"
+	if got.String() != want {
+		t.Errorf("query not preserved: got %q, want %q", got.String(), want)
+	}
+}
+
 func TestParseMasterPlaylist_SkipsCommentsBeforeVariant(t *testing.T) {
 	body := []byte(`#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=500000

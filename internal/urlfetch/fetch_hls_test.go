@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -96,6 +97,11 @@ func TestFetch_HLS_MasterPlaylist_PicksHighestBandwidth(t *testing.T) {
 	if res.Name != "master.mp4" {
 		t.Errorf("name = %q, want master.mp4", res.Name)
 	}
+	// extension_replaced must be present on the master-playlist branch too
+	// (not only on the media-playlist branch).
+	if !slices.Contains(res.Warnings, "extension_replaced") {
+		t.Errorf("master branch warnings = %v, want to contain extension_replaced", res.Warnings)
+	}
 }
 
 // TestFetch_HLS_MislabeledContentType_Fallback covers CDNs that return
@@ -186,6 +192,92 @@ func TestFetch_HLS_PlaylistTooLarge(t *testing.T) {
 	}
 	if ferr.Code != "hls_playlist_too_large" {
 		t.Errorf("code = %q, want hls_playlist_too_large", ferr.Code)
+	}
+}
+
+// TestFetch_HLS_PlaylistExactlyAtCap pins the boundary condition: a body of
+// exactly hlsMaxPlaylistBytes must NOT be rejected as too large. Regression
+// guard against someone flipping the `>` to `>=` in the size check.
+func TestFetch_HLS_PlaylistExactlyAtCap(t *testing.T) {
+	// Valid-but-trivial playlist padded with comment lines to hit the cap
+	// exactly. ffmpeg will still fail to remux (no usable segments) so we
+	// only assert the size check doesn't trip.
+	head := []byte("#EXTM3U\n#EXT-X-VERSION:3\n")
+	body := make([]byte, hlsMaxPlaylistBytes)
+	copy(body, head)
+	for i := len(head); i < len(body); i++ {
+		body[i] = '#'
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	dest := t.TempDir()
+	_, ferr := Fetch(context.Background(), NewClient(),
+		srv.URL+"/atcap.m3u8", dest, "/movies", nil)
+	if ferr == nil {
+		// Unexpected success means ffmpeg happily consumed an empty media
+		// playlist. Either way the important assertion is that the size
+		// check did not trip.
+		return
+	}
+	if ferr.Code == "hls_playlist_too_large" {
+		t.Errorf("exact-cap body rejected as too large (off-by-one)")
+	}
+}
+
+// TestFetch_HLS_AudioMpegurl_Fallthrough guards the legacy MIME shortcut
+// discovered during E2E against Mux (commit 37c3024): audio/mpegurl must
+// route through the HLS branch rather than unsupported_content_type.
+func TestFetch_HLS_AudioMpegurl_Fallthrough(t *testing.T) {
+	fixtureDir := t.TempDir()
+	playlistName := makeHLSFixture(t, fixtureDir, 1)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/"+playlistName, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/mpegurl")
+		http.ServeFile(w, r, filepath.Join(fixtureDir, playlistName))
+	})
+	mux.Handle("/", http.FileServer(http.Dir(fixtureDir)))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dest := t.TempDir()
+	res, ferr := Fetch(context.Background(), NewClient(),
+		srv.URL+"/"+playlistName, dest, "/movies", nil)
+	if ferr != nil {
+		t.Fatalf("fetch failed: %v", ferr)
+	}
+	if res.Type != "video" {
+		t.Errorf("type = %q, want video", res.Type)
+	}
+}
+
+// TestDeriveHLSFilename_Fallbacks covers the three degenerate stem cases that
+// must resolve to "video.mp4" rather than ".mp4" or "..mp4".
+func TestDeriveHLSFilename_Fallbacks(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want string
+	}{
+		{"https://x.com/", "video.mp4"},
+		{"https://x.com/.", "video.mp4"},
+		{"https://x.com/..", "video.mp4"},
+		{"https://x.com/path/.m3u8", "video.mp4"},
+		{"https://x.com/foo.m3u8", "foo.mp4"},
+		{"https://x.com/path/bar.M3U8", "bar.mp4"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			u, err := url.Parse(tc.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := deriveHLSFilename(u); got != tc.want {
+				t.Errorf("deriveHLSFilename(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
 	}
 }
 
