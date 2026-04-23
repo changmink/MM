@@ -181,6 +181,11 @@ func Fetch(ctx context.Context, client *http.Client, rawURL, destDir, relDir str
 		return nil, &FetchError{Code: "http_error", Err: fmt.Errorf("status %d", resp.StatusCode)}
 	}
 
+	rawContentType := resp.Header.Get("Content-Type")
+	if isHLSResponse(rawContentType, parsed.Path) {
+		return fetchHLS(ctx, resp, parsed, rawURL, destDir, relDir, warnings, cb)
+	}
+
 	// Reject responses without a known length so we cannot be tricked into
 	// streaming an unbounded body. The in-stream cap below is defense in depth.
 	if resp.ContentLength < 0 {
@@ -190,7 +195,7 @@ func Fetch(ctx context.Context, client *http.Client, rawURL, destDir, relDir str
 		return nil, &FetchError{Code: "too_large"}
 	}
 
-	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	mediaType, _, err := mime.ParseMediaType(rawContentType)
 	if err != nil {
 		return nil, &FetchError{Code: "unsupported_content_type"}
 	}

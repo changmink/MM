@@ -32,7 +32,11 @@ type sseStart struct {
 	Index int    `json:"index"`
 	URL   string `json:"url"`
 	Name  string `json:"name"`
-	Total int64  `json:"total"`
+	// Total is the Content-Length advertised by the origin. HLS has no total
+	// byte count (variable-bitrate remux of streaming segments), so it arrives
+	// as 0 and is omitted from the wire via omitempty — clients use this
+	// absence to render an indeterminate progress bar.
+	Total int64  `json:"total,omitempty"`
 	Type  string `json:"type"`
 }
 
@@ -190,6 +194,7 @@ func (h *Handler) fetchOneSSE(ctx context.Context, emit func(any),
 	<-writerDone
 
 	if ferr != nil {
+		logFetchError(u, ferr)
 		emit(sseError{Phase: "error", Index: index, URL: u, Error: ferr.Code})
 		return false
 	}
@@ -208,6 +213,19 @@ func (h *Handler) fetchOneSSE(ctx context.Context, emit func(any),
 		}
 	}
 	return true
+}
+
+// logFetchError writes a structured server-side log for failed URL imports.
+// The client only ever receives the opaque error code; this is where operators
+// see what actually broke — especially useful for ffmpeg_missing (operator
+// must install ffmpeg) and ffmpeg_error (stream-specific stderr can be
+// inspected to tell DRM/format issues apart).
+func logFetchError(u string, ferr *urlfetch.FetchError) {
+	attrs := []any{"code", ferr.Code, "url", u}
+	if unwrapped := ferr.Unwrap(); unwrapped != nil {
+		attrs = append(attrs, "err", unwrapped.Error())
+	}
+	slog.Warn("url import failed", attrs...)
 }
 
 func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, payload any) {
