@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -96,7 +97,10 @@ func (h *Handler) streamTS(w http.ResponseWriter, r *http.Request, absPath strin
 		return
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(cachePath), "remux_*.mp4.tmp")
+	// Pattern "remux_*.mp4" → "remux_<rand>.mp4". ffmpeg picks its muxer from the
+	// output extension, so the filename must end in .mp4 (not .mp4.tmp) or it
+	// exits with EINVAL.
+	tmp, err := os.CreateTemp(filepath.Dir(cachePath), "remux_*.mp4")
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "tmp create failed", err)
 		return
@@ -104,6 +108,7 @@ func (h *Handler) streamTS(w http.ResponseWriter, r *http.Request, absPath strin
 	tmpPath := tmp.Name()
 	tmp.Close()
 
+	var stderr bytes.Buffer
 	cmd := exec.CommandContext(r.Context(), "ffmpeg",
 		"-y",
 		"-loglevel", "error",
@@ -116,9 +121,11 @@ func (h *Handler) streamTS(w http.ResponseWriter, r *http.Request, absPath strin
 		"-movflags", "faststart",
 		tmpPath,
 	)
+	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		os.Remove(tmpPath)
-		writeError(w, r, http.StatusInternalServerError, "transcode failed", err)
+		writeError(w, r, http.StatusInternalServerError, "transcode failed",
+			fmt.Errorf("%w: %s", err, bytes.TrimSpace(stderr.Bytes())))
 		return
 	}
 
