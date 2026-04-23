@@ -53,6 +53,7 @@
 - [ ] MP4/MKV/AVI: 트랜스코딩 없이 원본 파일 스트리밍
 - [ ] TS: ffmpeg로 실시간 MP4 트랜스코딩 후 스트리밍 (`Content-Type: video/mp4`)
 - [ ] MIME 타입 자동 감지
+- [ ] TS 파일을 MP4로 **영구 변환**하여 Range/seek 지원 + 반복 트랜스코딩 비용 제거 (§2.3.3)
 
 ### 2.3.1 동영상 섬네일
 - **지원 포맷:** MP4, MKV, AVI, TS (전체)
@@ -82,6 +83,54 @@
   - 포맷팅은 클라이언트(`app.js`)에서 수행
   - 폴더 삭제 시 `.thumb/` 전체 삭제로 사이드카도 함께 정리됨 (기존 동작 그대로)
 
+### 2.3.3 TS → MP4 영구 변환
+
+TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱(§2.3, `internal/handler/stream.go:streamTS`)되며, 리먹싱된 MP4는 `.cache/streams/`에 캐시되지만 **Range/seek 미지원**이다. 이 기능은 TS 원본을 리먹싱한 `foo.mp4`를 같은 폴더에 영구 저장해 이후 모든 요청에서 원본 서빙(Range 포함) 경로를 타게 한다.
+
+- **범위(scope):** `/data` 안의 기존 `.ts` 파일 → 동일 폴더에 같은 base name의 `.mp4` 파일 생성. 다른 포맷(MKV/AVI) 변환이나 코덱 재인코딩은 **out of scope**.
+- **방식:** ffmpeg 리먹싱(`-c copy`)만 — TS는 보통 H.264/AAC이므로 컨테이너만 교체. 수 초 내 완료(파일 복사 수준 속도), CPU 비용 낮음. 재인코딩 폴백 **없음**.
+- **API:** `POST /api/convert` (§5에 상세). body로 파일 경로 배열과 원본 삭제 플래그를 받고 SSE로 진행 스트림 반환 — URL import(§2.6)와 동일 이벤트 스키마(`start`/`progress`/`done`/`error`/`summary`).
+- [ ] **개별 변환 트리거:** 동영상 썸네일 카드가 `.ts` 파일이면 "MP4로 변환" 버튼(🎞 또는 텍스트) 표시. 기존 rename/delete 버튼과 동일 레이아웃. 클릭 시 확인 모달 → 변환 시작.
+- [ ] **일괄 변환 트리거:** 현재 browse 경로에 `.ts` 파일이 1개 이상이면 상단 툴바(§2.5.2 툴바와 공존 또는 별도 버튼)에 "모든 TS 변환 (N개)" 버튼 표시. 클릭 시 확인 모달 → 현재 **filter/sort 통과한 visible entries 중 `.ts` 전부**를 순차 변환.
+- [ ] **ffmpeg 호출(기존 `streamTS` 패턴 재사용):**
+  ```
+  ffmpeg -y -loglevel error \
+    -i <src.ts> \
+    -map 0:v:0 -map 0:a:0? \
+    -c:v copy -c:a copy \
+    -bsf:a aac_adtstoasc \
+    -movflags +faststart \
+    <tmp.mp4>
+  ```
+  - 임시 파일 패턴: `.convert-*.mp4` (`.mp4` 확장자 필수 — ffmpeg가 muxer를 확장자로 선택; `5c5f871` 커밋 참고)
+  - 출력은 destDir에 `os.CreateTemp` → ffmpeg 실행 → atomic `os.Rename`
+  - stderr 버퍼링하여 실패 시 서버 로그에만 기록 (SSE 본문에는 `ffmpeg_error` 코드만 노출, stderr 그대로 노출 안 함)
+- [ ] **파일명 결정:** `foo.ts` → `foo.mp4` (base name 유지, 확장자만 `.mp4` 교체)
+  - **대소문자:** 원본이 `.TS`/`.Ts` 등이어도 출력은 소문자 `.mp4` 고정
+  - **충돌 처리:** 목표 경로(`foo.mp4`)가 이미 존재하면 **`409 Conflict`** 계열 에러(`error: "already_exists"`) — 자동 `_1` suffix **없음**(rename 로직과 일관, Q3(a)). 사용자가 기존 `foo.mp4` 처리 결정해야 함.
+- [ ] **원본 처리:**
+  - 기본은 **원본 `.ts` 유지**
+  - 요청 body의 `delete_original: true`면 최종 rename 성공 후 원본 `.ts` + `.thumb/foo.ts.jpg` + `.thumb/foo.ts.jpg.dur` 삭제
+  - UI 모달에 "변환 후 원본 TS 삭제" 체크박스(기본 unchecked)
+  - 원본 삭제 실패 시: 변환 자체는 성공 처리(`done` 이벤트) + `warnings: ["delete_original_failed"]` 추가. 서버 로그에 사유 기록.
+- [ ] **사이드카:** 새 `foo.mp4`의 썸네일/duration 사이드카는 생성하지 않음 — 기존 lazy 메커니즘(§2.3.1 on-demand, §2.3.2 `.dur` 생성)이 다음 `browse` 시점에 자동 생성. 단순성 우선.
+- [ ] **동시성:** 요청 한 건 내에서 배열은 **순차 처리**(동시 ffmpeg 프로세스 1개) — URL import와 동일. 동일 소스에 대한 여러 요청이 겹치면 `stream.go`의 `lockStreamKey`와 동일한 per-path 뮤텍스로 보호.
+- [ ] **취소:** 요청 context 취소(클라이언트 연결 끊김 포함) 시 현재 실행 중인 ffmpeg 프로세스 kill + 임시 파일 삭제. 배열의 남은 항목은 처리하지 않음.
+- [ ] **타임아웃:** URL import의 `TotalTimeout`(10분)을 파일당 적용. 초과 시 ffmpeg kill + `error: "convert_timeout"`. 매우 큰 TS 파일(>2시간)은 remux 자체가 I/O bound이므로 이 제한으로 충분.
+- [ ] **크기 상한:** URL import의 2 GiB 상한은 **적용하지 않음** — 로컬 파일 remux는 디스크 공간이 허용하는 한 제한 없음. 디스크 풀 에러는 `error: "write_error"`.
+- [ ] **Progress 이벤트:**
+  - `start`: `total`에 원본 `.ts` 파일 크기를 채움 (출력 MP4 크기는 사전 예측 불가지만 ≈ 원본 크기, 진행률 대략 계산 가능)
+  - `progress`: 임시 `.mp4` 파일의 현재 크기 — HLS import와 동일(500 ms polling + 1 MiB / 250 ms throttling, §5.1.1)
+  - `done`: 최종 MP4 파일 크기 + `warnings` (해당 시)
+- [ ] **응답 후 UI 갱신:** SSE `summary` 수신 후 클라이언트가 `loadBrowse()` 1회 호출 → 새 `.mp4` + (delete_original 시) 원본 제거가 반영됨.
+- **Non-goals:**
+  - 재인코딩(CRF, preset 선택 등) — remux 실패는 그대로 `ffmpeg_error` 반환(Q4(a))
+  - 다른 포맷 변환(MKV→MP4, AVI→MP4 등) — 범위 외
+  - 원본 `foo.ts`를 `foo.mp4`로 **덮어쓰기** (삭제는 별도 단계)
+  - 변환 결과 저장 위치 변경(항상 원본 폴더)
+  - 변환 큐 영속화(서버 재시작 시 진행 중 변환은 폐기, 재개 없음)
+  - `.cache/streams/`의 기존 리먹싱 캐시 재활용(hash 기반 키라 별도 로직이 필요해 복잡도 상승; 단순하게 신규 ffmpeg 1회 실행)
+
 ### 2.4 음악 스트리밍
 - **지원 포맷:** MP3, FLAC, AAC, OGG, WAV, M4A
 - [ ] HTTP Range 요청 지원
@@ -100,6 +149,7 @@
 - [ ] **파일 용량 표시** (§2.5.1)
 - [ ] **정렬·필터 툴바** (§2.5.2)
 - [ ] **움짤 필터** (§2.5.3)
+- [ ] **TS → MP4 변환 트리거** (§2.3.3): 동영상 카드별 "MP4로 변환" 버튼 + 현재 폴더 일괄 변환 버튼 + 진행 모달(URL import 모달과 동일한 SSE 진행 바 스타일)
 
 ### 2.5.1 파일 용량 표시
 
@@ -359,6 +409,7 @@ file_server/
 | PATCH | `/api/folder?path=` | 폴더 이름 변경 |
 | DELETE | `/api/folder?path=` | 폴더 재귀 삭제 (하위 내용 + `.thumb/` 포함) |
 | POST | `/api/import-url?path=` | URL 목록에서 미디어 다운로드 → 저장 (SSE 진행 스트림) |
+| POST | `/api/convert` | TS 파일 목록을 MP4로 영구 변환 (SSE 진행 스트림) |
 | GET | `/` | 프론트엔드 SPA |
 
 ### 5.1 응답 스키마
@@ -561,6 +612,65 @@ file_server/
 - 파일이 작아 `progress` 없이 `start` → `done` 바로 가는 케이스 허용
 - 최종 바이트 수는 항상 `done` 이벤트 `size` 필드로 전달 (`progress`의 마지막 값은 신뢰하지 말 것)
 
+#### POST /api/convert
+
+TS 파일을 MP4로 영구 변환. SSE 스트림으로 진행 상태 전송. 이벤트 스키마·throttling은 URL import(§5.1, §5.1.1)와 동일 — `phase`: `start` / `progress` / `done` / `error` / `summary`.
+
+- **Body:**
+  ```json
+  {
+    "paths": ["movies/clip1.ts", "movies/clip2.ts"],
+    "delete_original": false
+  }
+  ```
+  - `paths`: 변환할 `.ts` 파일 경로 배열(`/data` 기준 상대). 최소 1개, 최대 **50개** (URL import와 동일 상한).
+  - `delete_original`: 변환 성공 시 원본 `.ts` + 사이드카 삭제 여부(기본 `false`).
+- **응답:** `200 OK`, `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`
+
+**이벤트 스키마**
+
+```jsonc
+// phase: "start"
+{"phase":"start","index":0,"path":"movies/clip1.ts",
+ "name":"clip1.mp4","total":314572800,"type":"video"}
+
+// phase: "progress"
+{"phase":"progress","index":0,"received":67108864}
+
+// phase: "done"
+{"phase":"done","index":0,"path":"movies/clip1.mp4",
+ "name":"clip1.mp4","size":310378496,"type":"video","warnings":[]}
+
+// phase: "error"
+{"phase":"error","index":1,"path":"movies/clip2.ts",
+ "error":"already_exists"}
+
+// phase: "summary"
+{"phase":"summary","succeeded":1,"failed":1}
+```
+
+- `start.total`은 원본 `.ts` 파일 크기(최종 MP4와 근사, 정확치 아님)
+- `progress.received`는 임시 `.mp4` 출력 파일의 현재 바이트 수(ffmpeg remux 중 stat 폴링)
+- `done.size`는 최종 MP4 파일 크기 (atomic rename 직후 `Stat`)
+- `warnings` 가능 값:
+  - `"delete_original_failed"` — `delete_original: true`였으나 원본 `.ts`(또는 사이드카) 삭제 실패. 변환 자체는 성공.
+- `error` 가능 값:
+  - `"invalid_path"` — path traversal 또는 `/data` 밖 경로
+  - `"not_found"` — 경로에 파일이 없음
+  - `"not_a_file"` — 경로가 디렉토리
+  - `"not_ts"` — 파일 확장자가 `.ts`가 아님(대소문자 무시)
+  - `"already_exists"` — 목표 `foo.mp4`가 이미 존재
+  - `"ffmpeg_missing"` — ffmpeg 바이너리가 서버 PATH에 없음
+  - `"ffmpeg_error"` — ffmpeg non-zero exit(입력 손상, 비호환 코덱 등)
+  - `"convert_timeout"` — 10분 초과
+  - `"write_error"` — 디스크 저장 실패(디스크 풀 등)
+  - `"canceled"` — 클라이언트 연결 끊김/요청 context 취소
+- **4xx 케이스** (SSE 스트림 시작 전 일반 JSON 에러 응답):
+  - `400 {"error": "no paths"}` — 빈 배열
+  - `400 {"error": "too many paths"}` — 50개 초과
+  - `400 {"error": "invalid request"}` — JSON 파싱 실패
+  - `405 {"error": "method not allowed"}` — POST 외
+
 #### GET /api/thumb
 - 성공: `200 OK`, `Content-Type: image/jpeg`
 - 이미지 파일: `imaging` 라이브러리로 섬네일 생성 (기존)
@@ -700,6 +810,22 @@ volumes:
   - 비 http/https variant URL(예: `file:///etc/passwd`를 담은 master playlist) → 파싱 단계에서 거부 (error) — ffmpeg까지 내려가지 않음
 - 수동 테스트: 브라우저에서 업로드→섬네일→스트리밍 전체 흐름 확인 (썸네일 우하단 시간 오버레이 확인). Rename 후 썸네일·duration 오버레이가 유지되는지 확인.
 - 수동 테스트 (URL import): 모달에서 URL 여러 개(이미지/동영상/음악 섞어) 입력 → URL별 프로그래스 바 실시간 진행 확인 → 완료 후 성공/실패 카운트 요약 확인
+- 단위 테스트 (TS→MP4 변환):
+  - 경로/확장자 검증: `.ts` 외 확장자 거부(`not_ts`), 대소문자(`.TS`, `.Ts`) 허용, 디렉토리 경로 거부, path traversal 거부
+  - 목표 파일명 계산: `foo.ts` → `foo.mp4`, `foo.TS` → `foo.mp4`(소문자 확장자 고정)
+  - 충돌 감지: `foo.mp4` 사전 존재 시 `already_exists` 반환(ffmpeg 호출 전)
+- 통합 테스트 (TS→MP4 변환, `httptest.NewRecorder` + 실제 ffmpeg):
+  - 정상 TS 1개 변환 → `start` → `progress`(≥0개) → `done` → `summary` 이벤트, `.mp4` 파일 생성 + 원본 `.ts` 유지 확인
+  - `delete_original: true` → 변환 성공 후 원본 `.ts` + `.thumb/{name}.ts.jpg` + `.ts.jpg.dur` 삭제 확인
+  - 배열 2개 순차 변환 → index 0 → index 1 순서, 각각 `done` 1개씩, 마지막 `summary`에 `succeeded: 2`
+  - 409 충돌: 목표 `foo.mp4` 사전 존재 시 `error: "already_exists"` 이벤트 + 임시 파일 미생성 확인
+  - 부분 실패: 2개 중 1개는 `.ts` 아님 → 해당 index만 `error: "not_ts"`, 나머지는 정상 `done`
+  - 취소: 변환 중 context 취소 → ffmpeg kill + 임시 파일 `.convert-*.mp4` 정리 확인
+  - ffmpeg 미설치 환경: `ffmpeg_missing` 이벤트(PATH lookup 실패)
+  - 손상 TS(헤더 truncate 등): `ffmpeg_error` + stderr는 SSE 응답에 노출되지 않음(서버 로그에만)
+  - `delete_original_failed` 경고: 원본 `.ts`를 read-only로 설정 후 `delete_original: true` → `done.warnings: ["delete_original_failed"]`
+  - 4xx: 빈 배열 → `400 "no paths"`, 51개 → `400 "too many paths"`, 유효하지 않은 JSON → `400 "invalid request"`
+- 수동 테스트: TS 동영상 카드에 변환 버튼 → 변환 모달 → 진행 바 → 완료 후 `.mp4`로 재생(seek 동작 확인). 폴더에 TS 3개 있을 때 "모든 TS 변환" 버튼 → 순차 변환 → 성공/실패 요약 확인.
 
 ---
 
@@ -714,6 +840,7 @@ volumes:
 - File rename은 `os.Link` + `os.Remove`로 atomic EEXIST 보장 (TOCTOU 방지)
 - URL import: HTTPS TLS 인증서 검증, `Content-Length` 사전 검증, 다운로드 누적 2 GiB 캡, Content-Type 허용 목록(image/video/audio) 검증, 임시 파일 → atomic rename, 파일명 sanitize, SSE `Cache-Control: no-cache` 및 즉시 Flush
 - HLS import: ffmpeg `-protocol_whitelist "http,https,tls,tcp,crypto"` 강제, ffmpeg `-rw_timeout 30000000`(30s)로 slow-loris 방어, master playlist의 variant URL 스킴도 `http`/`https`만 허용(이중 검증), variant가 master 자기자신으로 resolve되면 media playlist로 fallback(loop 방지), ffmpeg 프로세스는 context 취소·2 GiB 초과 시 kill, 출력 MP4는 기존 `renameUnique` 경로로 atomic rename, 실패 시 stderr는 서버 로그에만 기록(SSE 클라이언트로는 안전한 code만 노출)
+- TS→MP4 변환: 입력·출력 경로 모두 `media.SafePath`로 검증, 확장자 `.ts` 화이트리스트 검증(대소문자 무시), 목표 `.mp4` 사전 존재 시 ffmpeg 호출 전 거부, ffmpeg argv 전달(쉘 미개입), 임시 파일 `.convert-*.mp4` → atomic rename, context 취소·타임아웃 시 ffmpeg kill + 임시 파일 정리, stderr는 서버 로그에만 기록(SSE에는 `ffmpeg_error` 코드만), 동일 소스 경로에 대한 동시 요청은 `stream.go`의 per-path 뮤텍스와 동일 패턴으로 직렬화
 
 **하지 않을 것 (Never)**
 - TS 이외 포맷 트랜스코딩 (MP4/MKV/AVI는 원본 그대로 스트리밍)
@@ -723,6 +850,7 @@ volumes:
 - Rename 시 자동 suffix 부여 (`_1`, `_2` 등) — 충돌은 항상 409로 거부
 - URL import: `Authorization`/쿠키 등 인증 헤더 자동 첨부, `http`/`https` 외 스킴 허용, 2 GiB 초과 다운로드, 허용 목록 밖 Content-Type 저장, `Content-Length` 없는 응답 저장(HLS 경로만 예외), 동시 다운로드(batch는 순차 처리)
 - HLS import: 재인코딩(`-c copy`로 리먹싱만, CPU 폭주 방지), DASH(`.mpd`) 지원, 원본 `.m3u8` + `.ts` 세그먼트를 그대로 저장, DRM/암호화 세그먼트 우회 시도, live stream 특별 처리(엔드리스 스트림은 공통 timeout/size 상한으로만 차단)
+- TS→MP4 변환: 재인코딩 폴백(remux 실패는 `ffmpeg_error` 반환), `.ts` 외 확장자 변환(범위 외), 다른 포맷 간 변환(MKV↔MP4 등), 원본 `.ts` 덮어쓰기(목표 `.mp4` 충돌 시 항상 409 — 자동 suffix 없음), 동시 ffmpeg 프로세스 실행(배열은 순차 처리), 변환 큐 영속화(서버 재시작 시 진행 중 변환 폐기)
 
 **Known limitations**
 - Folder rename은 `os.Stat` + `os.Rename` 순서로, 두 콜 사이에 동일 이름 폴더가 생성되면 race 발생 가능. 단일 사용자 배포 대상이므로 acceptable.

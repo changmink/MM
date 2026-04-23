@@ -105,8 +105,14 @@
 - [x] SF-2: 툴바 UI + URL 동기 + 정렬·필터 적용 단일 슬라이스 — `index.html` 툴바 마크업(type 버튼 5·검색 input·sort select) · `style.css` 툴바 규칙 · `app.js` `view` 상태·`readViewFromURL`·`syncURL`·`applyView`·`renderView`·`syncToolbarUI` + 타입/검색/정렬 이벤트 바인딩 + `browse()`/popstate 연동 + 0결과 문구 분기 + lightbox/playlist 재설정 + `app.js?v=13` bump
 - [x] SF-3: E2E 수동 검증 — plan.md Phase 14 S6의 10개 시나리오 통과
 
+## Phase 15 — TS → MP4 영구 변환 (`feature/ts-to-mp4`) — spec [`SPEC.md §2.3.3`](../SPEC.md), plan [`plan.md` Phase 15](./plan.md)
+- [x] C1: `internal/convert` 패키지 — `RemuxTSToMP4(ctx, src, dstDir, baseName, cb) (*Result, error)` + `Callbacks{OnStart, OnProgress}` + `ErrFFmpegMissing` sentinel + `FFmpegExitError` + 500 ms size watcher + 1 MiB/250 ms throttle + atomic `.convert-*.mp4` → `.mp4` rename. 테스트 7개 (Docker에서 7/7 pass).
+- [x] C1.5: pre-existing fixture 버그 수정 — `makeTestTS`(stream_test.go, convert_test.go)를 `mpeg2video+mp2` → `libx264+aac`로 전환. `aac_adtstoasc` 비트스트림 필터 호환 확보. `TestStream`·`TestStreamTSCached` 동반 회복.
+- [x] C2: `handler.handleConvert` (`POST /api/convert`) — JSON body `{paths, delete_original}` 검증(1..50), per-path `media.SafePath`/`.ts` 확장자/목표 `.mp4` 충돌 검사, SSE `start/progress/done/error/summary`, per-file 10분 timeout, per-path mutex, `delete_original` 시 원본+사이드카(`.thumb/{name}.ts.jpg[.dur]`) 삭제 best-effort(실패 시 `warnings: ["delete_original_failed"]`). 라우트 등록. 테스트 16개 (Docker에서 전체 pass). curl 체크포인트는 Go 통합 테스트로 대체 검증(SSE 헤더/스키마).
+- [x] C3: frontend — `web/index.html` 변환 모달 + `#convert-all-btn` + `app.js?v=14` bump, `web/style.css` `.convert-btn`/`.convert-all-btn`/모달 스타일, `web/app.js`에 `buildVideoGrid`의 `.ts` 카드 버튼, `renderView`에서 visible TS 개수 기반 `#convert-all-btn` 표시, `openConvertModal`/`submitConvert`/`consumeSSE` 일반화 + `handleConvertSSEEvent`, `CONVERT_ERROR_LABELS` 한국어 매핑, close 시 `AbortController.abort()` + 성공 건 있으면 `loadBrowse()`.
+- [x] C4: E2E 수동 검증 — plan.md Phase 15 C4의 9개 시나리오 통과 확인. Docker 컨테이너(`file_server-server`) feature/ts-to-mp4 이미지로 교체 후 브라우저에서 단일/일괄 변환, 원본 보존·삭제, 409 충돌, 취소, 필터 연동, 모바일, 회귀 모두 정상.
+
 ## Phase 16 — 움짤 필터 (`feature/clip-filter`) — spec [`SPEC.md §2.5.3`](../SPEC.md)
-> Phase 15는 병렬 작업 중인 인코딩 브랜치가 선점. 움짤 필터는 Phase 16.
 - [x] CF-1: SPEC.md §2.5.3 + plan.md Phase 16 추가 (선행 커밋, 구현 없음)
 - [x] CF-2: 움짤 필터 단일 슬라이스 — `index.html` 타입 세그먼트 6번째 버튼 + `app.js?v=14` · `app.js` `TYPE_VALUES`에 `clip` 추가 + `applyView` clip 분기 + 이미지·동영상·움짤 배타 분류(움짤 조건 파일은 이미지/동영상 탭에서 제외, 전체 탭은 영향 없음)
 - [x] CF-3: 수동 검증 — 브라우저 확인 완료
