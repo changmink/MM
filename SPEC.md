@@ -172,16 +172,23 @@
 
 **UI:**
 - [ ] 툴바 타입 세그먼트 맨 끝에 6번째 버튼 `움짤` (`data-type="clip"`). 기존 순서 유지: `전체 / 이미지 / 동영상 / 음악 / 기타 / 움짤`.
-- 기존 세그먼트와 동일한 단일 선택(라디오) 동작. 움짤은 타입이 아니라 "조건 기반 뷰"지만 UI 일관성을 위해 같은 축에 배치.
+- 단일 선택(라디오) 동작.
+
+**배타적 분류 (3-way):** `이미지 / 동영상 / 움짤`은 서로 **배타적**으로 분류된다. 움짤 조건에 해당하는 파일은 `이미지`나 `동영상` 탭에 **나타나지 않는다**:
+- `이미지` 탭: 정적 이미지만 (GIF 제외)
+- `동영상` 탭: 움짤 아닌 동영상만 (길거나 큰 동영상 / duration 미상 동영상)
+- `움짤` 탭: GIF + 움짤 동영상
+- `전체` 탭은 이 배타 규칙을 적용하지 않음 — 모든 파일을 자연 타입 섹션에 표시 (움짤도 이미지/동영상 섹션에 포함).
+- `음악 / 기타` 탭은 움짤 조건과 무관 (은 해당 타입 내 움짤이 존재할 수 없음).
 
 **URL 파라미터:**
 - [ ] `TYPE_VALUES`에 `clip` 추가. 허용값: `all|image|video|audio|other|clip`. 기본 `all`은 여전히 URL에서 생략.
 - 움짤 선택 시 URL `?...&type=clip`. 새로고침·공유에서 동일 상태 복원.
 
 **필터 적용 (`applyView`):**
-- [ ] `view.type === 'clip'`이면 파일 엔트리에 대해 위 정의를 그대로 적용:
+- [ ] 움짤 판별은 헬퍼로 분리:
   ```js
-  out = files.filter(e => {
+  function isClip(e) {
     if (e.mime === 'image/gif') return true;
     if (e.type === 'video') {
       return e.size <= 50 * 1024 * 1024
@@ -189,8 +196,12 @@
         && e.duration_sec <= 30;
     }
     return false;
-  });
+  }
   ```
+- [ ] 타입 분기:
+  - `view.type === 'all'`: `out = files`
+  - `view.type === 'clip'`: `out = files.filter(isClip)`
+  - 그 외(`image|video|audio|other`): `out = files.filter(e => e.type === view.type && !isClip(e))`
 - 이후 이름 검색(q) · 정렬(sort)은 기존대로 순차 적용.
 
 **섹션 구조:**

@@ -158,13 +158,16 @@ function isClip(e) {
 
 function applyView(entries) {
   const files = entries.filter(e => !e.is_dir);
+  // image/video/clip are mutually exclusive: clips never appear in the
+  // image or video tabs. The "전체" tab keeps all files in their natural
+  // sections so nothing is hidden without an explicit filter.
   let out;
   if (view.type === 'all') {
     out = files;
   } else if (view.type === 'clip') {
     out = files.filter(isClip);
   } else {
-    out = files.filter(e => e.type === view.type);
+    out = files.filter(e => e.type === view.type && !isClip(e));
   }
   if (view.q) {
     const needle = view.q.toLowerCase();
