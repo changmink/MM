@@ -15,6 +15,8 @@ func TestIsHLSResponse(t *testing.T) {
 	}{
 		{"vnd.apple.mpegurl", "application/vnd.apple.mpegurl", "/stream", true},
 		{"x-mpegurl", "application/x-mpegurl", "/stream", true},
+		{"audio/mpegurl legacy", "audio/mpegurl", "/stream", true},
+		{"audio/x-mpegurl legacy", "audio/x-mpegurl", "/stream", true},
 		{"case insensitive CT", "APPLICATION/VND.APPLE.MPEGURL", "/stream", true},
 		{"CT with parameters", "application/vnd.apple.mpegurl; charset=utf-8", "/stream", true},
 		{"m3u8 ext + text/plain", "text/plain", "/path/stream.m3u8", true},

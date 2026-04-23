@@ -111,7 +111,7 @@
   - **Image**: `image/jpeg`, `image/png`, `image/webp`, `image/gif`
   - **Video**: `video/mp4`, `video/x-matroska`, `video/x-msvideo`, `video/mp2t`
   - **Audio**: `audio/mpeg`, `audio/flac`, `audio/aac`, `audio/ogg`, `audio/wav`, `audio/mp4`
-  - **HLS 플레이리스트** (ffmpeg 리먹싱 후 `.mp4`로 저장): `application/vnd.apple.mpegurl`, `application/x-mpegurl` — 상세는 §2.6.1
+  - **HLS 플레이리스트** (ffmpeg 리먹싱 후 `.mp4`로 저장): `application/vnd.apple.mpegurl`, `application/x-mpegurl`, 레거시 `audio/mpegurl`, `audio/x-mpegurl` — 상세는 §2.6.1
 - [ ] **파일명 결정**:
   1. URL 마지막 경로 세그먼트 추출 (예: `https://x.com/a/foo.mp4` → `foo.mp4`)
   2. URL에 확장자 없거나 비표준이면 응답 `Content-Type` 헤더에서 결정 (`image/jpeg` → `.jpg`, `video/mp4` → `.mp4`, `audio/mpeg` → `.mp3`, `video/x-matroska` → `.mkv`, `audio/mp4` → `.m4a`, …)
@@ -143,7 +143,7 @@
 HLS(`.m3u8`) 플레이리스트는 여러 개의 `.ts`/`.m4s` 세그먼트를 참조하는 색인 파일이라, 개별 세그먼트에는 Content-Length가 있어도 **스트림 전체 크기를 미리 알 수 없다.** 일반 다운로드 경로(`Content-Length` 사전 검증) 대신 ffmpeg 리먹싱 경로를 거쳐 단일 MP4 파일로 저장한다.
 
 - [ ] **감지 조건** (둘 중 하나 만족 시 HLS 분기):
-  1. 응답 `Content-Type` (media type만, 파라미터 무시, 대소문자 무시)이 `application/vnd.apple.mpegurl` 또는 `application/x-mpegurl`
+  1. 응답 `Content-Type` (media type만, 파라미터 무시, 대소문자 무시)이 `application/vnd.apple.mpegurl`, `application/x-mpegurl`, `audio/mpegurl`, 또는 `audio/x-mpegurl`
   2. URL 경로가 `.m3u8`(대소문자 무시)로 끝나고 `Content-Type`이 `text/plain`, `application/octet-stream`, 빈 값, 또는 파싱 실패 (CDN 오인식 폴백)
 - [ ] **마스터 플레이리스트 처리:**
   - 초기 HTTP 응답 본문을 **최대 1 MiB**까지 읽어 플레이리스트 파싱 (초과 시 `error: "hls_playlist_too_large"`)

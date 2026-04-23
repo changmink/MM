@@ -50,14 +50,21 @@ const hlsWatchInterval = 500 * time.Millisecond
 const hlsMaxPlaylistBytes = 1 << 20
 
 // isHLSResponse decides whether to take the HLS branch. The primary signal is
-// a canonical HLS Content-Type. The fallback covers CDNs that mislabel .m3u8
-// as text/plain or application/octet-stream — we only apply the fallback when
-// the URL path clearly names a playlist, so a generic text response from an
-// unrelated URL does not get miscategorized.
+// a canonical HLS Content-Type. "audio/mpegurl" is the pre-RFC-8216 legacy
+// form still emitted by several real-world CDNs (Mux test streams on GCS,
+// some Akamai configs) — treating it as HLS avoids a false
+// unsupported_content_type for valid public streams. The fallback covers
+// CDNs that mislabel .m3u8 as text/plain or application/octet-stream; it
+// only applies when the URL path clearly names a playlist so a generic text
+// response from an unrelated URL does not get miscategorized.
 func isHLSResponse(contentType, urlPath string) bool {
 	mt, _, _ := mime.ParseMediaType(contentType)
 	mt = strings.ToLower(mt)
-	if mt == "application/vnd.apple.mpegurl" || mt == "application/x-mpegurl" {
+	switch mt {
+	case "application/vnd.apple.mpegurl",
+		"application/x-mpegurl",
+		"audio/mpegurl",
+		"audio/x-mpegurl":
 		return true
 	}
 	if !strings.HasSuffix(strings.ToLower(urlPath), ".m3u8") {
