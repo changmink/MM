@@ -5,10 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -208,6 +211,127 @@ func runHLSRemux(ctx context.Context, variantURL, tmpPath string, cb *Callbacks,
 		return &ffmpegExitError{exitCode: exitCode, stderr: strings.TrimSpace(stderr.String())}
 	}
 	return nil
+}
+
+// fetchHLS takes over an already-issued HTTP response that isHLSResponse
+// classified as HLS: it reads the playlist body (capped at hlsMaxPlaylistBytes),
+// closes the connection, picks the best variant, and drives ffmpeg via
+// runHLSRemux into a tmp file that is renamed into destDir on success. It
+// mirrors the non-HLS Fetch contract — *Result on success, *FetchError on
+// failure — so the caller does not need to branch on the return shape.
+func fetchHLS(
+	ctx context.Context,
+	resp *http.Response,
+	parsed *url.URL,
+	rawURL, destDir, relDir string,
+	warnings []string,
+	cb *Callbacks,
+) (*Result, *FetchError) {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, hlsMaxPlaylistBytes+1))
+	if err != nil {
+		return nil, &FetchError{Code: "network_error", Err: err}
+	}
+	if int64(len(body)) > hlsMaxPlaylistBytes {
+		return nil, &FetchError{Code: "hls_playlist_too_large"}
+	}
+	// Close eagerly so we do not hold the TCP connection open while ffmpeg
+	// spawns a fresh one for the variant download.
+	_ = resp.Body.Close()
+
+	variantURL, err := parseMasterPlaylist(body, parsed)
+	if err != nil {
+		if errors.Is(err, errHLSVariantScheme) {
+			return nil, &FetchError{Code: "invalid_scheme", Err: err}
+		}
+		return nil, &FetchError{Code: "ffmpeg_error", Err: err}
+	}
+
+	name := deriveHLSFilename(parsed)
+	// Extension is always forced to .mp4 (we remux away from .m3u8).
+	warnings = append(warnings, "extension_replaced")
+
+	if cb != nil && cb.Start != nil {
+		cb.Start(name, 0, "video")
+	}
+
+	tmpFile, err := os.CreateTemp(destDir, ".urlimport-*.tmp")
+	if err != nil {
+		return nil, &FetchError{Code: "write_error", Err: err}
+	}
+	tmpPath := tmpFile.Name()
+	_ = tmpFile.Close()
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if err := runHLSRemux(ctx, variantURL.String(), tmpPath, cb, MaxBytes); err != nil {
+		return nil, classifyHLSRemuxError(err)
+	}
+
+	stat, err := os.Stat(tmpPath)
+	if err != nil {
+		return nil, &FetchError{Code: "write_error", Err: err}
+	}
+
+	finalName, didRename, err := renameUnique(tmpPath, destDir, name)
+	if err != nil {
+		return nil, &FetchError{Code: "write_error", Err: err}
+	}
+	renamed = true
+	if didRename {
+		warnings = append(warnings, "renamed")
+	}
+
+	return &Result{
+		URL:      rawURL,
+		Path:     path.Join(relDir, finalName),
+		Name:     finalName,
+		Size:     stat.Size(),
+		Type:     "video",
+		Warnings: warnings,
+	}, nil
+}
+
+// deriveHLSFilename strips the URL's last path segment of its extension and
+// appends .mp4. Empty / "." / ".." basenames fall back to "video.mp4" so the
+// remuxed output always has a sensible filename.
+func deriveHLSFilename(parsed *url.URL) string {
+	base := path.Base(parsed.Path)
+	if decoded, err := url.PathUnescape(base); err == nil {
+		base = decoded
+	}
+	base = sanitizeFilename(base)
+	stem := strings.TrimSuffix(base, path.Ext(base))
+	if stem == "" || stem == "." || stem == ".." {
+		return "video.mp4"
+	}
+	return stem + ".mp4"
+}
+
+// classifyHLSRemuxError maps runHLSRemux sentinels to public FetchError codes.
+// ctx.Err() is checked first so cancels/timeouts surface correctly even when
+// ffmpeg returns a non-zero exit alongside a cancellation.
+func classifyHLSRemuxError(err error) *FetchError {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return &FetchError{Code: "download_timeout", Err: err}
+	}
+	if errors.Is(err, context.Canceled) {
+		return &FetchError{Code: "network_error", Err: err}
+	}
+	if errors.Is(err, errHLSTooLarge) {
+		return &FetchError{Code: "too_large", Err: err}
+	}
+	if errors.Is(err, errFFmpegMissing) {
+		return &FetchError{Code: "ffmpeg_error", Err: err}
+	}
+	var exitErr *ffmpegExitError
+	if errors.As(err, &exitErr) {
+		return &FetchError{Code: "ffmpeg_error", Err: err}
+	}
+	return &FetchError{Code: "ffmpeg_error", Err: err}
 }
 
 // watchOutputFile polls tmpPath for growth until ctx cancels. When the file
