@@ -410,6 +410,39 @@ func TestImportURL_InvalidBody(t *testing.T) {
 	}
 }
 
+// TestSSEStart_TotalOmittedWhenZero guards the JSON tag: HLS imports fire
+// Start with total=0 (unknown length) and the client relies on the field's
+// absence to switch into an indeterminate progress mode. A regression here
+// would leak `"total": 0` to the wire and confuse the client into showing a
+// 0% bar for the entire remux.
+func TestSSEStart_TotalOmittedWhenZero(t *testing.T) {
+	data, err := json.Marshal(sseStart{
+		Phase: "start", Index: 0, URL: "https://x/y.m3u8",
+		Name: "y.mp4", Total: 0, Type: "video",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"total"`) {
+		t.Errorf("total field leaked for Total=0: %s", data)
+	}
+}
+
+// TestSSEStart_TotalPresentWhenNonZero ensures the omitempty tag does not
+// accidentally drop legitimate byte counts for the non-HLS path.
+func TestSSEStart_TotalPresentWhenNonZero(t *testing.T) {
+	data, err := json.Marshal(sseStart{
+		Phase: "start", Index: 0, URL: "https://x/y.jpg",
+		Name: "y.jpg", Total: 1024, Type: "image",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"total":1024`) {
+		t.Errorf("expected total=1024 in marshaled JSON, got: %s", data)
+	}
+}
+
 func equalSlices(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

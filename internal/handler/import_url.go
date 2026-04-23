@@ -32,7 +32,11 @@ type sseStart struct {
 	Index int    `json:"index"`
 	URL   string `json:"url"`
 	Name  string `json:"name"`
-	Total int64  `json:"total"`
+	// Total is the Content-Length advertised by the origin. HLS has no total
+	// byte count (variable-bitrate remux of streaming segments), so it arrives
+	// as 0 and is omitted from the wire via omitempty — clients use this
+	// absence to render an indeterminate progress bar.
+	Total int64  `json:"total,omitempty"`
 	Type  string `json:"type"`
 }
 
