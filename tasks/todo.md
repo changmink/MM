@@ -99,3 +99,8 @@
 - [x] H4: `sseStart.Total` JSON 태그에 `omitempty` 부착 + 기존 테스트 회귀 체크 + `total` 필드 부재 검증 테스트
 - [x] H5: frontend — `URL_ERROR_LABELS`에 `ffmpeg_error`/`hls_playlist_too_large` 추가, `total` 없을 때 `.url-row-indeterminate` 클래스 + CSS 좌→우 애니메이션, `app.js?v=N` 버전 bump
 - [x] H6: E2E 수동 검증 — 공개 HLS URL (Mux test stream `test-streams.mux.dev`), master playlist 파싱 + MP4 저장 + 썸네일 + duration 생성 확인. 실사용 중 `audio/mpegurl` 레거시 CT 발견하여 `37c3024`로 지원 추가. 브라우저 UI indeterminate bar 동작 확인.
+
+## Phase 14 — 정렬·필터 툴바 (`feature/sort-filter`) — spec [`SPEC.md §2.5.2`](../SPEC.md)
+- [ ] SF-1: SPEC.md §2.5.2 + plan.md Phase 14 추가 (선행 커밋, 구현 없음)
+- [ ] SF-2: 툴바 UI + URL 동기 + 정렬·필터 적용 단일 슬라이스 — `index.html` 툴바 마크업(type 버튼 5·검색 input·sort select) · `style.css` 툴바 규칙 · `app.js` `view` 상태·`readViewFromURL`·`syncURL`·`applyView`·`renderView`·`syncToolbarUI` + 타입/검색/정렬 이벤트 바인딩 + `browse()`/popstate 연동 + 0결과 문구 분기 + lightbox/playlist 재설정 + `app.js?v=13` bump
+- [ ] SF-3: E2E 수동 검증 — plan.md Phase 14 S6의 10개 시나리오
