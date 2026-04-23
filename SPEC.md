@@ -97,6 +97,26 @@
 - [ ] 폴더 생성 모달 (이름 입력 → 현재 경로에 생성)
 - [ ] 폴더 삭제 확인 모달 (재귀 삭제 경고 문구 포함)
 - [ ] **URL에서 가져오기 모달**: 업로드 버튼 옆 버튼 → textarea(줄바꿈 구분 URL) → "가져오기" → 각 URL별 실시간 프로그래스 바 표시 (다운로드 중 % / 완료 / 실패 상태) → 전체 완료 시 성공·실패 카운트 요약
+- [ ] **파일 용량 표시** (§2.5.1)
+
+### 2.5.1 파일 용량 표시
+
+현재 browse 경로에 직접 있는 파일들의 개수·합계를 상단에 요약하고, 개별 파일 크기를 모든 뷰에서 볼 수 있게 한다. 서버 API 변경 없음 — `/api/browse` 응답에 `size` 필드가 이미 존재하므로 클라이언트(`web/app.js`, `web/style.css`)만 수정한다.
+
+- **범위(scope):** 현재 browse 경로에 직접 있는 파일만. 하위 폴더 재귀 합산은 **하지 않음**. 폴더는 메인 리스트에 표시되지 않으므로(`renderFileList`가 파일만 분류) 자연스럽게 제외됨.
+- [ ] **합계 표시 위치:** breadcrumb 줄 오른쪽 끝에 `파일 {N}개 · {formatSize(total)}` 형태로 렌더. 파일 0개이면 요약 영역 숨김(빈 텍스트).
+  - 좌측: 기존 breadcrumb 경로 링크. 우측: 새 `#browse-summary` 요소. `justify-content: space-between` 또는 `margin-left: auto`로 정렬.
+- [ ] **합계 계산:** `entries.filter(e => !e.is_dir).reduce((s, e) => s + (e.size || 0), 0)` — `is_dir=true`는 제외. 음수/`NaN`이 들어올 일은 없으나 `|| 0`으로 방어.
+- [ ] **개별 파일 용량:**
+  - **기타/음악 표** (`buildTable`): 기존 `크기` 열 유지 (변경 없음).
+  - **이미지 그리드** (`buildImageGrid`): 섬네일 **좌상단** size badge (`.size-badge`) 표시. 좌하단은 파일명 텍스트(`.thumb-name`)의 시작 부분과 겹쳐 이름이 가려지므로 상단으로 배치.
+  - **동영상 그리드** (`buildVideoGrid`): 섬네일 **좌상단** size badge + 기존 **우하단** duration badge 병존. size badge는 duration badge와 동일한 반투명 배경·흰 글씨(시각 스타일), 위치만 다름.
+- [ ] **포맷:** 기존 `formatSize` 그대로 사용 (`1.5 GB`, `512 MB`, `0 B` 등). 새 포맷 함수 도입 금지.
+- [ ] **갱신 타이밍:** `browse()` 호출 시 한 번 계산 후 렌더. 업로드·삭제·rename 후에는 기존과 동일하게 `loadBrowse()`가 재호출되어 자동 갱신됨 (추가 작업 불필요).
+- **Non-goals:**
+  - 폴더 재귀 크기(디렉토리별 합산) — 범위 외.
+  - 사이드바 트리(`renderTreeChildren`)에 크기 표시 — 범위 외.
+  - 합계의 실시간 스트리밍 업데이트 — 기존 UI 패턴 일치(전체 재조회).
 
 ### 2.6 URL 기반 미디어 가져오기 (URL Import)
 
