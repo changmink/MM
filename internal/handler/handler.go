@@ -12,10 +12,11 @@ import (
 )
 
 type Handler struct {
-	dataDir     string
-	thumbPool   *thumb.Pool
-	urlClient   *http.Client
-	streamLocks sync.Map // cachePath -> *sync.Mutex; serializes ffmpeg per cache key
+	dataDir      string
+	thumbPool    *thumb.Pool
+	urlClient    *http.Client
+	streamLocks  sync.Map // cachePath -> *sync.Mutex; serializes ffmpeg per cache key
+	convertLocks sync.Map // absSrcPath -> *sync.Mutex; serializes TS → MP4 per source
 }
 
 func Register(mux *http.ServeMux, dataDir, webDir string) *Handler {
@@ -33,6 +34,7 @@ func Register(mux *http.ServeMux, dataDir, webDir string) *Handler {
 	mux.HandleFunc("/api/file", h.handleFile)
 	mux.HandleFunc("/api/folder", h.handleFolder)
 	mux.HandleFunc("/api/import-url", h.handleImportURL)
+	mux.HandleFunc("/api/convert", h.handleConvert)
 
 	mux.Handle("/", http.FileServer(http.Dir(webDir)))
 	return h
