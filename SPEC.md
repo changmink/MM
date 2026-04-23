@@ -109,8 +109,8 @@
 - [ ] **합계 계산:** `entries.filter(e => !e.is_dir).reduce((s, e) => s + (e.size || 0), 0)` — `is_dir=true`는 제외. 음수/`NaN`이 들어올 일은 없으나 `|| 0`으로 방어.
 - [ ] **개별 파일 용량:**
   - **기타/음악 표** (`buildTable`): 기존 `크기` 열 유지 (변경 없음).
-  - **이미지 그리드** (`buildImageGrid`): 섬네일 **좌하단** size badge (`.size-badge`) 표시.
-  - **동영상 그리드** (`buildVideoGrid`): 섬네일 **좌하단** size badge + 기존 **우하단** duration badge 병존. 두 badge는 위치만 다르고 시각 스타일은 duration badge와 동일(반투명 검정 배경 + 흰 글씨).
+  - **이미지 그리드** (`buildImageGrid`): 섬네일 **좌상단** size badge (`.size-badge`) 표시. 좌하단은 파일명 텍스트(`.thumb-name`)의 시작 부분과 겹쳐 이름이 가려지므로 상단으로 배치.
+  - **동영상 그리드** (`buildVideoGrid`): 섬네일 **좌상단** size badge + 기존 **우하단** duration badge 병존. size badge는 duration badge와 동일한 반투명 배경·흰 글씨(시각 스타일), 위치만 다름.
 - [ ] **포맷:** 기존 `formatSize` 그대로 사용 (`1.5 GB`, `512 MB`, `0 B` 등). 새 포맷 함수 도입 금지.
 - [ ] **갱신 타이밍:** `browse()` 호출 시 한 번 계산 후 렌더. 업로드·삭제·rename 후에는 기존과 동일하게 `loadBrowse()`가 재호출되어 자동 갱신됨 (추가 작업 불필요).
 - **Non-goals:**

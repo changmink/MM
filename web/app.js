@@ -24,6 +24,7 @@ const audioEl       = document.getElementById('audio-el');
 const audioTitle    = document.getElementById('audio-title');
 const playlistEl    = document.getElementById('playlist');
 const newFolderBtn  = document.getElementById('new-folder-btn');
+const browseSummary = document.getElementById('browse-summary');
 const folderModal   = document.getElementById('folder-modal');
 const folderNameInput = document.getElementById('folder-name-input');
 const folderCancelBtn = document.getElementById('folder-cancel-btn');
@@ -91,8 +92,19 @@ async function browse(path, pushState = true) {
   videoEntries = entries.filter(e => e.type === 'video');
   playlist = entries.filter(e => e.type === 'audio');
 
+  renderBrowseSummary(entries);
   renderFileList(entries);
   highlightTreeCurrent();
+}
+
+function renderBrowseSummary(entries) {
+  const files = entries.filter(e => !e.is_dir);
+  if (files.length === 0) {
+    browseSummary.textContent = '';
+    return;
+  }
+  const total = files.reduce((s, e) => s + (e.size || 0), 0);
+  browseSummary.textContent = `파일 ${files.length}개 · ${formatSize(total)}`;
 }
 
 function renderBreadcrumb(path) {
@@ -184,6 +196,7 @@ function buildImageGrid(images) {
     card.innerHTML = `
       <img src="${esc(thumbSrc)}" alt="${esc(entry.name)}" loading="lazy">
       <div class="thumb-name">${esc(entry.name)}</div>
+      <span class="size-badge">${esc(formatSize(entry.size))}</span>
       <button class="rename-btn" title="이름 변경" aria-label="이름 변경">✎</button>
       <button class="delete-btn" title="삭제" aria-label="삭제">✕</button>
     `;
@@ -216,6 +229,7 @@ function buildVideoGrid(videos) {
     card.innerHTML = `
       <img src="${esc(thumbSrc)}" alt="${esc(entry.name)}" loading="lazy">
       <div class="thumb-name">${esc(entry.name)}</div>
+      <span class="size-badge">${esc(formatSize(entry.size))}</span>
       ${durBadge}
       <button class="rename-btn" title="이름 변경" aria-label="이름 변경">✎</button>
       <button class="delete-btn" title="삭제" aria-label="삭제">✕</button>

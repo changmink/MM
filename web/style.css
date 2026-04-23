@@ -39,6 +39,13 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 #breadcrumb a { color: var(--accent); text-decoration: none; }
 #breadcrumb a:hover { text-decoration: underline; }
 
+.browse-summary {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
 /* Upload zone */
 .upload-zone {
   margin: 16px 24px;
@@ -300,6 +307,18 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   font-weight: 600;
   pointer-events: none;
 }
+.thumb-card .size-badge {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  background: rgba(0,0,0,0.6);
+  color: #fff;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  pointer-events: none;
+}
 
 /* File table */
 .file-table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
@@ -400,7 +419,6 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 
 /* New folder button */
 .new-folder-btn {
-  margin-left: auto;
   background: none;
   border: 1px solid var(--border);
   color: var(--text-dim);
