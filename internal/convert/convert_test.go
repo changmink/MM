@@ -18,18 +18,21 @@ func requireFFmpeg(t *testing.T) {
 	}
 }
 
-// makeTestTS synthesizes a 1-second MPEG-2/MP2 transport stream. Mirrors
-// handler/stream_test.go:makeTestTS so both suites share the same fixture
-// recipe and so the remux args exercised here match production.
+// makeTestTS synthesizes a 1-second H.264 + AAC transport stream. Codec
+// pair is chosen to match production TS captures — the `-bsf:a aac_adtstoasc`
+// filter required by the MP4 muxer only accepts AAC, so mp2 audio would
+// cause `aac_adtstoasc` to abort with "Codec not supported".
 func makeTestTS(t *testing.T, dir string) string {
 	t.Helper()
 	requireFFmpeg(t)
 	out := filepath.Join(dir, "clip.ts")
 	cmd := exec.Command("ffmpeg", "-y",
-		"-f", "lavfi", "-i", "color=black:size=64x64:rate=1",
-		"-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+		"-f", "lavfi", "-i", "color=black:size=64x64:rate=25",
+		"-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
 		"-t", "1",
-		"-c:v", "mpeg2video", "-c:a", "mp2",
+		"-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+		"-c:a", "aac", "-b:a", "64k",
+		"-f", "mpegts",
 		out,
 	)
 	if err := cmd.Run(); err != nil {

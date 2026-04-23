@@ -17,15 +17,26 @@ func requireFFmpeg(t *testing.T) {
 	}
 }
 
-func makeTestTS(t *testing.T, dir string) string {
+// makeTestTS synthesizes a 1-second H.264 + AAC transport stream at
+// <dir>/<name>. The codec pair matches production TS captures and satisfies
+// the `-bsf:a aac_adtstoasc` bitstream filter used by both streamTS remux
+// (stream.go) and POST /api/convert (convert.go) — mp2 audio would abort
+// that filter with "Codec not supported".
+func makeTestTS(t *testing.T, dir string, name ...string) string {
 	t.Helper()
 	requireFFmpeg(t)
-	out := filepath.Join(dir, "clip.ts")
+	filename := "clip.ts"
+	if len(name) > 0 && name[0] != "" {
+		filename = name[0]
+	}
+	out := filepath.Join(dir, filename)
 	cmd := exec.Command("ffmpeg", "-y",
-		"-f", "lavfi", "-i", "color=black:size=64x64:rate=1",
-		"-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+		"-f", "lavfi", "-i", "color=black:size=64x64:rate=25",
+		"-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
 		"-t", "1",
-		"-c:v", "mpeg2video", "-c:a", "mp2",
+		"-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+		"-c:a", "aac", "-b:a", "64k",
+		"-f", "mpegts",
 		out,
 	)
 	if err := cmd.Run(); err != nil {
