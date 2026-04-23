@@ -230,6 +230,50 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 }
 .sidebar-backdrop.hidden { display: none; }
 
+/* Browse toolbar (sort/filter) */
+.browse-toolbar {
+  display: flex;
+  gap: 8px;
+  padding: 8px 24px;
+  align-items: center;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
+}
+.toolbar-types { display: flex; gap: 4px; }
+.type-btn {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--text-dim);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.type-btn:hover:not(.active) { border-color: var(--accent); color: var(--accent); }
+.type-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+#toolbar-search {
+  flex: 1 1 180px;
+  min-width: 120px;
+  max-width: 320px;
+  padding: 5px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 0.85rem;
+}
+#toolbar-search:focus { outline: none; border-color: var(--accent); }
+#toolbar-sort {
+  padding: 5px 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
 /* File list */
 #file-list { padding: 0 24px; }
 

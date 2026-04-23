@@ -2,11 +2,18 @@
 
 // ── State ────────────────────────────────────────────────────────────────────
 let currentPath = '/';
-let imageEntries = [];   // images in current dir for lightbox
-let videoEntries = [];   // videos in current dir for grid
+let allEntries = [];     // unfiltered /api/browse result for the current path
+let imageEntries = [];   // images in current dir for lightbox (visible set)
+let videoEntries = [];   // videos in current dir for grid (visible set)
 let lbIndex = 0;
-let playlist = [];
+let playlist = [];       // audio playlist (visible set)
 let playlistIndex = 0;
+
+// Sort/filter state. Drives toolbar + URL sync. Defaults match the URL
+// defaults that are omitted from the querystring.
+const SORT_VALUES = new Set(['name:asc','name:desc','size:asc','size:desc','date:asc','date:desc']);
+const TYPE_VALUES = new Set(['all','image','video','audio','other']);
+const view = { sort: 'name:asc', q: '', type: 'all' };
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
 const breadcrumb    = document.getElementById('breadcrumb');
@@ -25,6 +32,10 @@ const audioTitle    = document.getElementById('audio-title');
 const playlistEl    = document.getElementById('playlist');
 const newFolderBtn  = document.getElementById('new-folder-btn');
 const browseSummary = document.getElementById('browse-summary');
+const browseToolbar = document.getElementById('browse-toolbar');
+const typeButtons   = browseToolbar.querySelectorAll('.type-btn');
+const toolbarSearch = document.getElementById('toolbar-search');
+const toolbarSort   = document.getElementById('toolbar-sort');
 const folderModal   = document.getElementById('folder-modal');
 const folderNameInput = document.getElementById('folder-name-input');
 const folderCancelBtn = document.getElementById('folder-cancel-btn');
@@ -64,17 +75,43 @@ const DND_MIME = 'application/x-fileserver-move';
 let dragSrcPath = null;
 
 // ── Routing ───────────────────────────────────────────────────────────────────
+// popstate treats the URL as the source of truth — read view + path out of it,
+// sync the toolbar widgets, then fetch. browse(..., false) won't rewrite the
+// URL, so we don't loop.
 window.addEventListener('popstate', () => {
   const p = new URLSearchParams(location.search).get('path') || '/';
+  readViewFromURL();
+  syncToolbarUI();
   browse(p, false);
 });
+
+// ── URL <-> view state ────────────────────────────────────────────────────────
+function readViewFromURL() {
+  const p = new URLSearchParams(location.search);
+  const s = p.get('sort'); view.sort = SORT_VALUES.has(s) ? s : 'name:asc';
+  view.q = (p.get('q') || '').trim();
+  const t = p.get('type'); view.type = TYPE_VALUES.has(t) ? t : 'all';
+}
+function syncURL(push) {
+  const p = new URLSearchParams();
+  p.set('path', currentPath);
+  if (view.sort !== 'name:asc') p.set('sort', view.sort);
+  if (view.q) p.set('q', view.q);
+  if (view.type !== 'all') p.set('type', view.type);
+  const qs = '?' + p.toString();
+  if (push) history.pushState({}, '', qs);
+  else history.replaceState({}, '', qs);
+}
+function syncToolbarUI() {
+  typeButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.type === view.type));
+  toolbarSearch.value = view.q;
+  toolbarSort.value = view.sort;
+}
 
 // ── Browse ────────────────────────────────────────────────────────────────────
 async function browse(path, pushState = true) {
   currentPath = path;
-  if (pushState) {
-    history.pushState({}, '', '?path=' + encodeURIComponent(path));
-  }
+  if (pushState) syncURL(true);
   renderBreadcrumb(path);
 
   let data;
@@ -87,14 +124,43 @@ async function browse(path, pushState = true) {
     return;
   }
 
-  const entries = data.entries || [];
-  imageEntries = entries.filter(e => e.type === 'image');
-  videoEntries = entries.filter(e => e.type === 'video');
-  playlist = entries.filter(e => e.type === 'audio');
-
-  renderBrowseSummary(entries);
-  renderFileList(entries);
+  allEntries = data.entries || [];
+  renderView();
   highlightTreeCurrent();
+}
+
+// Apply sort/filter to allEntries and render. Split from browse() so the
+// toolbar can re-render without refetching. Keeps lightbox/playlist arrays
+// in sync with the visible set so prev/next don't land on hidden entries.
+function renderView() {
+  const visible = applyView(allEntries);
+  imageEntries = visible.filter(e => e.type === 'image');
+  videoEntries = visible.filter(e => e.type === 'video');
+  playlist     = visible.filter(e => e.type === 'audio');
+  renderBrowseSummary(visible);
+  renderFileList(visible);
+}
+
+function applyView(entries) {
+  const files = entries.filter(e => !e.is_dir);
+  let out = view.type === 'all' ? files : files.filter(e => e.type === view.type);
+  if (view.q) {
+    const needle = view.q.toLowerCase();
+    out = out.filter(e => e.name.toLowerCase().includes(needle));
+  }
+  const [key, dir] = view.sort.split(':');
+  const mul = dir === 'desc' ? -1 : 1;
+  const byName = (a, b) =>
+    a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+  out.sort((a, b) => {
+    let cmp = 0;
+    if (key === 'name') cmp = byName(a, b);
+    else if (key === 'size') cmp = a.size - b.size;
+    else if (key === 'date') cmp = new Date(a.mod_time) - new Date(b.mod_time);
+    if (cmp === 0 && key !== 'name') cmp = byName(a, b);
+    return mul * cmp;
+  });
+  return out;
 }
 
 function renderBrowseSummary(entries) {
@@ -171,7 +237,10 @@ function renderFileList(entries) {
 
   const fileCount = images.length + videos.length + audios.length + others.length;
   if (!fileCount) {
-    fileList.innerHTML = '<p style="color:var(--text-dim);padding:20px 0">파일이 없습니다.</p>';
+    const msg = (view.q || view.type !== 'all')
+      ? '검색 결과가 없습니다.'
+      : '파일이 없습니다.';
+    fileList.innerHTML = `<p style="color:var(--text-dim);padding:20px 0">${msg}</p>`;
   }
 }
 
@@ -1147,7 +1216,30 @@ sidebarToggle.addEventListener('click', () => {
 });
 sidebarBackdrop.addEventListener('click', () => setSidebarOpen(false));
 
+// ── Toolbar (sort/filter) ────────────────────────────────────────────────────
+typeButtons.forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (view.type === btn.dataset.type) return;
+    view.type = btn.dataset.type;
+    syncURL(false);
+    syncToolbarUI();
+    renderView();
+  });
+});
+toolbarSearch.addEventListener('input', (e) => {
+  view.q = e.target.value.trim();
+  syncURL(false);
+  renderView();
+});
+toolbarSort.addEventListener('change', (e) => {
+  view.sort = e.target.value;
+  syncURL(false);
+  renderView();
+});
+
 // ── Init ──────────────────────────────────────────────────────────────────────
+readViewFromURL();
+syncToolbarUI();
 const initPath = new URLSearchParams(location.search).get('path') || '/';
 browse(initPath, false);
 loadTree();

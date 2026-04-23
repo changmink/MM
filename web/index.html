@@ -29,6 +29,25 @@
         <div id="upload-progress"></div>
       </section>
 
+      <div id="browse-toolbar" class="browse-toolbar">
+        <div class="toolbar-types" role="group" aria-label="타입 필터">
+          <button type="button" data-type="all" class="type-btn active">전체</button>
+          <button type="button" data-type="image" class="type-btn">이미지</button>
+          <button type="button" data-type="video" class="type-btn">동영상</button>
+          <button type="button" data-type="audio" class="type-btn">음악</button>
+          <button type="button" data-type="other" class="type-btn">기타</button>
+        </div>
+        <input id="toolbar-search" type="search" placeholder="이름으로 검색" autocomplete="off">
+        <select id="toolbar-sort" aria-label="정렬">
+          <option value="name:asc">이름 ↑</option>
+          <option value="name:desc">이름 ↓</option>
+          <option value="size:asc">크기 ↑</option>
+          <option value="size:desc">크기 ↓</option>
+          <option value="date:asc">수정일 ↑</option>
+          <option value="date:desc">수정일 ↓</option>
+        </select>
+      </div>
+
       <section id="file-list"></section>
     </main>
   </div>
@@ -97,6 +116,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=12"></script>
+  <script src="/app.js?v=13"></script>
 </body>
 </html>
