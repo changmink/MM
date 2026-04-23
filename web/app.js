@@ -60,6 +60,16 @@ const urlSummary    = document.getElementById('url-summary');
 const urlResult     = document.getElementById('url-result');
 const urlCancelBtn  = document.getElementById('url-cancel-btn');
 const urlConfirmBtn = document.getElementById('url-confirm-btn');
+const convertAllBtn       = document.getElementById('convert-all-btn');
+const convertModal        = document.getElementById('convert-modal');
+const convertFileList     = document.getElementById('convert-file-list');
+const convertDeleteOrig   = document.getElementById('convert-delete-original');
+const convertError        = document.getElementById('convert-error');
+const convertResult       = document.getElementById('convert-result');
+const convertRows         = document.getElementById('convert-rows');
+const convertSummary      = document.getElementById('convert-summary');
+const convertCancelBtn    = document.getElementById('convert-cancel-btn');
+const convertConfirmBtn   = document.getElementById('convert-confirm-btn');
 
 // Initial tree fetch depth — root + children + grandchildren in one round trip
 // per user spec (Q1=opt3). Deeper nodes lazy-load on chevron click.
@@ -139,6 +149,23 @@ function renderView() {
   playlist     = visible.filter(e => e.type === 'audio');
   renderBrowseSummary(visible);
   renderFileList(visible);
+  updateConvertAllBtn(visible);
+}
+
+function visibleTSPaths(visible) {
+  return visible
+    .filter(e => !e.is_dir && e.type === 'video' && e.name.toLowerCase().endsWith('.ts'))
+    .map(e => e.path);
+}
+
+function updateConvertAllBtn(visible) {
+  const paths = visibleTSPaths(visible);
+  if (paths.length === 0) {
+    convertAllBtn.hidden = true;
+    return;
+  }
+  convertAllBtn.hidden = false;
+  convertAllBtn.textContent = `모든 TS 변환 (${paths.length})`;
 }
 
 function applyView(entries) {
@@ -294,12 +321,17 @@ function buildVideoGrid(videos) {
     const thumbSrc = '/api/thumb?path=' + encodeURIComponent(entry.path);
     const dur = formatDuration(entry.duration_sec);
     const durBadge = dur ? `<span class="duration-badge">${esc(dur)}</span>` : '';
+    const isTS = entry.name.toLowerCase().endsWith('.ts');
+    const convertBtn = isTS
+      ? `<button class="convert-btn" title="MP4로 변환" aria-label="MP4로 변환">MP4</button>`
+      : '';
 
     card.innerHTML = `
       <img src="${esc(thumbSrc)}" alt="${esc(entry.name)}" loading="lazy">
       <div class="thumb-name">${esc(entry.name)}</div>
       <span class="size-badge">${esc(formatSize(entry.size))}</span>
       ${durBadge}
+      ${convertBtn}
       <button class="rename-btn" title="이름 변경" aria-label="이름 변경">✎</button>
       <button class="delete-btn" title="삭제" aria-label="삭제">✕</button>
     `;
@@ -312,6 +344,12 @@ function buildVideoGrid(videos) {
       ev.stopPropagation();
       deleteFile(entry.path);
     });
+    if (isTS) {
+      card.querySelector('.convert-btn').addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        openConvertModal([entry.path]);
+      });
+    }
     attachDragHandlers(card, entry);
     grid.appendChild(card);
   });
@@ -671,7 +709,7 @@ async function submitURLImport() {
       urlResult.classList.add('hidden');
       return;
     }
-    await consumeSSE(res);
+    await consumeSSE(res, handleSSEEvent);
   } catch (e) {
     showURLError('요청 실패: ' + e.message);
   } finally {
@@ -682,10 +720,10 @@ async function submitURLImport() {
 }
 
 // consumeSSE reads the response body as a stream of `data: {json}\n\n` frames
-// and dispatches each parsed event to handleSSEEvent. A trailing partial frame
-// (no terminating blank line) is intentionally dropped — the server always
+// and dispatches each parsed event to onEvent. A trailing partial frame (no
+// terminating blank line) is intentionally dropped — the server always
 // flushes complete frames, so anything left over is corruption we ignore.
-async function consumeSSE(res) {
+async function consumeSSE(res, onEvent) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -701,7 +739,7 @@ async function consumeSSE(res) {
       if (!line.startsWith('data:')) continue;
       const payload = line.slice(5).trim();
       try {
-        handleSSEEvent(JSON.parse(payload));
+        onEvent(JSON.parse(payload));
       } catch (e) {
         console.warn('bad sse frame', payload, e);
       }
@@ -794,6 +832,203 @@ function handleSSEEvent(ev) {
 function showURLError(msg) {
   urlError.textContent = msg;
   urlError.classList.remove('hidden');
+}
+
+// ── TS → MP4 변환 ─────────────────────────────────────────────────────────────
+const CONVERT_ERROR_LABELS = {
+  invalid_path: '잘못된 경로',
+  not_found: '파일 없음',
+  not_a_file: '파일이 아님',
+  not_ts: 'TS 파일이 아님',
+  already_exists: '같은 이름의 MP4 존재',
+  ffmpeg_missing: 'ffmpeg 미설치 (서버 설정 필요)',
+  ffmpeg_error: '변환 실패 (손상되었거나 비호환 코덱)',
+  convert_timeout: '타임아웃 (10분)',
+  canceled: '취소됨',
+  write_error: '저장 실패',
+};
+
+let convertSubmitting = false;
+let convertAnySucceeded = false;
+let convertPaths = [];
+let convertAbort = null;
+
+convertAllBtn.addEventListener('click', () => {
+  const paths = visibleTSPaths(applyView(allEntries));
+  if (paths.length === 0) return;
+  openConvertModal(paths);
+});
+convertCancelBtn.addEventListener('click', closeConvertModal);
+convertConfirmBtn.addEventListener('click', submitConvert);
+convertModal.addEventListener('click', e => { if (e.target === convertModal) closeConvertModal(); });
+document.addEventListener('keydown', e => {
+  if (convertModal.classList.contains('hidden')) return;
+  if (e.key === 'Escape') closeConvertModal();
+});
+
+function openConvertModal(paths) {
+  convertPaths = paths.slice();
+  convertError.textContent = '';
+  convertError.classList.add('hidden');
+  convertRows.innerHTML = '';
+  convertSummary.textContent = '';
+  convertSummary.className = 'url-summary hidden';
+  convertResult.classList.add('hidden');
+  convertDeleteOrig.checked = false;
+  convertDeleteOrig.disabled = false;
+  convertConfirmBtn.disabled = false;
+  convertConfirmBtn.textContent = '시작';
+  convertAnySucceeded = false;
+  // Build the list preview so the user sees exactly what will run.
+  convertFileList.innerHTML = paths
+    .map(p => `<li>${esc(p)}</li>`)
+    .join('');
+  convertModal.classList.remove('hidden');
+}
+
+function closeConvertModal() {
+  if (convertSubmitting && convertAbort) {
+    // Client disconnect flows to the handler as r.Context() cancel → backend
+    // kills ffmpeg and cleans the temp file.
+    convertAbort.abort();
+  }
+  convertModal.classList.add('hidden');
+  if (convertAnySucceeded) {
+    convertAnySucceeded = false;
+    browse(currentPath, false);
+  }
+}
+
+async function submitConvert() {
+  if (convertSubmitting) return;
+  if (convertPaths.length === 0) {
+    showConvertError('변환할 파일이 없습니다.');
+    return;
+  }
+
+  convertError.classList.add('hidden');
+  convertRows.innerHTML = '';
+  convertSummary.textContent = '';
+  convertSummary.className = 'url-summary hidden';
+  convertResult.classList.remove('hidden');
+  // Pre-create one pending row per path so users see immediate feedback.
+  convertPaths.forEach((p, i) => ensureConvertRow(i, p));
+  convertSubmitting = true;
+  convertConfirmBtn.disabled = true;
+  convertConfirmBtn.textContent = '변환 중...';
+  convertDeleteOrig.disabled = true;
+  convertAbort = new AbortController();
+
+  try {
+    const res = await fetch('/api/convert', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+      body: JSON.stringify({
+        paths: convertPaths,
+        delete_original: convertDeleteOrig.checked,
+      }),
+      signal: convertAbort.signal,
+    });
+    if (!res.ok) {
+      let msg = '';
+      try { msg = (await res.json()).error || ''; } catch { /* not JSON */ }
+      if (!msg) msg = `요청 실패 (${res.status})`;
+      showConvertError(msg);
+      convertResult.classList.add('hidden');
+      return;
+    }
+    await consumeSSE(res, handleConvertSSEEvent);
+  } catch (e) {
+    if (e.name !== 'AbortError') {
+      showConvertError('요청 실패: ' + e.message);
+    }
+  } finally {
+    convertSubmitting = false;
+    convertAbort = null;
+    convertConfirmBtn.disabled = false;
+    convertConfirmBtn.textContent = '시작';
+    // Leave the delete checkbox disabled after a run so the user re-opens the
+    // modal (fresh state) rather than re-submitting the same list.
+  }
+}
+
+function ensureConvertRow(index, fallbackPath) {
+  let row = convertRows.querySelector(`[data-index="${index}"]`);
+  if (row) return row;
+  row = document.createElement('div');
+  row.className = 'url-row status-pending';
+  row.dataset.index = String(index);
+  row.dataset.total = '0';
+  row.innerHTML = `
+    <div class="url-row-head">
+      <span class="url-row-name">${esc(fallbackPath || '')}</span>
+      <span class="url-row-status">대기 중</span>
+    </div>
+    <div class="url-progress-bar"><div class="url-progress-fill"></div></div>
+  `;
+  convertRows.appendChild(row);
+  return row;
+}
+
+function handleConvertSSEEvent(ev) {
+  switch (ev.phase) {
+    case 'start': {
+      const row = ensureConvertRow(ev.index, ev.path);
+      row.querySelector('.url-row-name').textContent = ev.name || ev.path;
+      const total = Number(ev.total) || 0;
+      row.dataset.total = String(total);
+      const sizeText = total > 0 ? formatSize(total) : '크기 미상';
+      setRowStatus(row, 'status-downloading', '변환 중 · ' + sizeText);
+      break;
+    }
+    case 'progress': {
+      const row = convertRows.querySelector(`[data-index="${ev.index}"]`);
+      if (!row) return;
+      const total = Number(row.dataset.total) || 0;
+      if (total > 0) {
+        // Output MP4 is ≈ src size for stream-copy remux, so received/total
+        // is a reasonable progress proxy (not exact).
+        const pct = Math.min(100, (ev.received / total) * 100);
+        row.querySelector('.url-progress-fill').style.width = pct.toFixed(1) + '%';
+        row.querySelector('.url-row-status').textContent =
+          `${formatSize(ev.received)} / ${formatSize(total)} · ${Math.floor(pct)}%`;
+      } else {
+        row.querySelector('.url-row-status').textContent = formatSize(ev.received);
+      }
+      break;
+    }
+    case 'done': {
+      const row = ensureConvertRow(ev.index, ev.path);
+      row.querySelector('.url-row-name').textContent = ev.name || ev.path;
+      row.querySelector('.url-progress-fill').style.width = '100%';
+      const warns = (ev.warnings || []).map(w =>
+        w === 'delete_original_failed' ? '원본 삭제 실패' : w
+      );
+      const warnText = warns.length ? ` · ${warns.join(', ')}` : '';
+      setRowStatus(row, 'status-done', `완료 (${formatSize(ev.size)})${warnText}`);
+      convertAnySucceeded = true;
+      break;
+    }
+    case 'error': {
+      const row = ensureConvertRow(ev.index, ev.path);
+      const label = CONVERT_ERROR_LABELS[ev.error] || ev.error || '알 수 없는 오류';
+      setRowStatus(row, 'status-error', '실패 · ' + label);
+      break;
+    }
+    case 'summary': {
+      const cls = ev.failed === 0 ? 'status-done'
+                : ev.succeeded === 0 ? 'status-error'
+                : 'status-mixed';
+      convertSummary.className = 'url-summary ' + cls;
+      convertSummary.textContent = `성공 ${ev.succeeded}개 · 실패 ${ev.failed}개`;
+      break;
+    }
+  }
+}
+
+function showConvertError(msg) {
+  convertError.textContent = msg;
+  convertError.classList.remove('hidden');
 }
 
 // ── Delete ────────────────────────────────────────────────────────────────────

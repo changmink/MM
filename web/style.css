@@ -320,7 +320,8 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   text-overflow: ellipsis;
 }
 .thumb-card .delete-btn,
-.thumb-card .rename-btn {
+.thumb-card .rename-btn,
+.thumb-card .convert-btn {
   position: absolute;
   top: 4px;
   background: rgba(0,0,0,0.6);
@@ -337,8 +338,10 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 }
 .thumb-card .delete-btn { right: 4px; }
 .thumb-card .rename-btn { right: 30px; }
+.thumb-card .convert-btn { right: 56px; width: auto; padding: 0 6px; font-size: 10px; font-weight: 600; }
 .thumb-card:hover .delete-btn,
-.thumb-card:hover .rename-btn { display: flex; }
+.thumb-card:hover .rename-btn,
+.thumb-card:hover .convert-btn { display: flex; }
 .thumb-card .duration-badge {
   position: absolute;
   bottom: 4px;
@@ -672,4 +675,41 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
     transform: translateX(0);
     box-shadow: 4px 0 16px rgba(0,0,0,0.5);
   }
+}
+
+/* TS → MP4 변환 툴바 버튼 + 모달 */
+.convert-all-btn {
+  padding: 5px 12px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+.convert-all-btn:hover { filter: brightness(1.1); }
+.convert-all-btn[hidden] { display: none; }
+
+.convert-file-list {
+  max-height: 140px;
+  overflow-y: auto;
+  margin: 8px 0;
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  list-style: none;
+}
+.convert-file-list li { padding: 2px 0; }
+.convert-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  cursor: pointer;
 }

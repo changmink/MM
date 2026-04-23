@@ -46,6 +46,7 @@
           <option value="date:asc">수정일 ↑</option>
           <option value="date:desc">수정일 ↓</option>
         </select>
+        <button id="convert-all-btn" class="convert-all-btn" type="button" hidden></button>
       </div>
 
       <section id="file-list"></section>
@@ -116,6 +117,28 @@
     </div>
   </div>
 
-  <script src="/app.js?v=13"></script>
+  <!-- TS → MP4 변환 모달 -->
+  <div id="convert-modal" class="modal-overlay hidden">
+    <div class="modal modal-wide">
+      <h3>TS → MP4 변환</h3>
+      <p class="modal-hint">ffmpeg 리먹싱으로 MP4 파일을 만듭니다. 재인코딩은 하지 않습니다.</p>
+      <ul id="convert-file-list" class="convert-file-list"></ul>
+      <label class="convert-option">
+        <input type="checkbox" id="convert-delete-original">
+        변환 후 원본 TS 삭제
+      </label>
+      <p id="convert-error" class="modal-error hidden"></p>
+      <div id="convert-result" class="url-result hidden">
+        <div id="convert-rows" class="url-rows"></div>
+        <div id="convert-summary" class="url-summary hidden"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="convert-cancel-btn">닫기</button>
+        <button id="convert-confirm-btn" class="btn-primary">시작</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js?v=14"></script>
 </body>
 </html>
