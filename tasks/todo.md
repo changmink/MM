@@ -104,3 +104,9 @@
 - [x] SF-1: SPEC.md §2.5.2 + plan.md Phase 14 추가 (선행 커밋, 구현 없음)
 - [x] SF-2: 툴바 UI + URL 동기 + 정렬·필터 적용 단일 슬라이스 — `index.html` 툴바 마크업(type 버튼 5·검색 input·sort select) · `style.css` 툴바 규칙 · `app.js` `view` 상태·`readViewFromURL`·`syncURL`·`applyView`·`renderView`·`syncToolbarUI` + 타입/검색/정렬 이벤트 바인딩 + `browse()`/popstate 연동 + 0결과 문구 분기 + lightbox/playlist 재설정 + `app.js?v=13` bump
 - [x] SF-3: E2E 수동 검증 — plan.md Phase 14 S6의 10개 시나리오 통과
+
+## Phase 16 — 움짤 필터 (`feature/clip-filter`) — spec [`SPEC.md §2.5.3`](../SPEC.md)
+> Phase 15는 병렬 작업 중인 인코딩 브랜치가 선점. 움짤 필터는 Phase 16.
+- [x] CF-1: SPEC.md §2.5.3 + plan.md Phase 16 추가 (선행 커밋, 구현 없음)
+- [x] CF-2: 움짤 필터 단일 슬라이스 — `index.html` 타입 세그먼트 6번째 버튼 + `app.js?v=14` · `app.js` `TYPE_VALUES`에 `clip` 추가 + `applyView` clip 분기 + 이미지·동영상·움짤 배타 분류(움짤 조건 파일은 이미지/동영상 탭에서 제외, 전체 탭은 영향 없음)
+- [x] CF-3: 수동 검증 — 브라우저 확인 완료

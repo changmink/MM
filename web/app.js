@@ -12,7 +12,10 @@ let playlistIndex = 0;
 // Sort/filter state. Drives toolbar + URL sync. Defaults match the URL
 // defaults that are omitted from the querystring.
 const SORT_VALUES = new Set(['name:asc','name:desc','size:asc','size:desc','date:asc','date:desc']);
-const TYPE_VALUES = new Set(['all','image','video','audio','other']);
+const TYPE_VALUES = new Set(['all','image','video','audio','other','clip']);
+// 움짤 ("clip") thresholds — see SPEC.md §2.5.3.
+const CLIP_MAX_BYTES = 50 * 1024 * 1024;
+const CLIP_MAX_DURATION_SEC = 30;
 const view = { sort: 'name:asc', q: '', type: 'all' };
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
@@ -141,9 +144,31 @@ function renderView() {
   renderFileList(visible);
 }
 
+// 움짤 — GIF is always a clip; a video is a clip only when it's small
+// AND short (null duration excludes — we can't prove it's short).
+function isClip(e) {
+  if (e.mime === 'image/gif') return true;
+  if (e.type === 'video') {
+    return e.size <= CLIP_MAX_BYTES
+      && e.duration_sec != null
+      && e.duration_sec <= CLIP_MAX_DURATION_SEC;
+  }
+  return false;
+}
+
 function applyView(entries) {
   const files = entries.filter(e => !e.is_dir);
-  let out = view.type === 'all' ? files : files.filter(e => e.type === view.type);
+  // image/video/clip are mutually exclusive: clips never appear in the
+  // image or video tabs. The "전체" tab keeps all files in their natural
+  // sections so nothing is hidden without an explicit filter.
+  let out;
+  if (view.type === 'all') {
+    out = files;
+  } else if (view.type === 'clip') {
+    out = files.filter(isClip);
+  } else {
+    out = files.filter(e => e.type === view.type && !isClip(e));
+  }
   if (view.q) {
     const needle = view.q.toLowerCase();
     out = out.filter(e => e.name.toLowerCase().includes(needle));
