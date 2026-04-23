@@ -83,7 +83,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   top: var(--header-h);
   height: calc(100vh - var(--header-h));
   overflow-y: auto;
-  font-size: 0.875rem;
+  font-size: 0.95rem;
 }
 .sidebar .tree-empty {
   color: var(--text-dim);
@@ -123,8 +123,8 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .tree-node-row {
   display: flex;
   align-items: center;
-  gap: 2px;
-  padding: 4px 6px;
+  gap: 6px;
+  padding: 7px 8px;
   border-radius: 4px;
 }
 .tree-node-row:hover { background: rgba(255,255,255,0.05); }
@@ -137,9 +137,9 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   background: none;
   border: none;
   color: var(--text-dim);
-  font-size: 0.65rem;
-  width: 16px;
-  height: 16px;
+  font-size: 0.75rem;
+  width: 18px;
+  height: 18px;
   flex-shrink: 0;
   cursor: pointer;
   padding: 0;
