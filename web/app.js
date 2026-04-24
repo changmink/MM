@@ -661,6 +661,7 @@ const URL_ERROR_LABELS = {
 
 let urlSubmitting = false;
 let urlAnySucceeded = false;
+let urlAbort = null;
 
 urlImportBtn.addEventListener('click', openURLModal);
 urlCancelBtn.addEventListener('click', closeURLModal);
@@ -685,6 +686,11 @@ function openURLModal() {
 }
 
 function closeURLModal() {
+  if (urlSubmitting && urlAbort) {
+    // Client disconnect flows to the handler as r.Context() cancel → backend
+    // stops the current Fetch and skips remaining URLs in the batch.
+    urlAbort.abort();
+  }
   urlModal.classList.add('hidden');
   if (urlAnySucceeded) {
     urlAnySucceeded = false;
@@ -719,12 +725,14 @@ async function submitURLImport() {
   urlSubmitting = true;
   urlConfirmBtn.disabled = true;
   urlConfirmBtn.textContent = '가져오는 중...';
+  urlAbort = new AbortController();
 
   try {
     const res = await fetch('/api/import-url?path=' + encodeURIComponent(currentPath), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
       body: JSON.stringify({ urls }),
+      signal: urlAbort.signal,
     });
     if (!res.ok) {
       let msg = '';
@@ -736,9 +744,12 @@ async function submitURLImport() {
     }
     await consumeSSE(res, handleSSEEvent);
   } catch (e) {
-    showURLError('요청 실패: ' + e.message);
+    if (e.name !== 'AbortError') {
+      showURLError('요청 실패: ' + e.message);
+    }
   } finally {
     urlSubmitting = false;
+    urlAbort = null;
     urlConfirmBtn.disabled = false;
     urlConfirmBtn.textContent = '가져오기';
   }
