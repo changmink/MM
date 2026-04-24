@@ -71,6 +71,16 @@ type sseSummary struct {
 	Failed    int    `json:"failed"`
 }
 
+// sseQueued is emitted once per batch right after the response headers are
+// flushed, before the handler tries to acquire the process-wide import
+// semaphore. When no other batch is in flight the semaphore acquire returns
+// immediately and `start` follows without the UI ever rendering the queued
+// state; when another batch holds the semaphore the client has an explicit
+// signal to display "waiting" instead of a stalled progress bar.
+type sseQueued struct {
+	Phase string `json:"phase"` // always "queued"
+}
+
 func (h *Handler) handleImportURL(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
@@ -138,11 +148,30 @@ func (h *Handler) handleImportURL(w http.ResponseWriter, r *http.Request) {
 		writeSSEEvent(w, flusher, payload)
 	}
 
-	// Snapshot settings once per batch so every URL in the request uses the
-	// same cap + timeout — a PATCH mid-batch only affects the next request.
+	// Snapshot settings at request arrival time (before queueing) so a PATCH
+	// made while this batch is waiting for the semaphore does not change the
+	// cap/timeout it eventually runs with.
 	snap := h.settingsSnapshot()
 	maxBytes := snap.URLImportMaxBytes
 	perURLTimeout := time.Duration(snap.URLImportTimeoutSeconds) * time.Second
+
+	// Announce to the client that this batch is queued. When the semaphore
+	// is free the subsequent acquire returns instantly and `start` follows
+	// immediately; clients treat the gap between `queued` and `start` as
+	// the "waiting for other batches" window.
+	emit(sseQueued{Phase: "queued"})
+
+	// Serialize batches process-wide. sync.Mutex would deadlock on client
+	// disconnect because Lock() cannot be cancelled, so a size-1 channel
+	// semaphore is paired with ctx.Done() in a select. Acquire only, release
+	// only — defer sits inside the winning case so we never release what we
+	// did not acquire.
+	select {
+	case h.importSem <- struct{}{}:
+		defer func() { <-h.importSem }()
+	case <-r.Context().Done():
+		return
+	}
 
 	succeeded, failed := 0, 0
 	for i, u := range urls {

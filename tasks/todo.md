@@ -131,3 +131,10 @@
 
 ### 하드닝 대기 (record-only)
 - [ ] H-SYMLINK: `media.SafePath` 심볼릭 링크 방어 — 현재 `filepath.Join` 순수 문자열 검사라 `/data` 내부에 symlink가 심어지면 루트 탈출 가능. `filepath.EvalSymlinks`를 SafePath 말미에 추가하고 결과도 다시 prefix 검증. 위협 모델(단일 사용자 LAN, upload는 일반 파일만 생성)상 실제 공격 벡터는 좁지만 심층 방어 차원에서 개선 가치 있음. 별도 phase로 분리 — read-only 경로(browse/tree/stream/thumb)부터 적용, upload/rename 후 재검증 여부 결정 필요.
+
+## Phase 19 — URL Import 백그라운드 진행 (`feature/url-import-background`) — spec [`spec-url-import-background.md`](./spec-url-import-background.md), plan [`plan.md` Phase 19](./plan.md)
+- [x] B1: 서버 — `Handler.importSem chan struct{}` (context-aware 세마포어) + `sseQueued` 타입 + `handleImportURL`에서 queued 이벤트 emit 후 acquire/release + 단위 테스트 3개 추가 (Queued once / Serialization / Canceled while waiting). 스트리밍 테스트용 `streamingRecorder` / `waitForPhase` / `postImportStreaming` 헬퍼 도입. 기존 phase 단언 4개 업데이트(`[queued start done summary]`).
+- [ ] B2: 클라이언트 리팩토링 — `urlSubmitting`/`urlAbort`/`urlAnySucceeded` 전역을 `urlBatches[]` + `urlBatchSeq`로 교체, `handleSSEEvent`를 batch-aware로 변경, `app.js?v=18→19` bump. 동작 불변 (회귀 테스트)
+- [ ] B3: `closeURLModal` abort 제거 + 헤더 `#url-badge` 추가 + `updateURLBadge`/`maybeFinalize` 헬퍼 + 완료 시 `browse()` 재조회는 `maybeFinalize` 경유, `app.js?v=19→20` bump
+- [ ] B4: 재오픈 시 confirm 라벨 전환 + 새 배치 추가 append + `queued` phase 수신 시 row "대기 중 (순서 대기)" 표시 + 배치 divider, `app.js?v=20→21` bump
+- [ ] B5: 10개 E2E 수동 시나리오 통과 + `SPEC.md §2.6` 본문 갱신 (queued 이벤트 스키마 추가 포함) + `spec-url-import-background.md` status 노트
