@@ -436,6 +436,8 @@ file_server/
 | DELETE | `/api/folder?path=` | 폴더 재귀 삭제 (하위 내용 + `.thumb/` 포함) |
 | POST | `/api/import-url?path=` | URL 목록에서 미디어 다운로드 → 저장 (SSE 진행 스트림) |
 | POST | `/api/convert` | TS 파일 목록을 MP4로 영구 변환 (SSE 진행 스트림) |
+| GET | `/api/settings` | 현재 다운로드 설정 조회 (§2.7) |
+| PATCH | `/api/settings` | 다운로드 설정 갱신 (§2.7) |
 | GET | `/` | 프론트엔드 SPA |
 
 ### 5.1 응답 스키마
@@ -696,6 +698,25 @@ TS 파일을 MP4로 영구 변환. SSE 스트림으로 진행 상태 전송. 이
   - `400 {"error": "invalid request"}` — JSON 파싱 실패
   - `405 {"error": "method not allowed"}` — POST 외
 
+#### GET /api/settings
+- 성공: `200 OK`, `Content-Type: application/json`
+- 응답: 현재 메모리 캐시된 설정 값 그대로 (§2.7 형식)
+  ```json
+  {
+    "url_import_max_bytes": 10737418240,
+    "url_import_timeout_seconds": 1800
+  }
+  ```
+
+#### PATCH /api/settings
+- 요청: `Content-Type: application/json`, 위 응답과 동일한 스키마(두 필드 모두 필수)
+- 성공: `200 OK` + 갱신된 값 반환 (디스크 쓰기 + 메모리 캐시 갱신 후)
+- 실패:
+  - `400 {"error": "invalid request"}` — JSON 파싱 실패 / 필드 누락 / 타입 불일치
+  - `400 {"error": "out_of_range", "field": "url_import_max_bytes"}` — 1 MiB ~ 1 TiB 경계 밖
+  - `400 {"error": "out_of_range", "field": "url_import_timeout_seconds"}` — 60 ~ 14400 경계 밖
+  - `500 {"error": "write_failed"}` — settings.json 쓰기 실패(디스크 풀, 권한 등) — 메모리 캐시는 변경하지 않음
+
 #### GET /api/thumb
 - 성공: `200 OK`, `Content-Type: image/jpeg`
 - 이미지 파일: `imaging` 라이브러리로 섬네일 생성 (기존)
@@ -838,6 +859,15 @@ volumes:
   - 비 http/https variant URL(예: `file:///etc/passwd`를 담은 master playlist) → 파싱 단계에서 거부 (error) — ffmpeg까지 내려가지 않음
 - 수동 테스트: 브라우저에서 업로드→섬네일→스트리밍 전체 흐름 확인 (썸네일 우하단 시간 오버레이 확인). Rename 후 썸네일·duration 오버레이가 유지되는지 확인.
 - 수동 테스트 (URL import): 모달에서 URL 여러 개(이미지/동영상/음악 섞어) 입력 → URL별 프로그래스 바 실시간 진행 확인 → 완료 후 성공/실패 카운트 요약 확인
+- 단위 테스트 (settings §2.7):
+  - JSON read/write round-trip (atomic write temp+rename 검증)
+  - 파일 부재 → 기본값 반환(디스크 쓰기 없음)
+  - 파일 손상(JSON 파싱 실패) → 경고 로그 + 기본값 반환
+  - 경계 위반 값이 디스크에 존재 → 경고 로그 + 기본값 반환
+  - PATCH 경계 검증: max_bytes `0`, `1048575`(1 MiB-1), `1099511627777`(1 TiB+1) → `out_of_range`; timeout `59`, `14401` → `out_of_range`
+  - PATCH 성공 시 메모리 캐시가 즉시 갱신되어 다음 URL import에 반영
+- 통합 테스트 (settings): `GET /api/settings` → 기본값 반환, `PATCH /api/settings`로 cap 축소 후 같은 핸들러에 URL import 요청 → 새 cap 적용된 `too_large` 관측
+- 수동 테스트 (settings): 헤더 ⚙ → 모달 열기, 크기/타임아웃 편집, GiB helper text 확인, 저장 후 재로드 시 값 유지, 범위 밖 입력 시 에러 메시지 표시
 - 단위 테스트 (TS→MP4 변환):
   - 경로/확장자 검증: `.ts` 외 확장자 거부(`not_ts`), 대소문자(`.TS`, `.Ts`) 허용, 디렉토리 경로 거부, path traversal 거부
   - 목표 파일명 계산: `foo.ts` → `foo.mp4`, `foo.TS` → `foo.mp4`(소문자 확장자 고정)
@@ -868,6 +898,7 @@ volumes:
 - File rename은 `os.Link` + `os.Remove`로 atomic EEXIST 보장 (TOCTOU 방지)
 - URL import: HTTPS TLS 인증서 검증, 요청 시작 시점에 설정 스냅샷(§2.7)을 찍어 사용, `Content-Length` 있으면 사전 검증 + 런타임 누적 카운터로 이중 방어(설정값 `url_import_max_bytes` 초과 시 중단), Content-Type 허용 목록(image/video/audio) 검증, 임시 파일 → atomic rename, 파일명 sanitize, SSE `Cache-Control: no-cache` 및 즉시 Flush
 - HLS import: ffmpeg `-protocol_whitelist "http,https,tls,tcp,crypto"` 강제, ffmpeg `-rw_timeout 30000000`(30s)로 slow-loris 방어, master playlist의 variant URL 스킴도 `http`/`https`만 허용(이중 검증), variant가 master 자기자신으로 resolve되면 media playlist로 fallback(loop 방지), ffmpeg 프로세스는 context 취소·설정값 `url_import_max_bytes` 초과 시 kill, 출력 MP4는 기존 `renameUnique` 경로로 atomic rename, 실패 시 stderr는 서버 로그에만 기록(SSE 클라이언트로는 안전한 code만 노출)
+- Settings: PATCH 시 두 필드 모두 경계 검증 후 atomic write (temp + rename), 저장 실패 시 메모리 캐시는 변경하지 않음 (디스크-메모리 drift 방지), 진행 중인 URL 요청은 시작 시점 스냅샷 값을 끝까지 유지 (race-free)
 - TS→MP4 변환: 입력·출력 경로 모두 `media.SafePath`로 검증, 확장자 `.ts` 화이트리스트 검증(대소문자 무시), 목표 `.mp4` 사전 존재 시 ffmpeg 호출 전 거부, ffmpeg argv 전달(쉘 미개입), 임시 파일 `.convert-*.mp4` → atomic rename, context 취소·타임아웃 시 ffmpeg kill + 임시 파일 정리, stderr는 서버 로그에만 기록(SSE에는 `ffmpeg_error` 코드만), 동일 소스 경로에 대한 동시 요청은 `stream.go`의 per-path 뮤텍스와 동일 패턴으로 직렬화
 
 **하지 않을 것 (Never)**
@@ -877,6 +908,7 @@ volumes:
 - Rename 시 확장자 변경 허용 (MIME/타입 감지 일관성 유지)
 - Rename 시 자동 suffix 부여 (`_1`, `_2` 등) — 충돌은 항상 409로 거부
 - URL import: `Authorization`/쿠키 등 인증 헤더 자동 첨부, `http`/`https` 외 스킴 허용, 설정값 `url_import_max_bytes` 초과 다운로드, 허용 목록 밖 Content-Type 저장, 동시 다운로드(batch는 순차 처리)
+- Settings: 인증/권한 검사(single-tenant 전제), 경계 밖 값 저장, 진행 중인 요청에 새 값 반영(스냅샷 정책), 설정을 핸들러별로 분기(URL import와 HLS는 반드시 동일 값 공유)
 - HLS import: 재인코딩(`-c copy`로 리먹싱만, CPU 폭주 방지), DASH(`.mpd`) 지원, 원본 `.m3u8` + `.ts` 세그먼트를 그대로 저장, DRM/암호화 세그먼트 우회 시도, live stream 특별 처리(엔드리스 스트림은 공통 timeout/size 상한으로만 차단)
 - TS→MP4 변환: 재인코딩 폴백(remux 실패는 `ffmpeg_error` 반환), `.ts` 외 확장자 변환(범위 외), 다른 포맷 간 변환(MKV↔MP4 등), 원본 `.ts` 덮어쓰기(목표 `.mp4` 충돌 시 항상 409 — 자동 suffix 없음), 동시 ffmpeg 프로세스 실행(배열은 순차 처리), 변환 큐 영속화(서버 재시작 시 진행 중 변환 폐기)
 
