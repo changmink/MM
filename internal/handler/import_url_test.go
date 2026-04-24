@@ -113,7 +113,7 @@ func TestImportURL_SSE_Headers(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postImport(t, mux, "/", []string{srv.URL + "/cat.jpg"})
 	if rw.Code != http.StatusOK {
@@ -136,7 +136,7 @@ func TestImportURL_SSE_SingleImage_StartDoneSummary(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postImport(t, mux, "/", []string{srv.URL + "/cat.jpg"})
 	events := parseSSEEvents(t, rw.Body.String())
@@ -166,7 +166,7 @@ func TestImportURL_SSE_HeaderError_NoStart(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	// page.html → unsupported_content_type rejected before Start fires.
 	rw := postImport(t, mux, "/", []string{srv.URL + "/page.html"})
@@ -190,7 +190,7 @@ func TestImportURL_SSE_Mixed_PartialSuccess(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postImport(t, mux, "/", []string{
 		srv.URL + "/ok.jpg",
@@ -233,7 +233,7 @@ func TestImportURL_SSE_LargeFile_ProgressEmitted(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postImport(t, mux, "/", []string{srv.URL + "/big.jpg"})
 	events := parseSSEEvents(t, rw.Body.String())
@@ -262,7 +262,7 @@ func TestImportURL_SSE_AudioSkipsThumbPool(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postImport(t, mux, "/", []string{srv.URL + "/song.mp3"})
 	events := parseSSEEvents(t, rw.Body.String())
@@ -296,7 +296,7 @@ func TestImportURL_SSE_ClientCancelled_StopsBatch(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	// Pre-cancelled context simulates a client that gave up before the handler
 	// dispatched the first fetch.
@@ -320,7 +320,7 @@ func TestImportURL_SSE_ClientCancelled_StopsBatch(t *testing.T) {
 func TestImportURL_EmptyArray(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postImport(t, mux, "/", []string{})
 	if rw.Code != http.StatusBadRequest {
@@ -334,7 +334,7 @@ func TestImportURL_EmptyArray(t *testing.T) {
 func TestImportURL_OnlyWhitespace(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postImport(t, mux, "/", []string{"  ", "\t", ""})
 	if rw.Code != http.StatusBadRequest {
@@ -345,7 +345,7 @@ func TestImportURL_OnlyWhitespace(t *testing.T) {
 func TestImportURL_TooMany(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	urls := make([]string, 51)
 	for i := range urls {
@@ -363,7 +363,7 @@ func TestImportURL_TooMany(t *testing.T) {
 func TestImportURL_PathTraversal(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postImport(t, mux, "../escape", []string{"https://example.com/x.jpg"})
 	if rw.Code != http.StatusBadRequest {
@@ -374,7 +374,7 @@ func TestImportURL_PathTraversal(t *testing.T) {
 func TestImportURL_PathNotFound(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postImport(t, mux, "/no-such-dir", []string{"https://example.com/x.jpg"})
 	if rw.Code != http.StatusNotFound {
@@ -385,7 +385,7 @@ func TestImportURL_PathNotFound(t *testing.T) {
 func TestImportURL_MethodNotAllowed(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/import-url?path=/", nil)
 	rw := httptest.NewRecorder()
@@ -398,7 +398,7 @@ func TestImportURL_MethodNotAllowed(t *testing.T) {
 func TestImportURL_InvalidBody(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/import-url?path=/",
 		strings.NewReader("not json"))

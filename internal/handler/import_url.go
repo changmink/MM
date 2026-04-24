@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/chang/file_server/internal/media"
 	"github.com/chang/file_server/internal/urlfetch"
@@ -137,6 +138,12 @@ func (h *Handler) handleImportURL(w http.ResponseWriter, r *http.Request) {
 		writeSSEEvent(w, flusher, payload)
 	}
 
+	// Snapshot settings once per batch so every URL in the request uses the
+	// same cap + timeout — a PATCH mid-batch only affects the next request.
+	snap := h.settingsSnapshot()
+	maxBytes := snap.URLImportMaxBytes
+	perURLTimeout := time.Duration(snap.URLImportTimeoutSeconds) * time.Second
+
 	succeeded, failed := 0, 0
 	for i, u := range urls {
 		// Stop early when the client disconnects so we don't keep firing
@@ -144,7 +151,7 @@ func (h *Handler) handleImportURL(w http.ResponseWriter, r *http.Request) {
 		if r.Context().Err() != nil {
 			return
 		}
-		if h.fetchOneSSE(r.Context(), emit, i, u, destAbs, rel) {
+		if h.fetchOneSSE(r.Context(), emit, i, u, destAbs, rel, maxBytes, perURLTimeout) {
 			succeeded++
 		} else {
 			failed++
@@ -159,7 +166,8 @@ func (h *Handler) handleImportURL(w http.ResponseWriter, r *http.Request) {
 // goroutine — if the channel is full the sample is dropped so a slow SSE
 // consumer can never block the download goroutine. Returns true on success.
 func (h *Handler) fetchOneSSE(ctx context.Context, emit func(any),
-	index int, u, destAbs, relDir string) bool {
+	index int, u, destAbs, relDir string,
+	maxBytes int64, perURLTimeout time.Duration) bool {
 
 	progressCh := make(chan int64, progressChanBuffer)
 	writerDone := make(chan struct{})
@@ -186,8 +194,8 @@ func (h *Handler) fetchOneSSE(ctx context.Context, emit func(any),
 		},
 	}
 
-	fctx, cancel := context.WithTimeout(ctx, urlfetch.TotalTimeout)
-	res, ferr := urlfetch.Fetch(fctx, h.urlClient, u, destAbs, relDir, cb)
+	fctx, cancel := context.WithTimeout(ctx, perURLTimeout)
+	res, ferr := urlfetch.Fetch(fctx, h.urlClient, u, destAbs, relDir, maxBytes, cb)
 	cancel()
 
 	close(progressCh)

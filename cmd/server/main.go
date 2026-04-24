@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/chang/file_server/internal/handler"
+	"github.com/chang/file_server/internal/settings"
 )
 
 func main() {
@@ -23,8 +24,13 @@ func main() {
 		webDir = "web"
 	}
 
+	settingsStore, err := settings.New(dataDir)
+	if err != nil {
+		log.Fatalf("settings: %v", err)
+	}
+
 	mux := http.NewServeMux()
-	h := handler.Register(mux, dataDir, webDir)
+	h := handler.Register(mux, dataDir, webDir, settingsStore)
 
 	srv := &http.Server{Addr: ":8080", Handler: mux}
 

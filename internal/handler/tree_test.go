@@ -44,7 +44,7 @@ func decodeChildren(t *testing.T, raw json.RawMessage) []rawTreeNode {
 func TestTree_EmptyRoot(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw, node := getTree(mux, "")
 	if rw.Code != http.StatusOK {
@@ -68,7 +68,7 @@ func TestTree_EmptyRoot(t *testing.T) {
 func TestTree_DefaultsToDepth1(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	os.MkdirAll(filepath.Join(root, "movies", "2024"), 0755)
 	os.MkdirAll(filepath.Join(root, "photos"), 0755)
@@ -107,7 +107,7 @@ func TestTree_DefaultsToDepth1(t *testing.T) {
 func TestTree_Depth2LoadsGrandchildren(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	os.MkdirAll(filepath.Join(root, "movies", "2024"), 0755)
 	os.MkdirAll(filepath.Join(root, "movies", "2025", "deep"), 0755)
@@ -143,7 +143,7 @@ func TestTree_Depth2LoadsGrandchildren(t *testing.T) {
 func TestTree_HiddenAndFilesExcluded(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	os.MkdirAll(filepath.Join(root, ".thumb"), 0755)
 	os.MkdirAll(filepath.Join(root, ".hidden"), 0755)
@@ -160,7 +160,7 @@ func TestTree_HiddenAndFilesExcluded(t *testing.T) {
 func TestTree_CaseInsensitiveSort(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	os.MkdirAll(filepath.Join(root, "Banana"), 0755)
 	os.MkdirAll(filepath.Join(root, "apple"), 0755)
@@ -181,7 +181,7 @@ func TestTree_CaseInsensitiveSort(t *testing.T) {
 func TestTree_SubpathStartingPoint(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	os.MkdirAll(filepath.Join(root, "movies", "2024"), 0755)
 	os.MkdirAll(filepath.Join(root, "movies", "2025"), 0755)
@@ -207,7 +207,7 @@ func TestTree_DirHasOnlyFiles(t *testing.T) {
 	// has_children should be false when a folder contains only files.
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	os.MkdirAll(filepath.Join(root, "music"), 0755)
 	os.WriteFile(filepath.Join(root, "music", "a.mp3"), []byte("x"), 0644)
@@ -229,7 +229,7 @@ func TestTree_DirHasOnlyFiles(t *testing.T) {
 func TestTree_ErrorCases(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	t.Run("not found", func(t *testing.T) {
 		rw, _ := getTree(mux, "?path=/ghost")

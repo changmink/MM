@@ -34,7 +34,7 @@ func TestFetch_HLS_MediaPlaylist_Success(t *testing.T) {
 
 	dest := t.TempDir()
 	res, ferr := Fetch(context.Background(), NewClient(),
-		srv.URL+"/"+playlistName, dest, "/movies", nil)
+		srv.URL+"/"+playlistName, dest, "/movies", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
@@ -90,7 +90,7 @@ func TestFetch_HLS_MasterPlaylist_PicksHighestBandwidth(t *testing.T) {
 
 	dest := t.TempDir()
 	res, ferr := Fetch(context.Background(), NewClient(),
-		srv.URL+"/master.m3u8", dest, "/movies", nil)
+		srv.URL+"/master.m3u8", dest, "/movies", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
@@ -123,7 +123,7 @@ func TestFetch_HLS_MislabeledContentType_Fallback(t *testing.T) {
 
 	dest := t.TempDir()
 	res, ferr := Fetch(context.Background(), NewClient(),
-		srv.URL+"/"+playlistName, dest, "/movies", nil)
+		srv.URL+"/"+playlistName, dest, "/movies", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
@@ -161,7 +161,7 @@ func TestFetch_HLS_UppercaseExtension(t *testing.T) {
 
 	dest := t.TempDir()
 	res, ferr := Fetch(context.Background(), NewClient(),
-		srv.URL+"/STREAM.M3U8", dest, "/movies", nil)
+		srv.URL+"/STREAM.M3U8", dest, "/movies", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
@@ -186,7 +186,7 @@ func TestFetch_HLS_PlaylistTooLarge(t *testing.T) {
 
 	dest := t.TempDir()
 	_, ferr := Fetch(context.Background(), NewClient(),
-		srv.URL+"/big.m3u8", dest, "/movies", nil)
+		srv.URL+"/big.m3u8", dest, "/movies", testMaxBytes, nil)
 	if ferr == nil {
 		t.Fatal("expected hls_playlist_too_large error, got nil")
 	}
@@ -216,7 +216,7 @@ func TestFetch_HLS_PlaylistExactlyAtCap(t *testing.T) {
 
 	dest := t.TempDir()
 	_, ferr := Fetch(context.Background(), NewClient(),
-		srv.URL+"/atcap.m3u8", dest, "/movies", nil)
+		srv.URL+"/atcap.m3u8", dest, "/movies", testMaxBytes, nil)
 	if ferr == nil {
 		// Unexpected success means ffmpeg happily consumed an empty media
 		// playlist. Either way the important assertion is that the size
@@ -245,7 +245,7 @@ func TestFetch_HLS_AudioMpegurl_Fallthrough(t *testing.T) {
 
 	dest := t.TempDir()
 	res, ferr := Fetch(context.Background(), NewClient(),
-		srv.URL+"/"+playlistName, dest, "/movies", nil)
+		srv.URL+"/"+playlistName, dest, "/movies", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
@@ -296,7 +296,7 @@ func TestFetch_HLS_VariantFileScheme(t *testing.T) {
 
 	dest := t.TempDir()
 	_, ferr := Fetch(context.Background(), NewClient(),
-		srv.URL+"/master.m3u8", dest, "/movies", nil)
+		srv.URL+"/master.m3u8", dest, "/movies", testMaxBytes, nil)
 	if ferr == nil {
 		t.Fatal("expected invalid_scheme error, got nil")
 	}
@@ -325,7 +325,7 @@ func TestFetch_HLS_EmptyPlaylist_FFmpegError(t *testing.T) {
 
 	dest := t.TempDir()
 	_, ferr := Fetch(context.Background(), NewClient(),
-		srv.URL+"/empty.m3u8", dest, "/movies", nil)
+		srv.URL+"/empty.m3u8", dest, "/movies", testMaxBytes, nil)
 	if ferr == nil {
 		t.Fatal("expected ffmpeg_error, got nil")
 	}
@@ -361,7 +361,7 @@ func TestFetch_HLS_Start_Callback_TotalZero(t *testing.T) {
 
 	dest := t.TempDir()
 	_, ferr := Fetch(context.Background(), NewClient(),
-		srv.URL+"/"+playlistName, dest, "/movies", cb)
+		srv.URL+"/"+playlistName, dest, "/movies", testMaxBytes, cb)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}

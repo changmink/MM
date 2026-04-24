@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"sync"
 
+	"github.com/chang/file_server/internal/settings"
 	"github.com/chang/file_server/internal/thumb"
 	"github.com/chang/file_server/internal/urlfetch"
 )
@@ -15,15 +16,20 @@ type Handler struct {
 	dataDir      string
 	thumbPool    *thumb.Pool
 	urlClient    *http.Client
+	settings     *settings.Store
 	streamLocks  sync.Map // cachePath -> *sync.Mutex; serializes ffmpeg per cache key
 	convertLocks sync.Map // absSrcPath -> *sync.Mutex; serializes TS → MP4 per source
 }
 
-func Register(mux *http.ServeMux, dataDir, webDir string) *Handler {
+// Register wires all API routes. settingsStore may be nil in tests that do
+// not exercise URL import or /api/settings — callers that pass nil get the
+// hard-coded Default() values from settings.
+func Register(mux *http.ServeMux, dataDir, webDir string, settingsStore *settings.Store) *Handler {
 	h := &Handler{
 		dataDir:   dataDir,
 		thumbPool: thumb.NewPool(runtime.NumCPU()),
 		urlClient: urlfetch.NewClient(),
+		settings:  settingsStore,
 	}
 
 	mux.HandleFunc("/api/browse", h.handleBrowse)
@@ -35,9 +41,20 @@ func Register(mux *http.ServeMux, dataDir, webDir string) *Handler {
 	mux.HandleFunc("/api/folder", h.handleFolder)
 	mux.HandleFunc("/api/import-url", h.handleImportURL)
 	mux.HandleFunc("/api/convert", h.handleConvert)
+	mux.HandleFunc("/api/settings", h.handleSettings)
 
 	mux.Handle("/", http.FileServer(http.Dir(webDir)))
 	return h
+}
+
+// settingsSnapshot returns the current URL import settings, falling back to
+// defaults when the store is nil (test harness) so every request path has a
+// usable value without null-checks.
+func (h *Handler) settingsSnapshot() settings.Settings {
+	if h.settings == nil {
+		return settings.Default()
+	}
+	return h.settings.Snapshot()
 }
 
 // Close stops the background thumbnail pool. Safe to call once per Handler.

@@ -2434,3 +2434,127 @@ ffmpeg 있을 때만 실행되는 테스트는 `t.Helper` + `skipIfNoFFmpeg(t)` 
 - **위험: GIF이지만 실제 정적 1프레임(드물지만 있음)** — 그래도 움짤로 분류됨. 사용자 결정 "GIF는 무조건" 그대로 수용. 필요시 후속 Phase에서 frame count 기반 정교화.
 - **위험: Phase 15 인코딩 브랜치가 먼저 머지되면** — SPEC.md/plan.md/todo.md 섹션 번호 인접 충돌 가능. 텍스트 충돌이며 내용 충돌 아님. Phase 16이 뒤에 머지될 때 rebase에서 수기 해결.
 - **롤백:** Phase 16 커밋 revert → Phase 14 상태 복귀. 서버·데이터 영향 없음.
+
+---
+
+## Phase 17 — 다운로드 설정 UI (`feature/download-settings`) — spec [`SPEC.md §2.7`](../SPEC.md)
+
+URL Import와 HLS Import의 2 GiB / 10분 하드코드를 제거하고 UI에서 조정 가능한 서버 전역 설정으로 승격. 기본값은 10 GiB / 30분, 범위는 1 MiB ~ 1 TiB / 1 ~ 240분. Content-Length 누락 응답도 이제 허용 (런타임 누적 카운터로 보호).
+
+**의존성:**
+```
+S1 (internal/settings 패키지: Store + Snapshot/Update + 경계 검증 + atomic write)
+  └─► S2 (urlfetch 하드코드 상수 제거: Fetch(…, maxBytes) 시그니처, missing_content_length 제거, client Timeout 제거)
+          └─► S3 (/api/settings 핸들러: GET + PATCH + 에러 매핑)
+                  └─► S4 (프론트엔드: 헤더 ⚙ + 모달 + MiB/분 input + GiB helper)
+                          └─► S5 (수동 검증 + 문서 정리)
+```
+
+### S1 — `internal/settings` 패키지
+
+**파일:** `internal/settings/settings.go`, `internal/settings/settings_test.go`
+
+**변경 포인트:**
+- `Settings{URLImportMaxBytes int64, URLImportTimeoutSeconds int}` + JSON 태그 `url_import_max_bytes` / `url_import_timeout_seconds` (SPEC §2.7).
+- 상수: `DefaultMaxBytes = 10 * 1024³`, `DefaultTimeoutSeconds = 1800`, `MinMaxBytes = 1<<20`, `MaxMaxBytes = 1<<40`, `MinTimeoutSeconds = 60`, `MaxTimeoutSeconds = 14400`.
+- `Validate(Settings) error` — 범위 밖이면 `*RangeError{Field: "url_import_max_bytes"|"url_import_timeout_seconds"}`.
+- `Store`: `sync.RWMutex` + `current Settings` + `path string`. `New(dataDir)` 가 `<dataDir>/.config/settings.json` 로드 (실패 시 기본값 + 경고 로그, 디스크 건드리지 않음). `Snapshot()` / `Update(Settings)` 가 read/write lock.
+- `writeFile`: JSON marshal → `.settings-*.json` temp → fsync → rename (atomic).
+- Update는 Validate 실패 → 에러, write 실패 → 캐시 변경 없음 (disk-cache drift 방지).
+
+**완료 기준:** `go test ./internal/settings` 통과 — 8개 케이스 (Default, Validate 8 subcase, Missing file, Corrupt JSON, Out-of-range on disk, RoundTrip, RejectsOutOfRange, AtomicWriteLeavesNoTmp).
+
+### S2 — `urlfetch` 하드코드 상수 제거
+
+**파일:** `internal/urlfetch/fetch.go`, `internal/urlfetch/hls.go`, `internal/urlfetch/fetch_test.go`, `internal/urlfetch/fetch_hls_test.go`, `internal/urlfetch/hls_remux_test.go`, `internal/urlfetch/helpers_test.go`, `internal/handler/handler.go`, `internal/handler/import_url.go`, `cmd/server/main.go`, 모든 `*_test.go`의 `Register(...)` call sites
+
+**변경 포인트:**
+- `fetch.go`:
+  - `MaxBytes`, `TotalTimeout` 상수 제거.
+  - `NewClient()` — `Timeout` 필드 제거 (ctx timeout으로 대체).
+  - `Fetch(ctx, client, rawURL, destDir, relDir, maxBytes int64, cb)` — 6번째 인자 추가.
+  - `resp.ContentLength < 0` → **제거** (SPEC §2.7 "Content-Length 누락 허용"). 
+  - `resp.ContentLength > maxBytes` + `io.LimitReader(..., maxBytes+1)` + 런타임 `n > maxBytes` — 모두 파라미터 기반.
+- `hls.go`: `fetchHLS(..., maxBytes, cb)` + `runHLSRemux(..., maxBytes)` 전달. 주석의 `TotalTimeout` 참조도 "per-URL timeout" 표현으로 갱신.
+- `handler/handler.go`: `Handler.settings *settings.Store` 필드 추가. `Register(mux, dataDir, webDir, store *settings.Store)` — nil 허용 (test harness용). `settingsSnapshot()` 헬퍼가 nil일 때 `settings.Default()` 반환.
+- `handler/import_url.go`: 핸들러 진입 시 `snap := h.settingsSnapshot()` → per-batch snapshot. `fetchOneSSE(..., maxBytes int64, perURLTimeout time.Duration)` + `context.WithTimeout(ctx, perURLTimeout)` + `urlfetch.Fetch(..., maxBytes, cb)`.
+- `cmd/server/main.go`: `settings.New(dataDir)` 실패는 `log.Fatal`. 성공 store를 `handler.Register(mux, ..., store)`에 전달.
+- 테스트 고치기:
+  - `urlfetch`: `helpers_test.go`에 `testMaxBytes = 4<<30` 상수. `fetch_test.go`는 별도 파일(`package urlfetch_test`)이라 동일 상수 재선언.
+  - `TestFetch_NoContentLength`: `missing_content_length` 기대 → **성공 기대**로 재작성.
+  - `TestFetch_ContentLengthTooLarge`: 1 KiB cap 주입으로 축소 (2 GiB 실데이터 불필요).
+  - 신규 `TestFetch_NoContentLength_RuntimeCap`: CL 누락 + body > cap → 런타임 `too_large` + 임시 파일 정리.
+  - 모든 기존 `Register(mux, root, root)` → `Register(mux, root, root, nil)` (sed 벌크 업데이트).
+  - 모든 `Fetch(..., cb)` → `Fetch(..., testMaxBytes, cb)` (sed with `, (nil|cb|&urlfetch\.Callbacks\{\})\)$` 패턴).
+
+**완료 기준:** `go build ./... && go test ./...` 전체 통과. `MaxBytes`·`TotalTimeout`·`missing_content_length` grep 매치 **0**.
+
+### S3 — `/api/settings` 핸들러
+
+**파일:** `internal/handler/settings.go`, `internal/handler/settings_test.go`, `internal/handler/handler.go` (라우트 등록)
+
+**변경 포인트:**
+- `handleSettings` 메서드 스위치: GET → `getSettings`, PATCH → `patchSettings`, 나머지 405.
+- `getSettings`: `settingsSnapshot()` JSON으로 응답 (store nil이면 Default 값).
+- `patchSettings`:
+  - `h.settings == nil` → 500 `settings disabled` (테스트 harness 케이스).
+  - `json.Decoder.DisallowUnknownFields()` — 오타 필드 조기 거부.
+  - `store.Update(body)` → `errors.As(err, &RangeError)` 이면 400 `{error: "out_of_range", field: "..."}`, 다른 실패는 500 `write_failed`.
+  - 성공 시 `store.Snapshot()` 에코백.
+- `Register`에 `mux.HandleFunc("/api/settings", h.handleSettings)` 추가.
+
+**완료 기준:** `go test ./internal/handler -run TestSettings` — 7개 subtest + 4 out-of-range subcase + 3 method-not-allowed 전부 통과.
+
+### S4 — 프론트엔드 설정 UI
+
+**파일:** `web/index.html`, `web/style.css`, `web/app.js`
+
+**변경 포인트:**
+- `index.html`:
+  - 헤더에 `<button id="settings-btn" class="settings-btn" aria-label="설정">⚙</button>` (새 폴더 버튼 옆).
+  - `#settings-modal` div — `<input type="number">` 2개 (MiB, 분), helper span, error p, 저장/취소 버튼.
+  - URL 모달 hint를 "2GB/파일" → "용량/타임아웃은 ⚙ 설정에서 조정"으로 교체.
+  - `<script src="/app.js?v=16">` — v=15 → v=16.
+- `style.css`:
+  - `.settings-btn` — new-folder-btn 스타일 미러 (border + hover accent).
+  - `.settings-field`, `.settings-label`, `.settings-field input[type="number"]` (width 100%), `.settings-hint` (12px, min-height 1em — helper 표시 시 layout shift 방지).
+- `app.js` 신규 블록 (Init 앞):
+  - DOM refs 8개 (btn, modal, 2 input, hint, error, 2 action btn).
+  - 상수 `SETTINGS_MAX_MIB_MIN/MAX = 1 / 1048576`, `SETTINGS_TIMEOUT_MIN/MAX = 1 / 240`. 서버 경계 미러.
+  - `SETTINGS_FIELD_LABELS` 에 field → 한국어 라벨 매핑.
+  - `openSettingsModal()`: 필드 초기화 + `fetch('/api/settings')` → byte→MiB/sec→min 환산 후 input 채움.
+  - `closeSettingsModal()`.
+  - `updateSettingsMaxHint()`: input 변경 시 GiB 환산 hint. `<1 GiB` 면 MiB 그대로, 이상이면 소숫점 1자리 GiB (10 이상은 정수).
+  - `submitSettings()`: 클라이언트 검증 → PATCH payload 구성 (`mib * 1024²` / `min * 60`) → 에러 body의 `{error,field}`로 한국어 메시지.
+  - 키보드: Escape → close, Enter → submit.
+  - Click outside → close.
+
+**완료 기준:** 브라우저에서 ⚙ → 모달 열림 → 현재 값 표시 → 편집 → 저장 → 재로드 시 반영 확인. 범위 밖 입력 시 한국어 에러 메시지. S5에서 체크리스트로 재확인.
+
+### S5 — 수동 검증
+
+**체크포인트:** `docker compose -p file_server up -d --build` 후 `http://localhost:8080`에서:
+1. 첫 방문: `⚙` → 모달 오픈 → **기본값 표시** (10240 MiB, 30 분, helper "≈ 10.0 GiB").
+2. 값 변경 저장: 20480 / 60 → 저장 → 모달 재오픈 시 새 값 유지 + `/data/.config/settings.json` 존재.
+3. 경계 밖: 0 입력 → 모달 내 에러 "1~1048576 MiB 범위"; 300 입력 (타임아웃) → "1~240 분 범위".
+4. 서버 경계 강제: curl로 `-d '{"url_import_max_bytes": -1, "url_import_timeout_seconds": 60}'` → `{"error":"out_of_range","field":"url_import_max_bytes"}`.
+5. **Content-Length 누락 허용 회귀**: 작은 파일을 chunked로 서빙하는 origin(예: `python3 -m http.server`는 CL 붙음, `curl http.server` 는 붙음 — 실제로는 `Flask`/`gunicorn`/`nginx chunked` 등 필요) → URL import 성공 확인.
+6. **cap 런타임 enforcement**: cap을 1 MiB로 줄이고 2 MiB 이미지 URL import → SSE `error: "too_large"` + `.thumb/`에 사이드카 없음 + `.urlimport-*.tmp` 없음.
+7. 진행 중 import 도중 cap 변경 (PATCH) → 진행 중 요청은 **원래** cap 유지 (스냅샷 정책).
+8. 타임아웃: cap 대부분 그대로, 타임아웃을 1분으로 줄이고 느린 origin으로 import → `download_timeout`.
+9. 설정 파일 손상: 서버 중단 → `/data/.config/settings.json`을 `{bad json`으로 덮어씀 → 서버 재시작 → `⚙` 열면 **기본값**이 채워짐 (손상 파일은 디스크에 그대로 존재, 서버 로그에 warning 1줄).
+10. 브라우저 회귀: 기존 기능(업로드, 삭제, rename, 움짤 필터, 드래그 이동, TS 변환) 각 1회 스모크 테스트.
+
+**완료 기준:** 10개 전부 기대 동작. 실패 있으면 S5 재작업.
+
+### Out of scope (Phase 17)
+- 유저별 설정(single-tenant 전제 — 인증 없음).
+- Per-URL cap/timeout 오버라이드(단일 전역 값만).
+- 설정 UI에서 다른 knob (업로드 크기, 변환 타임아웃 등) 추가 노출.
+- 설정 변경 이력/rollback UI.
+- 설정 감사 로그(operator는 서버 로그 + git 기반 `settings.json` diff로 충분).
+
+### 위험 / 롤백
+- **위험: 진행 중 요청 스냅샷 정책** — 사용자가 cap을 늘리면서 동시에 큰 파일 import 기대 → 진행 중인 import는 원래 작은 cap을 유지하므로 `too_large`로 실패. 스펙대로의 동작이지만 UX 혼란 가능. 완화: "설정 변경은 다음 import부터 적용됩니다" hint를 모달에 추가 고려.
+- **위험: settings.json 권한 이슈** — Docker volume의 `/data` 가 non-root로 mount 된 경우 `.config` 생성 실패. `New(dataDir)` 가 `log.Fatal`로 응답하므로 서버 시작 실패. `Dockerfile`은 이미 root로 run하므로 영향 없지만 host bind-mount 시 주의.
+- **롤백:** Phase 17 커밋 revert → Phase 16 상태 복귀 + `.config/settings.json` 파일은 남지만 서버가 읽지 않음 (무해). 데이터 손실 없음.

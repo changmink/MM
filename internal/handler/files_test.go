@@ -17,7 +17,7 @@ import (
 func TestUpload(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	t.Run("upload text file", func(t *testing.T) {
 		body := &bytes.Buffer{}
@@ -68,7 +68,7 @@ func TestUpload(t *testing.T) {
 func TestUploadResponseFields(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	upload := func(filename string, content []byte) *httptest.ResponseRecorder {
 		body := &bytes.Buffer{}
@@ -111,7 +111,7 @@ func TestUploadResponseFields(t *testing.T) {
 func TestDeleteImageCleansThumbnail(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	// create image and its thumbnail
 	thumbDir := filepath.Join(root, ".thumb")
@@ -134,7 +134,7 @@ func TestDeleteImageCleansThumbnail(t *testing.T) {
 func TestFolderMethodNotAllowed(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	req := httptest.NewRequest("GET", "/api/folder?path=/", nil)
 	rw := httptest.NewRecorder()
@@ -148,7 +148,7 @@ func TestFolderMethodNotAllowed(t *testing.T) {
 func TestCreateFolder(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	jsonBody := func(name string) *bytes.Buffer {
 		b := &bytes.Buffer{}
@@ -225,7 +225,7 @@ func TestCreateFolder(t *testing.T) {
 func TestDeleteFolder(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	del := func(path string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("DELETE", "/api/folder?path="+path, nil)
@@ -282,7 +282,7 @@ func TestDeleteFolder(t *testing.T) {
 func TestCreateFolderResponsePath(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	body := bytes.NewBufferString(`{"name":"alpha"}`)
 	req := httptest.NewRequest("POST", "/api/folder?path=/", body)
@@ -307,7 +307,7 @@ func TestCreateFolderResponsePath(t *testing.T) {
 func TestConcurrentUploadSameNameNoClobber(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	const n = 20
 	var wg sync.WaitGroup
@@ -357,7 +357,7 @@ func TestConcurrentUploadSameNameNoClobber(t *testing.T) {
 func TestRenameFile(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	jsonBody := func(name string) *bytes.Buffer {
 		b := &bytes.Buffer{}
@@ -578,7 +578,7 @@ func TestRenameFile(t *testing.T) {
 func TestRenameFolder(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	jsonBody := func(name string) *bytes.Buffer {
 		b := &bytes.Buffer{}
@@ -683,7 +683,7 @@ func TestRenameFolder(t *testing.T) {
 func TestDelete(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	// create a file to delete
 	os.WriteFile(filepath.Join(root, "todelete.txt"), []byte("bye"), 0644)

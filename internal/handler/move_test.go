@@ -22,7 +22,7 @@ func patchMove(mux *http.ServeMux, srcRel, destRel string) *httptest.ResponseRec
 func TestMoveFile_HappyPath(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	os.MkdirAll(filepath.Join(root, "movies"), 0755)
 	os.WriteFile(filepath.Join(root, "clip.mp4"), []byte("video"), 0644)
@@ -50,7 +50,7 @@ func TestMoveFile_HappyPath(t *testing.T) {
 func TestMoveFile_ConflictGetsSuffix(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	os.MkdirAll(filepath.Join(root, "movies"), 0755)
 	os.WriteFile(filepath.Join(root, "clip.mp4"), []byte("new"), 0644)
@@ -73,7 +73,7 @@ func TestMoveFile_ConflictGetsSuffix(t *testing.T) {
 func TestMoveFile_SidecarsMoved(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	os.MkdirAll(filepath.Join(root, ".thumb"), 0755)
 	os.MkdirAll(filepath.Join(root, "movies"), 0755)
@@ -96,7 +96,7 @@ func TestMoveFile_SidecarsMoved(t *testing.T) {
 func TestMoveFile_SameDirectory(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	os.MkdirAll(filepath.Join(root, "movies"), 0755)
 	os.WriteFile(filepath.Join(root, "movies", "clip.mp4"), []byte("video"), 0644)
@@ -119,7 +119,7 @@ func TestMoveFile_SameDirectory(t *testing.T) {
 func TestMoveFile_SrcIsDirectory(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	os.MkdirAll(filepath.Join(root, "src"), 0755)
 	os.MkdirAll(filepath.Join(root, "dest"), 0755)
@@ -133,7 +133,7 @@ func TestMoveFile_SrcIsDirectory(t *testing.T) {
 func TestMoveFile_DestMissing(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	os.WriteFile(filepath.Join(root, "clip.mp4"), []byte("video"), 0644)
 
@@ -150,7 +150,7 @@ func TestMoveFile_DestMissing(t *testing.T) {
 func TestMoveFile_DestIsFile(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	os.WriteFile(filepath.Join(root, "clip.mp4"), []byte("video"), 0644)
 	os.WriteFile(filepath.Join(root, "regular.txt"), []byte("not a dir"), 0644)
@@ -164,7 +164,7 @@ func TestMoveFile_DestIsFile(t *testing.T) {
 func TestMoveFile_SrcMissing(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	os.MkdirAll(filepath.Join(root, "movies"), 0755)
 	rw := patchMove(mux, "/ghost.mp4", "/movies")
@@ -176,7 +176,7 @@ func TestMoveFile_SrcMissing(t *testing.T) {
 func TestMoveFile_TraversalRejected(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	t.Run("src traversal", func(t *testing.T) {
 		rw := patchMove(mux, "../etc/passwd", "/")
@@ -197,7 +197,7 @@ func TestMoveFile_TraversalRejected(t *testing.T) {
 func TestMoveFile_InvalidBody(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 	os.WriteFile(filepath.Join(root, "x.txt"), []byte("x"), 0644)
 
 	req := httptest.NewRequest(http.MethodPatch, "/api/file?path=/x.txt",
@@ -214,7 +214,7 @@ func TestMoveFile_InvalidBody(t *testing.T) {
 func TestFile_MethodGetReturns405(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/file?path=/x", nil)
 	rw := httptest.NewRecorder()

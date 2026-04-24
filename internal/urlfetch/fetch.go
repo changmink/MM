@@ -27,14 +27,10 @@ import (
 )
 
 const (
-	// MaxBytes caps downloaded payloads at 2 GiB.
-	MaxBytes = 2 << 30
 	// MaxRedirects bounds redirect chains.
 	MaxRedirects = 5
 	// DialTimeout limits TCP connection establishment.
 	DialTimeout = 10 * time.Second
-	// TotalTimeout limits the entire request, including body read.
-	TotalTimeout = 10 * time.Minute
 
 	// progressByteThreshold and progressTimeThreshold bound how often the
 	// Progress callback fires so a very fast download does not emit thousands
@@ -117,16 +113,17 @@ var (
 )
 
 // NewClient returns the http.Client used by Fetch. It enforces a 10s dial
-// timeout, a 10-minute overall timeout, a 5-redirect cap, and refuses any
-// redirect hop whose scheme is not http/https. No cookie jar — auth headers
-// and cookies are never carried over by default.
+// timeout, a 5-redirect cap, and refuses any redirect hop whose scheme is
+// not http/https. No cookie jar — auth headers and cookies are never carried
+// over by default. The per-URL total timeout is enforced via context by the
+// caller (see handler/import_url.go) so it can be adjusted at runtime via
+// /api/settings without reconstructing the client.
 func NewClient() *http.Client {
 	dialer := &net.Dialer{Timeout: DialTimeout}
 	return &http.Client{
 		Transport: &http.Transport{
 			DialContext: dialer.DialContext,
 		},
-		Timeout: TotalTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= MaxRedirects {
 				return errTooManyRedirects
@@ -142,10 +139,13 @@ func NewClient() *http.Client {
 
 // Fetch downloads rawURL into destDir (absolute path, caller-validated) and
 // returns the saved file's metadata. relDir is the slash-form prefix used to
-// build Result.Path. If cb is non-nil, Start fires after header validation
-// and Progress fires during body streaming (throttled). On any error no file
-// remains under destDir.
-func Fetch(ctx context.Context, client *http.Client, rawURL, destDir, relDir string, cb *Callbacks) (*Result, *FetchError) {
+// build Result.Path. maxBytes caps both pre-download Content-Length check
+// and cumulative bytes during body streaming — responses lacking a
+// Content-Length are permitted and protected solely by the runtime cap. If
+// cb is non-nil, Start fires after header validation and Progress fires
+// during body streaming (throttled). On any error no file remains under
+// destDir.
+func Fetch(ctx context.Context, client *http.Client, rawURL, destDir, relDir string, maxBytes int64, cb *Callbacks) (*Result, *FetchError) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Scheme == "" {
 		return nil, &FetchError{Code: "invalid_url", Err: err}
@@ -183,15 +183,14 @@ func Fetch(ctx context.Context, client *http.Client, rawURL, destDir, relDir str
 
 	rawContentType := resp.Header.Get("Content-Type")
 	if isHLSResponse(rawContentType, parsed.Path) {
-		return fetchHLS(ctx, resp, parsed, rawURL, destDir, relDir, warnings, cb)
+		return fetchHLS(ctx, resp, parsed, rawURL, destDir, relDir, warnings, maxBytes, cb)
 	}
 
-	// Reject responses without a known length so we cannot be tricked into
-	// streaming an unbounded body. The in-stream cap below is defense in depth.
-	if resp.ContentLength < 0 {
-		return nil, &FetchError{Code: "missing_content_length"}
-	}
-	if resp.ContentLength > MaxBytes {
+	// A declared Content-Length above the cap is rejected up front so we
+	// don't start a doomed download. A missing Content-Length (chunked or
+	// legacy HTTP/1.0) is allowed — the in-stream cap below enforces the
+	// same limit by counting bytes as they arrive.
+	if resp.ContentLength > maxBytes {
 		return nil, &FetchError{Code: "too_large"}
 	}
 
@@ -227,7 +226,7 @@ func Fetch(ctx context.Context, client *http.Client, rawURL, destDir, relDir str
 		}
 	}()
 
-	var src io.Reader = io.LimitReader(resp.Body, MaxBytes+1)
+	var src io.Reader = io.LimitReader(resp.Body, maxBytes+1)
 	if cb != nil && cb.Progress != nil {
 		src = newProgressReader(src, cb.Progress)
 	}
@@ -238,7 +237,7 @@ func Fetch(ctx context.Context, client *http.Client, rawURL, destDir, relDir str
 		}
 		return nil, &FetchError{Code: "network_error", Err: err}
 	}
-	if n > MaxBytes {
+	if n > maxBytes {
 		return nil, &FetchError{Code: "too_large"}
 	}
 	if err := tmpFile.Close(); err != nil {
