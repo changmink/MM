@@ -2,6 +2,8 @@ package handler
 
 import (
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path"
@@ -127,7 +129,9 @@ func walkTree(dirAbs, dirRel string, depth int) ([]treeNode, bool, error) {
 			grand, hasGrand, err := walkTree(childAbs, childRel, depth-1)
 			if err != nil {
 				// One unreadable subdir shouldn't fail the whole tree;
-				// surface as "no children" with a debug log path.
+				// surface as "no children" but log so operators can trace
+				// permission/IO problems instead of seeing silent blanks.
+				slog.Debug("tree walk: subdir unreadable", "path", childAbs, "err", err)
 				node.Children = []treeNode{}
 				node.HasChildren = false
 			} else {
@@ -135,7 +139,10 @@ func walkTree(dirAbs, dirRel string, depth int) ([]treeNode, bool, error) {
 				node.HasChildren = hasGrand
 			}
 		} else {
-			has, _ := dirHasSubdirs(childAbs)
+			has, err := dirHasSubdirs(childAbs)
+			if err != nil {
+				slog.Debug("tree walk: has-children probe failed", "path", childAbs, "err", err)
+			}
 			node.HasChildren = has
 			if has {
 				node.Children = nil // not loaded — UI lazy-fetches on expand
@@ -150,7 +157,9 @@ func walkTree(dirAbs, dirRel string, depth int) ([]treeNode, bool, error) {
 
 // dirHasSubdirs probes whether dirAbs contains at least one non-hidden
 // subdirectory. Used at the depth boundary to set HasChildren without
-// loading grandchildren.
+// loading grandchildren. Returns (false, err) on a real read error so
+// the caller can log it — previously any error, including IO failures,
+// was mapped to (false, nil) and hid problems from operators.
 func dirHasSubdirs(dirAbs string) (bool, error) {
 	f, err := os.Open(dirAbs)
 	if err != nil {
@@ -170,7 +179,10 @@ func dirHasSubdirs(dirAbs string) (bool, error) {
 			}
 		}
 		if err != nil {
-			return false, nil // io.EOF or end — no subdir found
+			if err == io.EOF {
+				return false, nil
+			}
+			return false, err
 		}
 	}
 }
