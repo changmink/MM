@@ -492,6 +492,26 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 }
 .settings-btn:hover { border-color: var(--accent); color: var(--accent); }
 
+/* URL import progress badge — shown in the header while the modal is closed
+   but batches are still downloading in the background. Clicking reopens the
+   modal so the user can inspect per-URL progress. */
+.url-badge {
+  background: none;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  padding: 4px 12px;
+  border-radius: 9999px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background-color 0.15s;
+}
+.url-badge:hover { background: rgba(79, 142, 247, 0.15); }
+.url-badge.hidden { display: none; }
+.url-badge.has-error { border-color: var(--danger); color: var(--danger); }
+.url-badge.has-error:hover { background: rgba(224, 85, 85, 0.15); }
+
 /* Settings modal — one input per row plus a helper line under the byte input */
 .settings-field { display: block; margin: 12px 0; }
 .settings-label {

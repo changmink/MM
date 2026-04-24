@@ -63,6 +63,7 @@ const urlSummary    = document.getElementById('url-summary');
 const urlResult     = document.getElementById('url-result');
 const urlCancelBtn  = document.getElementById('url-cancel-btn');
 const urlConfirmBtn = document.getElementById('url-confirm-btn');
+const urlBadge     = document.getElementById('url-badge');
 const convertAllBtn       = document.getElementById('convert-all-btn');
 const convertModal        = document.getElementById('convert-modal');
 const convertFileList     = document.getElementById('convert-file-list');
@@ -662,12 +663,17 @@ const URL_ERROR_LABELS = {
   hls_playlist_too_large: 'HLS 플레이리스트 크기 초과',
 };
 
-// Each batch captures one in-flight POST /api/import-url. B2 keeps the
-// single-batch external behavior (submit clears rows, close aborts all
-// active batches); B3+ will turn this into true background state where
-// close hides the modal without cancelling the fetch.
+// Each batch captures one in-flight POST /api/import-url. B3 makes the modal
+// a pure view over this state: closing hides the UI but leaves fetches
+// running until they complete, and a header pill mirrors the aggregate
+// progress while the modal is out of sight.
 const urlBatches = [];
 let urlBatchSeq = 0;
+// When a round finishes with only failures we keep the batch metadata
+// around briefly so the badge can still surface the ⚠ marker the user
+// might have missed if they were off-screen. Cleared on the next open or
+// the next completion round.
+let urlBadgeLinger = false;
 
 function anyBatchActive() {
   return urlBatches.some(b => !b.done);
@@ -680,40 +686,103 @@ urlImportBtn.addEventListener('click', openURLModal);
 urlCancelBtn.addEventListener('click', closeURLModal);
 urlConfirmBtn.addEventListener('click', submitURLImport);
 urlModal.addEventListener('click', e => { if (e.target === urlModal) closeURLModal(); });
+urlBadge.addEventListener('click', openURLModal);
 document.addEventListener('keydown', e => {
   if (urlModal.classList.contains('hidden')) return;
   if (e.key === 'Escape') closeURLModal();
 });
 
 function openURLModal() {
+  const hasActive = anyBatchActive();
   urlInput.value = '';
   urlError.textContent = '';
   urlError.classList.add('hidden');
-  urlRows.innerHTML = '';
-  urlSummary.textContent = '';
-  urlSummary.className = 'url-summary hidden';
-  urlResult.classList.add('hidden');
-  // Drop any prior batch bookkeeping so close-after-open won't re-fire
-  // browse() for URLs that were acknowledged in a previous round.
-  urlBatches.length = 0;
+
+  if (!hasActive) {
+    // Fresh start: drop any completed-but-still-listed batches and reset
+    // the row area. Success completions already fired browse() via
+    // maybeFinalize(); failure-only rounds drop their rows here so the
+    // user gets a clean slate to try again.
+    urlBatches.length = 0;
+    urlBadgeLinger = false;
+    urlRows.innerHTML = '';
+    urlSummary.textContent = '';
+    urlSummary.className = 'url-summary hidden';
+    urlResult.classList.add('hidden');
+  }
+  // When hasActive: keep existing rows / summary visible so the modal
+  // picks up right where the background work is.
+
   urlModal.classList.remove('hidden');
+  updateURLBadge();
   urlInput.focus();
 }
 
 function closeURLModal() {
-  // Abort every still-running batch. Client disconnect flows to the handler
-  // as r.Context() cancel → backend stops the current Fetch and skips the
-  // rest of the batch. B3 will drop this call so closing becomes view-only.
-  for (const b of urlBatches) {
-    if (!b.done) b.abort.abort();
-  }
+  // Pure view-hide: fetches keep running, the badge takes over the
+  // progress surface. Tab close or navigation still aborts via the
+  // browser, which the server handles as r.Context() cancel.
   urlModal.classList.add('hidden');
-  if (anyBatchSucceeded()) {
-    // Clearing prevents a redundant browse() if close somehow fires twice
-    // without an openURLModal in between.
-    urlBatches.length = 0;
-    browse(currentPath, false);
+  updateURLBadge();
+}
+
+function updateURLBadge() {
+  const modalHidden = urlModal.classList.contains('hidden');
+  const shouldShow = modalHidden && (anyBatchActive() || urlBadgeLinger);
+  if (!shouldShow) {
+    urlBadge.classList.add('hidden');
+    urlBadge.classList.remove('has-error');
+    return;
   }
+  // Aggregate completion across every batch still on the registry.
+  let completed = 0, total = 0, failed = 0;
+  for (const b of urlBatches) {
+    completed += b.succeeded + b.failed;
+    total     += b.total;
+    failed    += b.failed;
+  }
+  urlBadge.classList.remove('hidden');
+  urlBadge.classList.toggle('has-error', failed > 0);
+  urlBadge.textContent = `URL ↓ ${completed}/${total}` + (failed > 0 ? ' ⚠' : '');
+}
+
+// maybeFinalize runs whenever a batch settles (normal completion, abort,
+// network error, or HTTP error). When every batch is done it fires the
+// browse() reload for any success round and drops the linger state.
+function maybeFinalize() {
+  if (anyBatchActive()) return;
+
+  if (anyBatchSucceeded()) {
+    // Success: clear the registry so a later close (without reopen)
+    // cannot trigger a second browse(). The badge hides as a side
+    // effect because anyBatchActive() is now false.
+    urlBatches.length = 0;
+    urlBadgeLinger = false;
+    updateURLBadge();
+    browse(currentPath, false);
+    return;
+  }
+
+  if (urlBatches.length === 0) {
+    // No batches to surface — e.g. HTTP-error path that already popped
+    // its batch. Nothing to finalize.
+    updateURLBadge();
+    return;
+  }
+
+  // Error-only round: keep the badge up briefly so the user can still
+  // click it to inspect the errors after they dismissed the modal.
+  urlBadgeLinger = true;
+  updateURLBadge();
+  setTimeout(() => {
+    // Guard: the user may have started a new batch during the grace
+    // window. Only clear if nothing is still running.
+    if (!anyBatchActive()) {
+      urlBatches.length = 0;
+      urlBadgeLinger = false;
+      updateURLBadge();
+    }
+  }, 3000);
 }
 
 async function submitURLImport() {
@@ -767,6 +836,11 @@ async function submitURLImport() {
       if (!msg) msg = `요청 실패 (${res.status})`;
       showURLError(msg);
       urlResult.classList.add('hidden');
+      // The POST never produced any SSE events and the rows are hidden,
+      // so drop the batch from the registry — aggregate counters would
+      // otherwise show a stuck 0/N entry in the badge.
+      const idx = urlBatches.indexOf(batch);
+      if (idx !== -1) urlBatches.splice(idx, 1);
       return;
     }
     await consumeSSE(res, ev => handleSSEEvent(batch, ev));
@@ -778,6 +852,7 @@ async function submitURLImport() {
     batch.done = true;
     urlConfirmBtn.disabled = false;
     urlConfirmBtn.textContent = '가져오기';
+    maybeFinalize();
   }
 }
 
@@ -873,6 +948,7 @@ function handleSSEEvent(batch, ev) {
       const warn = (ev.warnings && ev.warnings.length > 0) ? ` · ${ev.warnings.join(', ')}` : '';
       setRowStatus(row, 'status-done', `완료 (${formatSize(ev.size)})${warn}`);
       batch.succeeded++;
+      updateURLBadge();
       break;
     }
     case 'error': {
@@ -881,6 +957,7 @@ function handleSSEEvent(batch, ev) {
       const label = URL_ERROR_LABELS[ev.error] || ev.error || '알 수 없는 오류';
       setRowStatus(row, 'status-error', '실패 · ' + label);
       batch.failed++;
+      updateURLBadge();
       break;
     }
     case 'summary': {
