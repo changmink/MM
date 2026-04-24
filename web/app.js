@@ -641,15 +641,18 @@ function showFolderError(msg) {
 }
 
 // ── URL Import ────────────────────────────────────────────────────────────────
+// Labels intentionally omit specific byte/time limits because those are
+// configurable at runtime via /api/settings — hardcoding numbers here made
+// the UI lie when the user had bumped the cap or timeout.
 const URL_ERROR_LABELS = {
   missing_content_length: 'Content-Length 헤더 없음',
-  too_large: '2GB 초과',
+  too_large: '크기 상한 초과',
   unsupported_content_type: '지원하지 않는 미디어 타입',
   invalid_scheme: '지원하지 않는 스킴',
   invalid_url: '잘못된 URL',
   http_error: 'HTTP 응답 에러',
   connect_timeout: '연결 타임아웃',
-  download_timeout: '다운로드 타임아웃 (10분)',
+  download_timeout: '다운로드 타임아웃',
   tls_error: 'TLS 검증 실패',
   too_many_redirects: '리다이렉트 과다',
   network_error: '네트워크 오류',
