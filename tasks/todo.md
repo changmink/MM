@@ -116,3 +116,10 @@
 - [x] CF-1: SPEC.md §2.5.3 + plan.md Phase 16 추가 (선행 커밋, 구현 없음)
 - [x] CF-2: 움짤 필터 단일 슬라이스 — `index.html` 타입 세그먼트 6번째 버튼 + `app.js?v=14` · `app.js` `TYPE_VALUES`에 `clip` 추가 + `applyView` clip 분기 + 이미지·동영상·움짤 배타 분류(움짤 조건 파일은 이미지/동영상 탭에서 제외, 전체 탭은 영향 없음)
 - [x] CF-3: 수동 검증 — 브라우저 확인 완료
+
+## Phase 17 — 다운로드 설정 UI (`feature/download-settings`) — spec [`SPEC.md §2.7`](../SPEC.md)
+- [x] S1: `internal/settings` 패키지 — `Store` + `Snapshot`/`Update` + `Validate`/`RangeError` + atomic write (temp+fsync+rename) + 기본값(10 GiB / 30 분) fallback + 8개 테스트(Default·Validate 8 subcase·Missing file·Corrupt JSON·Out-of-range on disk·RoundTrip·RejectsOutOfRange·AtomicWriteLeavesNoTmp)
+- [ ] S2: `urlfetch` 하드코드 상수 제거 — `MaxBytes`/`TotalTimeout` 상수 삭제, `Fetch(..., maxBytes)` 시그니처, `missing_content_length` 거부 제거, `Handler.settings` 필드 + `Register` 4번째 인자, `handleImportURL` per-batch snapshot
+- [ ] S3: `/api/settings` 핸들러 — `GET`/`PATCH` + `DisallowUnknownFields` + `RangeError` → `400 out_of_range` + `500 write_failed` + 테스트 8개
+- [ ] S4: 프론트엔드 — 헤더 `⚙` 버튼 + `#settings-modal` (MiB/분 input + GiB helper) + `app.js?v=16`
+- [ ] S5: 수동 E2E 검증 — plan.md Phase 17 S5의 10개 시나리오
