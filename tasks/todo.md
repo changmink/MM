@@ -134,7 +134,7 @@
 
 ## Phase 19 — URL Import 백그라운드 진행 (`feature/url-import-background`) — spec [`spec-url-import-background.md`](./spec-url-import-background.md), plan [`plan.md` Phase 19](./plan.md)
 - [x] B1: 서버 — `Handler.importSem chan struct{}` (context-aware 세마포어) + `sseQueued` 타입 + `handleImportURL`에서 queued 이벤트 emit 후 acquire/release + 단위 테스트 3개 추가 (Queued once / Serialization / Canceled while waiting). 스트리밍 테스트용 `streamingRecorder` / `waitForPhase` / `postImportStreaming` 헬퍼 도입. 기존 phase 단언 4개 업데이트(`[queued start done summary]`).
-- [ ] B2: 클라이언트 리팩토링 — `urlSubmitting`/`urlAbort`/`urlAnySucceeded` 전역을 `urlBatches[]` + `urlBatchSeq`로 교체, `handleSSEEvent`를 batch-aware로 변경, `app.js?v=18→19` bump. 동작 불변 (회귀 테스트)
+- [x] B2: 클라이언트 리팩토링 — `urlSubmitting`/`urlAbort`/`urlAnySucceeded` 전역을 `urlBatches[]` + `urlBatchSeq`로 교체, `anyBatchActive`/`anyBatchSucceeded` 파생 헬퍼, `ensureURLRow(batch, ...)` 및 `handleSSEEvent(batch, ev)` batch-aware 시그니처, row DOM에 `data-batch` 속성 부여, progress 룩업을 `batch.rowEls.get(index)`로 전환, `handleSSEEvent` switch에 `queued` 자리 주석 추가, `app.js?v=18→19` bump. 동작 불변 — 단일 배치 흐름 그대로 (close = abort all active 유지, open 시 `urlBatches.length = 0`).
 - [ ] B3: `closeURLModal` abort 제거 + 헤더 `#url-badge` 추가 + `updateURLBadge`/`maybeFinalize` 헬퍼 + 완료 시 `browse()` 재조회는 `maybeFinalize` 경유, `app.js?v=19→20` bump
 - [ ] B4: 재오픈 시 confirm 라벨 전환 + 새 배치 추가 append + `queued` phase 수신 시 row "대기 중 (순서 대기)" 표시 + 배치 divider, `app.js?v=20→21` bump
 - [ ] B5: 10개 E2E 수동 시나리오 통과 + `SPEC.md §2.6` 본문 갱신 (queued 이벤트 스키마 추가 포함) + `spec-url-import-background.md` status 노트

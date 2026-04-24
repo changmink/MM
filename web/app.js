@@ -662,9 +662,19 @@ const URL_ERROR_LABELS = {
   hls_playlist_too_large: 'HLS 플레이리스트 크기 초과',
 };
 
-let urlSubmitting = false;
-let urlAnySucceeded = false;
-let urlAbort = null;
+// Each batch captures one in-flight POST /api/import-url. B2 keeps the
+// single-batch external behavior (submit clears rows, close aborts all
+// active batches); B3+ will turn this into true background state where
+// close hides the modal without cancelling the fetch.
+const urlBatches = [];
+let urlBatchSeq = 0;
+
+function anyBatchActive() {
+  return urlBatches.some(b => !b.done);
+}
+function anyBatchSucceeded() {
+  return urlBatches.some(b => b.succeeded > 0);
+}
 
 urlImportBtn.addEventListener('click', openURLModal);
 urlCancelBtn.addEventListener('click', closeURLModal);
@@ -683,26 +693,31 @@ function openURLModal() {
   urlSummary.textContent = '';
   urlSummary.className = 'url-summary hidden';
   urlResult.classList.add('hidden');
-  urlAnySucceeded = false;
+  // Drop any prior batch bookkeeping so close-after-open won't re-fire
+  // browse() for URLs that were acknowledged in a previous round.
+  urlBatches.length = 0;
   urlModal.classList.remove('hidden');
   urlInput.focus();
 }
 
 function closeURLModal() {
-  if (urlSubmitting && urlAbort) {
-    // Client disconnect flows to the handler as r.Context() cancel → backend
-    // stops the current Fetch and skips remaining URLs in the batch.
-    urlAbort.abort();
+  // Abort every still-running batch. Client disconnect flows to the handler
+  // as r.Context() cancel → backend stops the current Fetch and skips the
+  // rest of the batch. B3 will drop this call so closing becomes view-only.
+  for (const b of urlBatches) {
+    if (!b.done) b.abort.abort();
   }
   urlModal.classList.add('hidden');
-  if (urlAnySucceeded) {
-    urlAnySucceeded = false;
+  if (anyBatchSucceeded()) {
+    // Clearing prevents a redundant browse() if close somehow fires twice
+    // without an openURLModal in between.
+    urlBatches.length = 0;
     browse(currentPath, false);
   }
 }
 
 async function submitURLImport() {
-  if (urlSubmitting) return;
+  if (anyBatchActive()) return;
   const urls = urlInput.value
     .split('\n')
     .map(s => s.trim())
@@ -722,20 +737,29 @@ async function submitURLImport() {
   urlSummary.textContent = '';
   urlSummary.className = 'url-summary hidden';
   urlResult.classList.remove('hidden');
+
+  const batch = {
+    id: ++urlBatchSeq,
+    abort: new AbortController(),
+    rowEls: new Map(),
+    succeeded: 0,
+    failed: 0,
+    total: urls.length,
+    done: false,
+  };
+  urlBatches.push(batch);
   // Pre-create one pending row per URL so users see immediate feedback even
   // before the first SSE event arrives.
-  urls.forEach((u, i) => ensureURLRow(i, u));
-  urlSubmitting = true;
+  urls.forEach((u, i) => ensureURLRow(batch, i, u));
   urlConfirmBtn.disabled = true;
   urlConfirmBtn.textContent = '가져오는 중...';
-  urlAbort = new AbortController();
 
   try {
     const res = await fetch('/api/import-url?path=' + encodeURIComponent(currentPath), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
       body: JSON.stringify({ urls }),
-      signal: urlAbort.signal,
+      signal: batch.abort.signal,
     });
     if (!res.ok) {
       let msg = '';
@@ -745,14 +769,13 @@ async function submitURLImport() {
       urlResult.classList.add('hidden');
       return;
     }
-    await consumeSSE(res, handleSSEEvent);
+    await consumeSSE(res, ev => handleSSEEvent(batch, ev));
   } catch (e) {
     if (e.name !== 'AbortError') {
       showURLError('요청 실패: ' + e.message);
     }
   } finally {
-    urlSubmitting = false;
-    urlAbort = null;
+    batch.done = true;
     urlConfirmBtn.disabled = false;
     urlConfirmBtn.textContent = '가져오기';
   }
@@ -786,11 +809,12 @@ async function consumeSSE(res, onEvent) {
   }
 }
 
-function ensureURLRow(index, fallbackUrl) {
-  let row = urlRows.querySelector(`[data-index="${index}"]`);
+function ensureURLRow(batch, index, fallbackUrl) {
+  let row = batch.rowEls.get(index);
   if (row) return row;
   row = document.createElement('div');
   row.className = 'url-row status-pending';
+  row.dataset.batch = String(batch.id);
   row.dataset.index = String(index);
   row.dataset.total = '0';
   row.innerHTML = `
@@ -801,6 +825,7 @@ function ensureURLRow(index, fallbackUrl) {
     <div class="url-progress-bar"><div class="url-progress-fill"></div></div>
   `;
   urlRows.appendChild(row);
+  batch.rowEls.set(index, row);
   return row;
 }
 
@@ -810,10 +835,10 @@ function setRowStatus(row, statusClass, statusText) {
   row.querySelector('.url-row-status').textContent = statusText;
 }
 
-function handleSSEEvent(ev) {
+function handleSSEEvent(batch, ev) {
   switch (ev.phase) {
     case 'start': {
-      const row = ensureURLRow(ev.index, ev.url);
+      const row = ensureURLRow(batch, ev.index, ev.url);
       row.querySelector('.url-row-name').textContent = ev.name || ev.url;
       const total = Number(ev.total) || 0;
       row.dataset.total = String(total);
@@ -827,7 +852,7 @@ function handleSSEEvent(ev) {
       break;
     }
     case 'progress': {
-      const row = urlRows.querySelector(`[data-index="${ev.index}"]`);
+      const row = batch.rowEls.get(ev.index);
       if (!row) return;
       const total = Number(row.dataset.total) || 0;
       if (total > 0) {
@@ -841,20 +866,21 @@ function handleSSEEvent(ev) {
       break;
     }
     case 'done': {
-      const row = ensureURLRow(ev.index, ev.url);
+      const row = ensureURLRow(batch, ev.index, ev.url);
       row.querySelector('.url-row-name').textContent = ev.name || ev.url;
       row.classList.remove('url-row-indeterminate');
       row.querySelector('.url-progress-fill').style.width = '100%';
       const warn = (ev.warnings && ev.warnings.length > 0) ? ` · ${ev.warnings.join(', ')}` : '';
       setRowStatus(row, 'status-done', `완료 (${formatSize(ev.size)})${warn}`);
-      urlAnySucceeded = true;
+      batch.succeeded++;
       break;
     }
     case 'error': {
-      const row = ensureURLRow(ev.index, ev.url);
+      const row = ensureURLRow(batch, ev.index, ev.url);
       row.classList.remove('url-row-indeterminate');
       const label = URL_ERROR_LABELS[ev.error] || ev.error || '알 수 없는 오류';
       setRowStatus(row, 'status-error', '실패 · ' + label);
+      batch.failed++;
       break;
     }
     case 'summary': {
@@ -865,6 +891,9 @@ function handleSSEEvent(ev) {
       urlSummary.textContent = `성공 ${ev.succeeded}개 · 실패 ${ev.failed}개`;
       break;
     }
+    // `queued` phase (B1 server addition) has no client-side effect in B2.
+    // B4 will use it to flip a batch's rows into a "대기 중 (순서 대기)"
+    // visual state while earlier batches hold the server semaphore.
   }
 }
 
