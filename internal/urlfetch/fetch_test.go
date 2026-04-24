@@ -42,7 +42,7 @@ func TestFetch_OK_JPEG(t *testing.T) {
 
 	dest := t.TempDir()
 	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/photo.jpg", dest, "/photos", nil)
+		srv.URL+"/photo.jpg", dest, "/photos", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
@@ -74,7 +74,7 @@ func TestFetch_OK_MP4(t *testing.T) {
 
 	dest := t.TempDir()
 	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/clip.mp4", dest, "/movies", nil)
+		srv.URL+"/clip.mp4", dest, "/movies", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
@@ -93,7 +93,7 @@ func TestFetch_OK_MP3(t *testing.T) {
 
 	dest := t.TempDir()
 	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/song.mp3", dest, "/music", nil)
+		srv.URL+"/song.mp3", dest, "/music", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
@@ -113,7 +113,7 @@ func TestFetch_ExtensionReplaced_MKV(t *testing.T) {
 	dest := t.TempDir()
 	// URL declares .mp4 but the server returns MKV; extension must flip to .mkv.
 	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/clip.mp4", dest, "/", nil)
+		srv.URL+"/clip.mp4", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
@@ -136,7 +136,7 @@ func TestFetch_DefaultName_Video(t *testing.T) {
 	dest := t.TempDir()
 	// URL path is "/" so there is no usable basename.
 	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/", dest, "/", nil)
+		srv.URL+"/", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
@@ -152,7 +152,7 @@ func TestFetch_DefaultName_Audio(t *testing.T) {
 
 	dest := t.TempDir()
 	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/", dest, "/", nil)
+		srv.URL+"/", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
@@ -164,7 +164,7 @@ func TestFetch_DefaultName_Audio(t *testing.T) {
 func TestFetch_InvalidScheme(t *testing.T) {
 	dest := t.TempDir()
 	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		"file:///etc/passwd", dest, "/", nil)
+		"file:///etc/passwd", dest, "/", testMaxBytes, nil)
 	if ferr == nil || ferr.Code != "invalid_scheme" {
 		t.Fatalf("got %v, want invalid_scheme", ferr)
 	}
@@ -173,44 +173,76 @@ func TestFetch_InvalidScheme(t *testing.T) {
 func TestFetch_InvalidURL(t *testing.T) {
 	dest := t.TempDir()
 	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		"://no-scheme", dest, "/", nil)
+		"://no-scheme", dest, "/", testMaxBytes, nil)
 	if ferr == nil || ferr.Code != "invalid_url" {
 		t.Fatalf("got %v, want invalid_url", ferr)
 	}
 }
 
-func TestFetch_NoContentLength(t *testing.T) {
+// Chunked-transfer responses (no Content-Length) used to be rejected with
+// "missing_content_length". The cap is now enforced at the byte level, so a
+// headerless small body must succeed.
+func TestFetch_NoContentLength_Succeeds(t *testing.T) {
+	body := dummyJPEG()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/jpeg")
 		w.WriteHeader(http.StatusOK)
-		// Force chunked encoding by flushing before writing body.
+		// Force chunked encoding by flushing before writing the body.
 		w.(http.Flusher).Flush()
-		w.Write(dummyJPEG())
+		w.Write(body)
+	}))
+	defer srv.Close()
+
+	dest := t.TempDir()
+	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+		srv.URL+"/photo.jpg", dest, "/", testMaxBytes, nil)
+	if ferr != nil {
+		t.Fatalf("fetch failed: %v", ferr)
+	}
+	if res.Size != int64(len(body)) {
+		t.Errorf("size = %d, want %d", res.Size, len(body))
+	}
+}
+
+// Oversize Content-Length must be rejected before the body is read.
+func TestFetch_ContentLengthTooLarge(t *testing.T) {
+	const cap = int64(1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Content-Length", strconv.FormatInt(cap+1, 10))
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
 	dest := t.TempDir()
 	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/photo.jpg", dest, "/", nil)
-	if ferr == nil || ferr.Code != "missing_content_length" {
-		t.Fatalf("got %v, want missing_content_length", ferr)
+		srv.URL+"/big.jpg", dest, "/", cap, nil)
+	if ferr == nil || ferr.Code != "too_large" {
+		t.Fatalf("got %v, want too_large", ferr)
 	}
 	assertNoLeftovers(t, dest)
 }
 
-func TestFetch_ContentLengthTooLarge(t *testing.T) {
-	// Declare 2 GiB + 1 without actually writing the body — the header check
-	// must reject before any transfer.
+// Without a declared Content-Length the header check cannot reject, so the
+// runtime byte counter must trip too_large and clean up the partial tmp file.
+func TestFetch_NoContentLength_RuntimeCap(t *testing.T) {
+	const cap = int64(64)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/jpeg")
-		w.Header().Set("Content-Length", strconv.FormatInt(int64(urlfetch.MaxBytes)+1, 10))
 		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		// Write cap+1 bytes so the LimitReader overshoots by exactly 1.
+		payload := make([]byte, cap+1)
+		for i := range payload {
+			payload[i] = 0xFF
+		}
+		w.Write(payload)
 	}))
 	defer srv.Close()
 
 	dest := t.TempDir()
 	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/big.jpg", dest, "/", nil)
+		srv.URL+"/over.jpg", dest, "/", cap, nil)
 	if ferr == nil || ferr.Code != "too_large" {
 		t.Fatalf("got %v, want too_large", ferr)
 	}
@@ -224,7 +256,7 @@ func TestFetch_UnsupportedContentType(t *testing.T) {
 
 	dest := t.TempDir()
 	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/page.html", dest, "/", nil)
+		srv.URL+"/page.html", dest, "/", testMaxBytes, nil)
 	if ferr == nil || ferr.Code != "unsupported_content_type" {
 		t.Fatalf("got %v, want unsupported_content_type", ferr)
 	}
@@ -238,7 +270,7 @@ func TestFetch_ExtensionMismatch_Replaced(t *testing.T) {
 
 	dest := t.TempDir()
 	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/cat.jpg", dest, "/", nil)
+		srv.URL+"/cat.jpg", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
@@ -257,7 +289,7 @@ func TestFetch_NoExtensionInURL(t *testing.T) {
 
 	dest := t.TempDir()
 	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/photo", dest, "/", nil)
+		srv.URL+"/photo", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
@@ -277,7 +309,7 @@ func TestFetch_ExtensionEquivalent_NoWarning(t *testing.T) {
 
 	dest := t.TempDir()
 	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/photo.jpeg", dest, "/", nil)
+		srv.URL+"/photo.jpeg", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
@@ -299,7 +331,7 @@ func TestFetch_RedirectCap(t *testing.T) {
 
 	dest := t.TempDir()
 	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/start", dest, "/", nil)
+		srv.URL+"/start", dest, "/", testMaxBytes, nil)
 	if ferr == nil || ferr.Code != "too_many_redirects" {
 		t.Fatalf("got %v, want too_many_redirects", ferr)
 	}
@@ -313,7 +345,7 @@ func TestFetch_HTTP404(t *testing.T) {
 
 	dest := t.TempDir()
 	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/missing.jpg", dest, "/", nil)
+		srv.URL+"/missing.jpg", dest, "/", testMaxBytes, nil)
 	if ferr == nil || ferr.Code != "http_error" {
 		t.Fatalf("got %v, want http_error", ferr)
 	}
@@ -327,7 +359,7 @@ func TestFetch_FilenameSanitize_DotDot(t *testing.T) {
 
 	dest := t.TempDir()
 	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/a/..", dest, "/", nil)
+		srv.URL+"/a/..", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
@@ -352,7 +384,7 @@ func TestFetch_Collision_RenamesUnique(t *testing.T) {
 	}
 
 	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/photo.jpg", dest, "/", nil)
+		srv.URL+"/photo.jpg", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
@@ -376,7 +408,7 @@ func TestFetch_TempFileCleaned_OnRejection(t *testing.T) {
 
 	dest := t.TempDir()
 	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/x.txt", dest, "/", nil)
+		srv.URL+"/x.txt", dest, "/", testMaxBytes, nil)
 	if ferr == nil {
 		t.Fatal("expected failure")
 	}
@@ -392,7 +424,7 @@ func TestFetch_ExtensionReplaced_FromNonImageExt(t *testing.T) {
 
 	dest := t.TempDir()
 	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/blob.bin", dest, "/", nil)
+		srv.URL+"/blob.bin", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
@@ -418,7 +450,7 @@ func TestFetch_Start_Called_WithNameTotalType(t *testing.T) {
 	}
 	dest := t.TempDir()
 	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/clip.mp4", dest, "/", cb)
+		srv.URL+"/clip.mp4", dest, "/", testMaxBytes, cb)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
@@ -446,7 +478,7 @@ func TestFetch_Progress_Emitted_ForLargePayload(t *testing.T) {
 
 	dest := t.TempDir()
 	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/big.jpg", dest, "/", cb)
+		srv.URL+"/big.jpg", dest, "/", testMaxBytes, cb)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
@@ -479,7 +511,7 @@ func TestFetch_Progress_NotEmitted_ForTinyPayload(t *testing.T) {
 
 	dest := t.TempDir()
 	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/tiny.jpg", dest, "/", cb)
+		srv.URL+"/tiny.jpg", dest, "/", testMaxBytes, cb)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
@@ -497,11 +529,16 @@ func TestFetch_Progress_NilCallback_OK(t *testing.T) {
 	dest := t.TempDir()
 	// Explicit zero-value Callbacks — both fields nil.
 	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
-		srv.URL+"/any.jpg", dest, "/", &urlfetch.Callbacks{})
+		srv.URL+"/any.jpg", dest, "/", testMaxBytes, &urlfetch.Callbacks{})
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
 }
+
+// testMaxBytes is a generous per-test cap — 4 GiB is bigger than any fixture
+// a unit test generates, so call sites that are not specifically exercising
+// the cap enforcement path never trip on it by accident.
+const testMaxBytes = int64(4) << 30
 
 // assertNoLeftovers fails the test if any file or .urlimport-*.tmp remains in dir.
 func assertNoLeftovers(t *testing.T, dir string) {

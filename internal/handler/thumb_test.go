@@ -54,7 +54,7 @@ func makePNGFile(t *testing.T, path string) {
 func TestThumb(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	t.Run("unsupported file type returns 400", func(t *testing.T) {
 		os.WriteFile(filepath.Join(root, "doc.txt"), []byte("text"), 0644)

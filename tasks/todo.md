@@ -119,7 +119,7 @@
 
 ## Phase 17 — 다운로드 설정 UI (`feature/download-settings`) — spec [`SPEC.md §2.7`](../SPEC.md)
 - [x] S1: `internal/settings` 패키지 — `Store` + `Snapshot`/`Update` + `Validate`/`RangeError` + atomic write (temp+fsync+rename) + 기본값(10 GiB / 30 분) fallback + 8개 테스트(Default·Validate 8 subcase·Missing file·Corrupt JSON·Out-of-range on disk·RoundTrip·RejectsOutOfRange·AtomicWriteLeavesNoTmp)
-- [ ] S2: `urlfetch` 하드코드 상수 제거 — `MaxBytes`/`TotalTimeout` 상수 삭제, `Fetch(..., maxBytes)` 시그니처, `missing_content_length` 거부 제거, `Handler.settings` 필드 + `Register` 4번째 인자, `handleImportURL` per-batch snapshot
+- [x] S2: `urlfetch` 하드코드 상수 제거 — `MaxBytes`/`TotalTimeout` 상수 삭제, `Fetch(..., maxBytes)` 시그니처, `missing_content_length` 거부 제거(런타임 카운터로 대체), `NewClient` `Timeout` 제거(ctx로 대체), `fetchHLS`/`runHLSRemux`에 maxBytes 전달, `Handler.settings` 필드 + `settingsSnapshot()` 헬퍼, `Register(mux, dataDir, webDir, store)` 4번째 인자, `handleImportURL`에서 per-batch snapshot → `fctx=WithTimeout(perURLTimeout)` + `Fetch(..., maxBytes, cb)`, 테스트 갱신(`testMaxBytes`, `TestFetch_NoContentLength_Succeeds`, `TestFetch_NoContentLength_RuntimeCap`, Register 콜 사이트 벌크 업데이트)
 - [ ] S3: `/api/settings` 핸들러 — `GET`/`PATCH` + `DisallowUnknownFields` + `RangeError` → `400 out_of_range` + `500 write_failed` + 테스트 8개
 - [ ] S4: 프론트엔드 — 헤더 `⚙` 버튼 + `#settings-modal` (MiB/분 input + GiB helper) + `app.js?v=16`
 - [ ] S5: 수동 E2E 검증 — plan.md Phase 17 S5의 10개 시나리오

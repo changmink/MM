@@ -187,7 +187,7 @@ func runHLSRemux(ctx context.Context, variantURL, tmpPath string, cb *Callbacks,
 	// ffmpeg would otherwise follow from inside the playlist — essential
 	// defense against SSRF/LFI via a hostile master or media playlist.
 	// -rw_timeout bounds per-I/O read/write wait (microseconds) so a
-	// slow-loris origin cannot burn the whole TotalTimeout budget by
+	// slow-loris origin cannot burn the whole per-URL timeout budget by
 	// feeding the segment connection at one byte/sec.
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-hide_banner", "-loglevel", "error",
@@ -259,6 +259,7 @@ func fetchHLS(
 	parsed *url.URL,
 	rawURL, destDir, relDir string,
 	warnings []string,
+	maxBytes int64,
 	cb *Callbacks,
 ) (*Result, *FetchError) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, hlsMaxPlaylistBytes+1))
@@ -308,7 +309,7 @@ func fetchHLS(
 		}
 	}()
 
-	if err := runHLSRemux(ctx, variantURL.String(), tmpPath, cb, MaxBytes); err != nil {
+	if err := runHLSRemux(ctx, variantURL.String(), tmpPath, cb, maxBytes); err != nil {
 		return nil, classifyHLSRemuxError(err)
 	}
 

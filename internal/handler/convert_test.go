@@ -57,7 +57,7 @@ func findEventFor(events []map[string]any, phase string, index int) map[string]a
 func TestHandleConvert_MethodNotAllowed(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/convert", nil)
 	rw := httptest.NewRecorder()
@@ -71,7 +71,7 @@ func TestHandleConvert_MethodNotAllowed(t *testing.T) {
 func TestHandleConvert_InvalidJSON(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/convert", strings.NewReader("{not-json"))
 	req.Header.Set("Content-Type", "application/json")
@@ -86,7 +86,7 @@ func TestHandleConvert_InvalidJSON(t *testing.T) {
 func TestHandleConvert_NoPaths(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postConvert(t, mux, []string{}, false)
 	if rw.Code != http.StatusBadRequest {
@@ -100,7 +100,7 @@ func TestHandleConvert_NoPaths(t *testing.T) {
 func TestHandleConvert_TooManyPaths(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	paths := make([]string, 51)
 	for i := range paths {
@@ -118,7 +118,7 @@ func TestHandleConvert_TooManyPaths(t *testing.T) {
 func TestHandleConvert_PathTraversal(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postConvert(t, mux, []string{"../../etc/passwd.ts"}, false)
 	if rw.Code != http.StatusOK {
@@ -137,7 +137,7 @@ func TestHandleConvert_PathTraversal(t *testing.T) {
 func TestHandleConvert_NotFound(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postConvert(t, mux, []string{"/ghost.ts"}, false)
 	events := parseSSEEvents(t, rw.Body.String())
@@ -155,7 +155,7 @@ func TestHandleConvert_NotAFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postConvert(t, mux, []string{"/clip.ts"}, false)
 	events := parseSSEEvents(t, rw.Body.String())
@@ -172,7 +172,7 @@ func TestHandleConvert_NotTS(t *testing.T) {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postConvert(t, mux, []string{"/video.mp4"}, false)
 	events := parseSSEEvents(t, rw.Body.String())
@@ -193,7 +193,7 @@ func TestHandleConvert_AlreadyExists(t *testing.T) {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postConvert(t, mux, []string{"/clip.ts"}, false)
 	events := parseSSEEvents(t, rw.Body.String())
@@ -210,7 +210,7 @@ func TestHandleConvert_FFmpegMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postConvert(t, mux, []string{"/clip.ts"}, false)
 	events := parseSSEEvents(t, rw.Body.String())
@@ -225,7 +225,7 @@ func TestHandleConvert_Success(t *testing.T) {
 	root := t.TempDir()
 	ts := makeTestTS(t, root)
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postConvert(t, mux, []string{"/" + filepath.Base(ts)}, false)
 	events := parseSSEEvents(t, rw.Body.String())
@@ -270,7 +270,7 @@ func TestHandleConvert_CaseInsensitiveTS(t *testing.T) {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postConvert(t, mux, []string{"/CLIP.TS"}, false)
 	events := parseSSEEvents(t, rw.Body.String())
@@ -308,7 +308,7 @@ func TestHandleConvert_DeleteOriginal(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postConvert(t, mux, []string{"/" + name}, true)
 	events := parseSSEEvents(t, rw.Body.String())
@@ -336,7 +336,7 @@ func TestHandleConvert_BatchSequential(t *testing.T) {
 	_ = makeTestTS(t, root)
 	_ = makeTestTS(t, root, "clip2.ts")
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postConvert(t, mux, []string{"/clip.ts", "/clip2.ts"}, false)
 	events := parseSSEEvents(t, rw.Body.String())
@@ -380,7 +380,7 @@ func TestHandleConvert_PartialFailure(t *testing.T) {
 	root := t.TempDir()
 	ts := makeTestTS(t, root)
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postConvert(t, mux, []string{"/" + filepath.Base(ts), "/missing.ts"}, false)
 	events := parseSSEEvents(t, rw.Body.String())
@@ -409,7 +409,7 @@ func TestHandleConvert_ContextCancel(t *testing.T) {
 	root := t.TempDir()
 	ts := makeTestTS(t, root)
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	body, _ := json.Marshal(map[string]any{"paths": []string{"/" + filepath.Base(ts)}})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -446,7 +446,7 @@ func TestHandleConvert_SSEHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	rw := postConvert(t, mux, []string{"/clip.ts"}, false)
 	if rw.Code != http.StatusOK {

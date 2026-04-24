@@ -50,7 +50,7 @@ func TestStream(t *testing.T) {
 	os.WriteFile(filepath.Join(root, "video.mp4"), []byte("fake mp4 data"), 0644)
 
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	t.Run("stream existing file", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/stream?path=/video.mp4", nil)
@@ -136,7 +136,7 @@ func TestStream(t *testing.T) {
 func TestStreamTSCached(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	tsPath := makeTestTS(t, root)
 	name := filepath.Base(tsPath)

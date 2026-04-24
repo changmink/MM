@@ -80,7 +80,7 @@ func TestRunHLSRemux_Success(t *testing.T) {
 	outDir := t.TempDir()
 	tmpPath := filepath.Join(outDir, "out.mp4")
 
-	err := runHLSRemux(context.Background(), srv.URL+"/"+playlistName, tmpPath, nil, MaxBytes)
+	err := runHLSRemux(context.Background(), srv.URL+"/"+playlistName, tmpPath, nil, testMaxBytes)
 	if err != nil {
 		t.Fatalf("runHLSRemux: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestRunHLSRemux_ContextCancel(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err = runHLSRemux(ctx, srv.URL+"/playlist.m3u8", tmpPath, nil, MaxBytes)
+		err = runHLSRemux(ctx, srv.URL+"/playlist.m3u8", tmpPath, nil, testMaxBytes)
 	}()
 
 	// Block until ffmpeg's request for the segment actually lands, so the
@@ -290,7 +290,7 @@ func TestRunHLSRemux_ExitError(t *testing.T) {
 	outDir := t.TempDir()
 	tmpPath := filepath.Join(outDir, "out.mp4")
 
-	err := runHLSRemux(context.Background(), srv.URL+"/does-not-exist.m3u8", tmpPath, nil, MaxBytes)
+	err := runHLSRemux(context.Background(), srv.URL+"/does-not-exist.m3u8", tmpPath, nil, testMaxBytes)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}

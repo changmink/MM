@@ -23,7 +23,7 @@ func TestBrowse(t *testing.T) {
 	os.MkdirAll(filepath.Join(root, ".thumb"), 0755) // 숨겨져야 함
 
 	mux := http.NewServeMux()
-	Register(mux, root, root)
+	Register(mux, root, root, nil)
 
 	t.Run("root listing", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/browse?path=/", nil)
@@ -147,7 +147,7 @@ func TestBrowse(t *testing.T) {
 		os.WriteFile(filepath.Join(r2, "orphan.mp4"), []byte("vid"), 0644)
 
 		mux2 := http.NewServeMux()
-		Register(mux2, r2, r2)
+		Register(mux2, r2, r2, nil)
 
 		req := httptest.NewRequest("GET", "/api/browse?path=/", nil)
 		w := httptest.NewRecorder()
