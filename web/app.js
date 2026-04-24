@@ -641,15 +641,18 @@ function showFolderError(msg) {
 }
 
 // ── URL Import ────────────────────────────────────────────────────────────────
+// Labels intentionally omit specific byte/time limits because those are
+// configurable at runtime via /api/settings — hardcoding numbers here made
+// the UI lie when the user had bumped the cap or timeout.
 const URL_ERROR_LABELS = {
   missing_content_length: 'Content-Length 헤더 없음',
-  too_large: '2GB 초과',
+  too_large: '크기 상한 초과',
   unsupported_content_type: '지원하지 않는 미디어 타입',
   invalid_scheme: '지원하지 않는 스킴',
   invalid_url: '잘못된 URL',
   http_error: 'HTTP 응답 에러',
   connect_timeout: '연결 타임아웃',
-  download_timeout: '다운로드 타임아웃 (10분)',
+  download_timeout: '다운로드 타임아웃',
   tls_error: 'TLS 검증 실패',
   too_many_redirects: '리다이렉트 과다',
   network_error: '네트워크 오류',
@@ -661,6 +664,7 @@ const URL_ERROR_LABELS = {
 
 let urlSubmitting = false;
 let urlAnySucceeded = false;
+let urlAbort = null;
 
 urlImportBtn.addEventListener('click', openURLModal);
 urlCancelBtn.addEventListener('click', closeURLModal);
@@ -685,6 +689,11 @@ function openURLModal() {
 }
 
 function closeURLModal() {
+  if (urlSubmitting && urlAbort) {
+    // Client disconnect flows to the handler as r.Context() cancel → backend
+    // stops the current Fetch and skips remaining URLs in the batch.
+    urlAbort.abort();
+  }
   urlModal.classList.add('hidden');
   if (urlAnySucceeded) {
     urlAnySucceeded = false;
@@ -719,12 +728,14 @@ async function submitURLImport() {
   urlSubmitting = true;
   urlConfirmBtn.disabled = true;
   urlConfirmBtn.textContent = '가져오는 중...';
+  urlAbort = new AbortController();
 
   try {
     const res = await fetch('/api/import-url?path=' + encodeURIComponent(currentPath), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
       body: JSON.stringify({ urls }),
+      signal: urlAbort.signal,
     });
     if (!res.ok) {
       let msg = '';
@@ -736,9 +747,12 @@ async function submitURLImport() {
     }
     await consumeSSE(res, handleSSEEvent);
   } catch (e) {
-    showURLError('요청 실패: ' + e.message);
+    if (e.name !== 'AbortError') {
+      showURLError('요청 실패: ' + e.message);
+    }
   } finally {
     urlSubmitting = false;
+    urlAbort = null;
     urlConfirmBtn.disabled = false;
     urlConfirmBtn.textContent = '가져오기';
   }

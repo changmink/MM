@@ -123,3 +123,11 @@
 - [x] S3: `handleSettings` (`GET`/`PATCH` `/api/settings`) — GET은 `Snapshot()` JSON, PATCH는 `DisallowUnknownFields` + `Update` → `RangeError`면 `400 {"error":"out_of_range","field":"..."}`, 그 외 실패는 `500 write_failed`, store nil(test harness)이면 `500 settings disabled`. 테스트 8개 (GET defaults, PATCH round-trip, Out-of-range 4 subcase, Malformed JSON, Unknown field, LandsInImportURL, MethodNotAllowed 3 subcase)
 - [x] S4: 프론트엔드 — `index.html`에 헤더 `⚙` 버튼 + `#settings-modal` (MiB number input, 분 number input, `.settings-hint` GiB 환산, error p, 저장/취소), URL 모달 hint를 "용량/타임아웃은 ⚙ 설정에서 조정"으로 교체, `app.js?v=16` bump, `style.css` `.settings-btn`·`.settings-field`·`.settings-label`·`.settings-hint` 규칙, `app.js`에 DOM refs 8개 + `SETTINGS_MAX_MIB_MIN/MAX`·`SETTINGS_TIMEOUT_MIN/MAX`·`SETTINGS_FIELD_LABELS` + `openSettingsModal`/`closeSettingsModal`/`updateSettingsMaxHint`/`submitSettings`/`showSettingsError`, 키보드 Escape/Enter + click-outside 지원
 - [x] S5: 수동 E2E 검증 — plan.md Phase 17 S5의 10개 시나리오 통과 (docker compose up --build 후 브라우저 확인 완료)
+
+## Phase 18 — 리뷰 후속 (review fixes, `feature/review-fixes`)
+- [x] F-4 (high): URL import AbortController — `submitURLImport`에서 `urlAbort = new AbortController()` 생성 + fetch에 `signal` 전달, `closeURLModal`에서 submitting 상태면 `urlAbort.abort()`, catch에서 `AbortError` 무시 + finally에서 `urlAbort = null`. `app.js?v=18` bump.
+- [x] F-5 (high): URL error label에서 하드코드 수치 제거 — `too_large: '크기 상한 초과'`, `download_timeout: '다운로드 타임아웃'`로 변경.
+- [x] F-6 (medium): `tree.go` 에러 로깅 — walkTree subdir err 및 dirHasSubdirs read err 지점에 `slog.Debug`, `dirHasSubdirs`는 io.EOF만 정상 종료 나머지는 err 반환. `log/slog`·`io` import 추가. 기존 Tree 테스트 7 + ErrorCases 7 subcase 전부 통과.
+
+### 하드닝 대기 (record-only)
+- [ ] H-SYMLINK: `media.SafePath` 심볼릭 링크 방어 — 현재 `filepath.Join` 순수 문자열 검사라 `/data` 내부에 symlink가 심어지면 루트 탈출 가능. `filepath.EvalSymlinks`를 SafePath 말미에 추가하고 결과도 다시 prefix 검증. 위협 모델(단일 사용자 LAN, upload는 일반 파일만 생성)상 실제 공격 벡터는 좁지만 심층 방어 차원에서 개선 가치 있음. 별도 phase로 분리 — read-only 경로(browse/tree/stream/thumb)부터 적용, upload/rename 후 재검증 여부 결정 필요.
