@@ -507,10 +507,10 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   white-space: nowrap;
   transition: background-color 0.15s;
 }
-.url-badge:hover { background: rgba(79, 142, 247, 0.15); }
+.url-badge:hover { background: color-mix(in srgb, var(--accent) 15%, transparent); }
 .url-badge.hidden { display: none; }
 .url-badge.has-error { border-color: var(--danger); color: var(--danger); }
-.url-badge.has-error:hover { background: rgba(224, 85, 85, 0.15); }
+.url-badge.has-error:hover { background: color-mix(in srgb, var(--danger) 15%, transparent); }
 
 /* Settings modal — one input per row plus a helper line under the byte input */
 .settings-field { display: block; margin: 12px 0; }

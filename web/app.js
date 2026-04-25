@@ -663,12 +663,16 @@ const URL_ERROR_LABELS = {
   hls_playlist_too_large: 'HLS 플레이리스트 크기 초과',
 };
 
-// Each batch captures one in-flight POST /api/import-url. B4 allows
-// several batches to coexist: while one is running, reopening the modal
-// turns the confirm button into "새 배치 추가" and additional submits
-// append a new batch below the existing rows. The server serializes them
-// via `importSem`, emitting a `queued` SSE event we surface as a
-// "waiting" row state.
+// Each batch captures one in-flight POST /api/import-url. Several batches
+// can coexist: while one is running, reopening the modal turns the confirm
+// button into "새 배치 추가" and additional submits append a new batch
+// below the existing rows. The server serializes them via `importSem`,
+// emitting a `queued` SSE event we surface as a "waiting" row state.
+//
+// We deliberately do NOT wire up an AbortController per batch — closing
+// the modal must keep the fetch running so the user can reopen and still
+// see progress. Browser-initiated fetch aborts (tab close / navigation)
+// flow to the server as `r.Context()` cancel.
 const urlBatches = [];
 let urlBatchSeq = 0;
 // True only during the short POST setup window of an in-flight submit —
@@ -854,7 +858,6 @@ async function submitURLImport() {
 
   const batch = {
     id: ++urlBatchSeq,
-    abort: new AbortController(),
     rowEls: new Map(),
     succeeded: 0,
     failed: 0,
@@ -889,7 +892,6 @@ async function submitURLImport() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
       body: JSON.stringify({ urls }),
-      signal: batch.abort.signal,
     });
     if (!res.ok) {
       let msg = '';
@@ -921,6 +923,10 @@ async function submitURLImport() {
     updateConfirmButton();
     await consumeSSE(res, ev => handleSSEEvent(batch, ev));
   } catch (e) {
+    // AbortError can still arrive on browser-initiated cancels (tab
+    // navigation) even though we no longer wire up an AbortController —
+    // the document's lifecycle signal aborts pending fetches. Swallow
+    // those silently; the page is going away anyway.
     if (e.name !== 'AbortError') {
       showURLError('요청 실패: ' + e.message);
     }
