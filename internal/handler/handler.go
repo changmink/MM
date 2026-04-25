@@ -73,6 +73,8 @@ func Register(mux *http.ServeMux, dataDir, webDir string, settingsStore *setting
 	mux.HandleFunc("/api/file", h.handleFile)
 	mux.HandleFunc("/api/folder", h.handleFolder)
 	mux.HandleFunc("/api/import-url", h.handleImportURL)
+	mux.HandleFunc("/api/import-url/jobs", h.handleJobsRoot)
+	mux.HandleFunc("/api/import-url/jobs/", h.handleJobsByID)
 	mux.HandleFunc("/api/convert", h.handleConvert)
 	mux.HandleFunc("/api/settings", h.handleSettings)
 
