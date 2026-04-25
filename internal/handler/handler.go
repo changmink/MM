@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -17,21 +18,44 @@ type Handler struct {
 	thumbPool    *thumb.Pool
 	urlClient    *http.Client
 	settings     *settings.Store
-	streamLocks  sync.Map      // cachePath -> *sync.Mutex; serializes ffmpeg per cache key
-	convertLocks sync.Map      // absSrcPath -> *sync.Mutex; serializes TS → MP4 per source
-	importSem    chan struct{} // size-1 semaphore; serializes URL import batches process-wide
+	serverCtx    context.Context // lifetime of the server process; J3 derives the import-job registry from this
+	streamLocks  sync.Map        // cachePath -> *sync.Mutex; serializes ffmpeg per cache key
+	convertLocks sync.Map        // absSrcPath -> *sync.Mutex; serializes TS → MP4 per source
+	importSem    chan struct{}   // size-1 semaphore; serializes URL import batches process-wide
+}
+
+// Option configures a Handler. Use with Register so tests can keep their
+// terse 4-arg call sites while production wiring (main.go) opts in to extras
+// like a server-lifetime context for graceful shutdown.
+type Option func(*Handler)
+
+// WithServerCtx attaches a server-lifetime context. Cancelling it (typically
+// from a SIGINT/SIGTERM handler) propagates to long-lived per-handler state
+// added in later phases (J3+: import job registry).
+func WithServerCtx(ctx context.Context) Option {
+	return func(h *Handler) {
+		if ctx == nil {
+			return
+		}
+		h.serverCtx = ctx
+	}
 }
 
 // Register wires all API routes. settingsStore may be nil in tests that do
 // not exercise URL import or /api/settings — callers that pass nil get the
-// hard-coded Default() values from settings.
-func Register(mux *http.ServeMux, dataDir, webDir string, settingsStore *settings.Store) *Handler {
+// hard-coded Default() values from settings. Pass WithServerCtx in production
+// so graceful shutdown can cancel long-lived background work.
+func Register(mux *http.ServeMux, dataDir, webDir string, settingsStore *settings.Store, opts ...Option) *Handler {
 	h := &Handler{
 		dataDir:   dataDir,
 		thumbPool: thumb.NewPool(runtime.NumCPU()),
 		urlClient: urlfetch.NewClient(),
 		settings:  settingsStore,
+		serverCtx: context.Background(),
 		importSem: make(chan struct{}, 1),
+	}
+	for _, opt := range opts {
+		opt(h)
 	}
 
 	mux.HandleFunc("/api/browse", h.handleBrowse)
