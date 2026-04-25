@@ -346,6 +346,18 @@ func (h *Handler) fetchOneJob(job *importjob.Job, index int, u, destAbs, relDir 
 	job.RegisterURLCancel(index, cancelURL)
 	defer job.UnregisterURLCancel(index)
 
+	// Race-close: a CancelOne call may have flipped this URL to "cancelled"
+	// (CancelKindPending) between the runImportJob loop's URLStatus check
+	// and the RegisterURLCancel above. CancelOne under j.mu observes our
+	// registered entry only AFTER this point, so re-checking status here
+	// — also under j.mu via URLStatus — guarantees: either we see the
+	// cancellation now and skip the fetch, or CancelOne saw our entry and
+	// went down the CancelKindRunning path (firing urlCtx). Either way the
+	// URL receives exactly one terminal accounting.
+	if job.URLStatus(index) == "cancelled" {
+		return fetchCancelled
+	}
+
 	progressCh := make(chan int64, progressChanBuffer)
 	writerDone := make(chan struct{})
 	go func() {

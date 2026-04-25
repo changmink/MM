@@ -195,7 +195,9 @@ func TestJob_Subscribe_AfterTerminal(t *testing.T) {
 	}
 }
 
-func TestJob_CancelURL_OnlyAffectsTarget(t *testing.T) {
+// TestJob_CancelOne_Running: a registered per-URL cancel fires only the
+// targeted index's context and reports CancelKindRunning to the caller.
+func TestJob_CancelOne_Running(t *testing.T) {
 	job := newTestJob(t, "a", "b", "c")
 
 	ctxs := make([]context.Context, 3)
@@ -206,27 +208,88 @@ func TestJob_CancelURL_OnlyAffectsTarget(t *testing.T) {
 		t.Cleanup(cancel)
 	}
 
-	if !job.CancelURL(1) {
-		t.Fatal("CancelURL(1) returned false, want true")
+	url, kind := job.CancelOne(1)
+	if kind != CancelKindRunning {
+		t.Fatalf("kind = %v, want CancelKindRunning", kind)
+	}
+	if url == "" {
+		t.Errorf("URL not returned for running cancel")
 	}
 
 	select {
 	case <-ctxs[1].Done():
 	case <-time.After(200 * time.Millisecond):
-		t.Fatal("ctx 1 not cancelled after CancelURL(1)")
+		t.Fatal("ctx 1 not cancelled after CancelOne(1)")
 	}
-
 	for _, idx := range []int{0, 2} {
 		if err := ctxs[idx].Err(); err != nil {
 			t.Errorf("ctx %d cancelled unexpectedly: %v", idx, err)
 		}
 	}
+}
 
-	job.UnregisterURLCancel(1)
-	if job.CancelURL(1) {
-		t.Errorf("CancelURL(1) returned true after Unregister")
+// TestJob_CancelOne_Pending: a still-pending URL (no per-URL cancel
+// registered, status == "pending") is atomically marked cancelled and the
+// caller is told it owns the lifecycle event publication.
+func TestJob_CancelOne_Pending(t *testing.T) {
+	job := newTestJob(t, "https://a", "https://b")
+
+	url, kind := job.CancelOne(0)
+	if kind != CancelKindPending {
+		t.Fatalf("kind = %v, want CancelKindPending", kind)
 	}
-	if job.CancelURL(99) {
-		t.Errorf("CancelURL(99) returned true for unknown index")
+	if url != "https://a" {
+		t.Errorf("URL = %q, want https://a", url)
+	}
+	snap := job.Snapshot()
+	if snap.URLs[0].Status != "cancelled" || snap.URLs[0].Error != "cancelled" {
+		t.Errorf("urls[0] = %+v, want status+error cancelled", snap.URLs[0])
+	}
+	if snap.URLs[1].Status != "pending" {
+		t.Errorf("urls[1] status = %q, want pending (untouched)", snap.URLs[1].Status)
+	}
+}
+
+// TestJob_CancelOne_Terminal: a URL that has already finished cannot be
+// cancelled — caller responds 409 based on CancelKindNone.
+func TestJob_CancelOne_Terminal(t *testing.T) {
+	job := newTestJob(t, "a")
+	job.UpdateURL(0, func(s *URLState) { s.Status = "done" })
+
+	if _, kind := job.CancelOne(0); kind != CancelKindNone {
+		t.Errorf("kind for terminal URL = %v, want CancelKindNone", kind)
+	}
+}
+
+// TestJob_CancelOne_OutOfRange: defensive index bounds check returns
+// CancelKindNone, never panics.
+func TestJob_CancelOne_OutOfRange(t *testing.T) {
+	job := newTestJob(t, "a")
+	if _, kind := job.CancelOne(-1); kind != CancelKindNone {
+		t.Errorf("kind for -1 = %v, want CancelKindNone", kind)
+	}
+	if _, kind := job.CancelOne(99); kind != CancelKindNone {
+		t.Errorf("kind for 99 = %v, want CancelKindNone", kind)
+	}
+}
+
+// TestJob_CancelOne_AtomicityCloseRace: even if a per-URL cancel is
+// registered AFTER an attempted CancelOne but BEFORE a follow-up call, the
+// next CancelOne sees the registered entry — confirming the registered
+// branch always wins when both signals coexist.
+func TestJob_CancelOne_PreferRunningOverPending(t *testing.T) {
+	job := newTestJob(t, "a")
+	_, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	job.RegisterURLCancel(0, cancel)
+	// Status still pending, but cancel is registered → CancelKindRunning
+	// must win so the worker's existing cancellation path is the single
+	// source of the error event.
+	url, kind := job.CancelOne(0)
+	if kind != CancelKindRunning {
+		t.Fatalf("kind = %v, want CancelKindRunning (registered cancel takes precedence)", kind)
+	}
+	if url == "" {
+		t.Errorf("URL not returned")
 	}
 }

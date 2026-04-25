@@ -167,31 +167,26 @@ func (h *Handler) handleCancelJob(w http.ResponseWriter, r *http.Request, jobID 
 		return
 	}
 
-	// CancelURL covers the running case: it returns true if a per-URL
-	// cancel func was registered (i.e. fetchOneJob is currently the owner
-	// of this index) and fires it. The worker handles the rest.
-	if job.CancelURL(idx) {
+	// Atomic decision: registered cancel takes precedence (worker emits the
+	// error frame); pending → mark + handler emits the error frame; else
+	// terminal → 409. Doing both checks under one lock closes the previous
+	// race window where the worker could RegisterURLCancel between the two
+	// separate handler-side checks.
+	url, kind := job.CancelOne(idx)
+	switch kind {
+	case importjob.CancelKindRunning:
+		// Worker observes ctx.Done() and emits error("cancelled") via
+		// fetchOneJob's existing cancellation path — handler stays silent.
 		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	// Not currently in flight. Inspect status to distinguish pending (needs
-	// pre-cancellation marking) from a URL already past terminal (409).
-	switch job.URLStatus(idx) {
-	case "pending":
-		state := job.Snapshot().URLs[idx]
-		job.UpdateURL(idx, func(s *importjob.URLState) {
-			s.Status = "cancelled"
-			s.Error = "cancelled"
-		})
+	case importjob.CancelKindPending:
+		// Worker bypasses this index on its next URLStatus check; we own
+		// the lifecycle event for the row.
 		job.Publish(mustEvent("error", sseError{
-			Phase: "error", Index: idx, URL: state.URL, Error: "cancelled",
+			Phase: "error", Index: idx, URL: url, Error: "cancelled",
 		}))
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		// Either terminal (done/error/cancelled) or in the brief race window
-		// where status flipped past running before CancelURL ran. Either
-		// way the user should refresh — 409.
+		// Terminal or unknown — nothing to cancel.
 		writeError(w, r, http.StatusConflict, "url already finished", nil)
 	}
 }

@@ -298,16 +298,50 @@ func (j *Job) UnregisterURLCancel(idx int) {
 	delete(j.urlCancels, idx)
 }
 
-// CancelURL fires the per-URL cancel function for idx, returning true if one
-// was registered. Returns false if the URL is not currently in flight (either
-// not yet started or already finished and unregistered).
-func (j *Job) CancelURL(idx int) bool {
+// CancelKind classifies the outcome of a per-URL CancelOne attempt.
+type CancelKind int
+
+const (
+	// CancelKindNone — the URL is unknown (out of range) or already
+	// terminal. Caller should respond 409.
+	CancelKindNone CancelKind = iota
+	// CancelKindRunning — a per-URL cancel func was registered and has
+	// just been fired. The worker observes ctx.Done(), urlfetch returns a
+	// cancellation error, and fetchOneJob emits the lifecycle
+	// error("cancelled") frame. Caller MUST NOT publish another error
+	// event.
+	CancelKindRunning
+	// CancelKindPending — the URL was still pending (no per-URL cancel
+	// registered, status == "pending") and has been atomically marked
+	// cancelled. The worker's pre-fetch URLStatus check skips this index.
+	// Caller MUST publish error("cancelled") with the returned URL since
+	// the worker's lifecycle path is bypassed for this index.
+	CancelKindPending
+)
+
+// CancelOne atomically attempts to cancel URL idx. Both the registered-cancel
+// branch and the pending-mark branch run inside a single mutex acquisition,
+// closing the prior race window where a worker could RegisterURLCancel
+// between two separate handler calls (CancelURL vs MarkPendingCancelled).
+//
+// fetchOneJob still re-checks URLStatus immediately after RegisterURLCancel
+// so that a CancelKindPending decision made just BEFORE the worker entered
+// fetchOneJob is observed before any HTTP request fires.
+func (j *Job) CancelOne(idx int) (url string, kind CancelKind) {
 	j.mu.Lock()
-	cancel, ok := j.urlCancels[idx]
-	j.mu.Unlock()
-	if !ok {
-		return false
+	defer j.mu.Unlock()
+	if idx < 0 || idx >= len(j.urls) {
+		return "", CancelKindNone
 	}
-	cancel()
-	return true
+	if cancel, registered := j.urlCancels[idx]; registered {
+		cancel()
+		return j.urls[idx].URL, CancelKindRunning
+	}
+	s := &j.urls[idx]
+	if s.Status != "pending" {
+		return "", CancelKindNone
+	}
+	s.Status = "cancelled"
+	s.Error = "cancelled"
+	return s.URL, CancelKindPending
 }
