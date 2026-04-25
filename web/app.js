@@ -63,6 +63,7 @@ const urlSummary    = document.getElementById('url-summary');
 const urlResult     = document.getElementById('url-result');
 const urlCancelBtn  = document.getElementById('url-cancel-btn');
 const urlConfirmBtn = document.getElementById('url-confirm-btn');
+const urlClearFinishedBtn = document.getElementById('url-clear-finished-btn');
 const urlBadge     = document.getElementById('url-badge');
 const convertAllBtn       = document.getElementById('convert-all-btn');
 const convertModal        = document.getElementById('convert-modal');
@@ -661,6 +662,7 @@ const URL_ERROR_LABELS = {
   ffmpeg_error: 'HLS 리먹싱 실패',
   ffmpeg_missing: 'ffmpeg 미설치 (서버 설정 필요)',
   hls_playlist_too_large: 'HLS 플레이리스트 크기 초과',
+  cancelled: '취소됨',
 };
 
 // Each batch captures one in-flight POST /api/import-url. Several batches
@@ -696,6 +698,7 @@ function anyBatchSucceeded() {
 urlImportBtn.addEventListener('click', openURLModal);
 urlCancelBtn.addEventListener('click', closeURLModal);
 urlConfirmBtn.addEventListener('click', submitURLImport);
+urlClearFinishedBtn.addEventListener('click', dismissAllFinishedBatches);
 urlModal.addEventListener('click', e => { if (e.target === urlModal) closeURLModal(); });
 urlBadge.addEventListener('click', openURLModal);
 document.addEventListener('keydown', e => {
@@ -756,6 +759,12 @@ function closeURLModal() {
 }
 
 function updateURLBadge() {
+  // The "완료 항목 모두 지우기" button lives inside the modal — keep its
+  // visibility in lockstep with the registry so the user sees it as soon
+  // as a finished batch is available to dismiss.
+  const hasFinished = urlBatches.some(b => b.done);
+  urlClearFinishedBtn.classList.toggle('hidden', !hasFinished);
+
   const modalHidden = urlModal.classList.contains('hidden');
   const shouldShow = modalHidden && (anyBatchActive() || urlBadgeLinger);
   if (!shouldShow) {
@@ -863,19 +872,15 @@ async function submitURLImport() {
     failed: 0,
     total: urls.length,
     done: false,
+    headerEl: null,
   };
   urlBatches.push(batch);
 
-  if (appending) {
-    // Visual separator between the previous rows and the new batch. The
-    // label counts by registry position in the current round so users see
-    // "배치 2", "배치 3", ... regardless of the monotonic batch.id value.
-    const divider = document.createElement('div');
-    divider.className = 'url-batch-divider';
-    divider.dataset.batch = String(batch.id);
-    divider.textContent = `배치 ${urlBatches.length}`;
-    urlRows.appendChild(divider);
-  }
+  // Header carries the per-batch cancel/dismiss controls. For an appending
+  // batch we also surface the position label ("배치 2", "배치 3", ...) so
+  // the user can tell row groups apart; the very first batch in a fresh
+  // round shows just the controls without a label.
+  appendBatchHeader(batch, appending ? `배치 ${urlBatches.length}` : '');
 
   // Pre-create one pending row per URL so users see immediate feedback even
   // before the first SSE event arrives.
@@ -909,12 +914,9 @@ async function submitURLImport() {
         urlResult.classList.add('hidden');
       } else {
         // Other batches are still running above. Tear down this batch's
-        // DOM contributions only — pre-created rows and the divider —
+        // DOM contributions only — pre-created rows and the header —
         // so they don't linger as stuck pending placeholders.
-        for (const row of batch.rowEls.values()) row.remove();
-        const divider = urlRows.querySelector(
-          `.url-batch-divider[data-batch="${batch.id}"]`);
-        if (divider) divider.remove();
+        removeBatchRows(batch);
       }
       // Drop the batch from the registry — aggregate counters would
       // otherwise show a stuck 0/N entry in the badge.
@@ -947,6 +949,7 @@ async function submitURLImport() {
     if (sseOpened) finalizeOrphanRows(batch);
     batch.done = true;
     urlSubmittingNow = false;
+    updateBatchControls(batch);
     maybeFinalize();
     updateConfirmButton();
     updateURLBadge();
@@ -1008,9 +1011,15 @@ function ensureURLRow(batch, index, fallbackUrl) {
     <div class="url-row-head">
       <span class="url-row-name">${esc(fallbackUrl || '')}</span>
       <span class="url-row-status">대기 중</span>
+      <button class="url-row-cancel" type="button" aria-label="이 URL 취소" title="취소">✕</button>
     </div>
     <div class="url-progress-bar"><div class="url-progress-fill"></div></div>
   `;
+  // CSS hides this on terminal states; clicks before that fire a per-URL
+  // cancel against the server. We let SSE drive the visible state change so
+  // a network failure cleanly leaves the button intact for retry.
+  row.querySelector('.url-row-cancel')
+    .addEventListener('click', () => cancelURLAt(batch, index));
   urlRows.appendChild(row);
   batch.rowEls.set(index, row);
   return row;
@@ -1028,8 +1037,10 @@ function handleSSEEvent(batch, ev) {
       // First frame on POST responses — server hands us the jobId so a
       // refresh can rebind via GET /jobs/{id}/events. Restored batches
       // already have jobId from the bootstrap fetch and never see this
-      // phase.
+      // phase. Once we have jobId the per-batch cancel/dismiss controls
+      // become meaningful, so refresh their visibility.
       if (!batch.jobId) batch.jobId = ev.jobId;
+      updateBatchControls(batch);
       break;
     }
     case 'snapshot': {
@@ -1130,6 +1141,7 @@ function handleSSEEvent(batch, ev) {
         batch.eventSource.close();
         batch.eventSource = null;
         batch.done = true;
+        updateBatchControls(batch);
         maybeFinalize();
         updateURLBadge();
       }
@@ -1192,14 +1204,8 @@ function restoreJobBatch(jobSnap, isActive) {
   };
   urlBatches.push(batch);
 
-  // Visual separator with a synthetic "복원" tag instead of "배치 N" so the
-  // user can tell at a glance which rows are picked up from a prior tab vs
-  // freshly submitted in this session.
-  const divider = document.createElement('div');
-  divider.className = 'url-batch-divider';
-  divider.dataset.batch = String(batch.id);
-  divider.textContent = isActive ? `복원된 배치` : `이전 결과`;
-  urlRows.appendChild(divider);
+  // Synthetic tag distinguishes restored rows from freshly submitted ones.
+  appendBatchHeader(batch, isActive ? '복원된 배치' : '이전 결과');
 
   jobSnap.urls.forEach((u, i) => {
     const row = ensureURLRow(batch, i, u.url);
@@ -1266,13 +1272,141 @@ function applyJobSnapshotToBatch(batch, job) {
 }
 
 // removeBatchRows tears down every DOM contribution this batch made — the
-// per-URL rows and the divider. Used by the `removed` phase from J5.
+// per-URL rows and the header. Used by HTTP-error rollback, dismiss, and
+// the J5 removed phase handler.
 function removeBatchRows(batch) {
   for (const row of batch.rowEls.values()) row.remove();
   batch.rowEls.clear();
-  const divider = urlRows.querySelector(
-    `.url-batch-divider[data-batch="${batch.id}"]`);
-  if (divider) divider.remove();
+  if (batch.headerEl) {
+    batch.headerEl.remove();
+    batch.headerEl = null;
+  }
+}
+
+// appendBatchHeader creates the per-batch label + control bar and inserts
+// it ahead of the rows. Always called once per batch (POST or restored) so
+// the user has a consistent place to issue batch-level cancel / dismiss.
+function appendBatchHeader(batch, label) {
+  const header = document.createElement('div');
+  header.className = 'url-batch-header';
+  header.dataset.batch = String(batch.id);
+
+  const labelEl = document.createElement('span');
+  labelEl.className = 'url-batch-label';
+  labelEl.textContent = label || '';
+  header.appendChild(labelEl);
+
+  const actions = document.createElement('span');
+  actions.className = 'url-batch-actions';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'url-batch-cancel-all hidden';
+  cancelBtn.textContent = '전체 취소';
+  cancelBtn.addEventListener('click', () => cancelBatchAll(batch));
+  actions.appendChild(cancelBtn);
+
+  const dismissBtn = document.createElement('button');
+  dismissBtn.type = 'button';
+  dismissBtn.className = 'url-batch-dismiss hidden';
+  dismissBtn.textContent = '닫기';
+  dismissBtn.addEventListener('click', () => dismissBatch(batch));
+  actions.appendChild(dismissBtn);
+
+  header.appendChild(actions);
+  urlRows.appendChild(header);
+  batch.headerEl = header;
+  updateBatchControls(batch);
+}
+
+// updateBatchControls flips the cancel/dismiss buttons based on whether
+// the batch is still active. Called from header creation, summary, and
+// HTTP-error finalize paths so the visible state never lags reality.
+function updateBatchControls(batch) {
+  if (!batch.headerEl) return;
+  const cancelBtn = batch.headerEl.querySelector('.url-batch-cancel-all');
+  const dismissBtn = batch.headerEl.querySelector('.url-batch-dismiss');
+  // Without a server-issued jobId we have nothing to call — hide both
+  // controls. The POST flow lands jobId in `register`, so the gap is at
+  // most a single round-trip.
+  const hasJobId = !!batch.jobId;
+  cancelBtn.classList.toggle('hidden', batch.done || !hasJobId);
+  dismissBtn.classList.toggle('hidden', !batch.done || !hasJobId);
+}
+
+// cancelURLAt fires a per-URL cancel against the server. The visible row
+// state updates via the SSE error("cancelled") frame the worker emits in
+// response — keeping a single source of truth for state transitions.
+async function cancelURLAt(batch, index) {
+  if (!batch.jobId) return;
+  try {
+    await fetch(
+      '/api/import-url/jobs/' + encodeURIComponent(batch.jobId) +
+      '/cancel?index=' + encodeURIComponent(String(index)),
+      { method: 'POST' });
+  } catch (e) {
+    console.warn('cancel url failed', e);
+  }
+}
+
+async function cancelBatchAll(batch) {
+  if (!batch.jobId) return;
+  try {
+    await fetch(
+      '/api/import-url/jobs/' + encodeURIComponent(batch.jobId) + '/cancel',
+      { method: 'POST' });
+  } catch (e) {
+    console.warn('cancel batch failed', e);
+  }
+}
+
+async function dismissBatch(batch) {
+  if (!batch.jobId || !batch.done) return;
+  try {
+    const res = await fetch(
+      '/api/import-url/jobs/' + encodeURIComponent(batch.jobId),
+      { method: 'DELETE' });
+    if (!res.ok) return;
+  } catch (e) {
+    console.warn('dismiss failed', e);
+    return;
+  }
+  removeBatchRows(batch);
+  if (batch.eventSource) {
+    batch.eventSource.close();
+    batch.eventSource = null;
+  }
+  const idx = urlBatches.indexOf(batch);
+  if (idx !== -1) urlBatches.splice(idx, 1);
+  updateURLBadge();
+}
+
+async function dismissAllFinishedBatches() {
+  try {
+    const res = await fetch('/api/import-url/jobs?status=finished',
+      { method: 'DELETE' });
+    if (!res.ok) return;
+  } catch (e) {
+    console.warn('dismiss-all failed', e);
+    return;
+  }
+  // Server tore down every terminal job — mirror that locally. Active
+  // batches stay (they were already excluded by the filter).
+  const remaining = [];
+  for (const batch of urlBatches) {
+    if (batch.done) {
+      removeBatchRows(batch);
+      if (batch.eventSource) {
+        batch.eventSource.close();
+        batch.eventSource = null;
+      }
+      continue;
+    }
+    remaining.push(batch);
+  }
+  urlBatches.length = 0;
+  urlBatches.push(...remaining);
+  updateURLBadge();
 }
 
 // subscribeToJob opens an EventSource against /api/import-url/jobs/{id}/events

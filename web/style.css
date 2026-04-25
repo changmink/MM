@@ -634,10 +634,14 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .url-result.hidden { display: none; }
 
 .url-rows { display: flex; flex-direction: column; gap: 8px; }
-/* Divider inserted between successive batches when the user queues more
-   URLs before the current batch finishes. Purely visual — the row groups
-   themselves stay flat in the DOM, distinguished by `data-batch`. */
-.url-batch-divider {
+/* Per-batch header containing the optional position label ("배치 N") and
+   the cancel/dismiss control buttons. Always present so every batch — POST
+   or restored, single or stacked — has a consistent place to issue
+   batch-level actions. */
+.url-batch-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-top: 6px;
   padding-top: 6px;
   border-top: 1px dashed var(--border);
@@ -645,6 +649,51 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   font-size: 0.72rem;
   letter-spacing: 0.02em;
 }
+.url-batch-header:first-child {
+  border-top: none;
+  padding-top: 0;
+  margin-top: 0;
+}
+.url-batch-label { flex: 1; }
+.url-batch-actions { display: inline-flex; gap: 4px; }
+.url-batch-cancel-all,
+.url-batch-dismiss {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.url-batch-cancel-all:hover { color: var(--danger); border-color: var(--danger); }
+.url-batch-dismiss:hover    { color: var(--text); border-color: var(--text); }
+.url-row-cancel {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  margin-left: 4px;
+}
+.url-row-cancel:hover { color: var(--danger); }
+.url-row.status-done .url-row-cancel,
+.url-row.status-error .url-row-cancel {
+  display: none;
+}
+.modal-actions-spacer { flex: 1; }
+.btn-subtle {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 3px;
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.btn-subtle:hover { color: var(--text); border-color: var(--text); }
 .url-row {
   border: 1px solid var(--border);
   border-radius: 4px;
