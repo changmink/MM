@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"runtime"
 	"sync"
+	"time"
 
+	"github.com/chang/file_server/internal/importjob"
 	"github.com/chang/file_server/internal/settings"
 	"github.com/chang/file_server/internal/thumb"
 	"github.com/chang/file_server/internal/urlfetch"
@@ -18,10 +20,11 @@ type Handler struct {
 	thumbPool    *thumb.Pool
 	urlClient    *http.Client
 	settings     *settings.Store
-	serverCtx    context.Context // lifetime of the server process; J3 derives the import-job registry from this
-	streamLocks  sync.Map        // cachePath -> *sync.Mutex; serializes ffmpeg per cache key
-	convertLocks sync.Map        // absSrcPath -> *sync.Mutex; serializes TS → MP4 per source
-	importSem    chan struct{}   // size-1 semaphore; serializes URL import batches process-wide
+	serverCtx    context.Context     // lifetime of the server process; jobs derive their context from this
+	registry     *importjob.Registry // in-memory URL-import job state; survives request lifecycle
+	streamLocks  sync.Map            // cachePath -> *sync.Mutex; serializes ffmpeg per cache key
+	convertLocks sync.Map            // absSrcPath -> *sync.Mutex; serializes TS → MP4 per source
+	importSem    chan struct{}       // size-1 semaphore; serializes URL import batches process-wide
 }
 
 // Option configures a Handler. Use with Register so tests can keep their
@@ -57,6 +60,10 @@ func Register(mux *http.ServeMux, dataDir, webDir string, settingsStore *setting
 	for _, opt := range opts {
 		opt(h)
 	}
+	// Registry must be created after options apply so it inherits the
+	// (possibly overridden) serverCtx and propagates a graceful shutdown
+	// cancel into every active job.
+	h.registry = importjob.New(h.serverCtx)
 
 	mux.HandleFunc("/api/browse", h.handleBrowse)
 	mux.HandleFunc("/api/tree", h.handleTree)
@@ -83,8 +90,15 @@ func (h *Handler) settingsSnapshot() settings.Settings {
 	return h.settings.Snapshot()
 }
 
-// Close stops the background thumbnail pool. Safe to call once per Handler.
+// Close stops background workers (thumbnail pool + import jobs). Safe to call
+// once per Handler. CancelAll/WaitAll ensures in-flight URL fetches unwind
+// before the thumbnail pool drains its queue, so half-finished imports do
+// not race the pool shutdown.
 func (h *Handler) Close() {
+	if h.registry != nil {
+		h.registry.CancelAll()
+		h.registry.WaitAll(5 * time.Second)
+	}
 	if h.thumbPool != nil {
 		h.thumbPool.Shutdown()
 	}

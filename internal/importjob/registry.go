@@ -98,6 +98,7 @@ func (r *Registry) Create(destPath string, urls []string) (*Job, error) {
 		urls:       states,
 		subs:       make(map[uint64]chan Event),
 		urlCancels: make(map[int]context.CancelFunc),
+		done:       make(chan struct{}),
 	}
 	r.jobs[id] = job
 	return job, nil
@@ -177,6 +178,30 @@ func (r *Registry) CancelAll() {
 	}
 }
 
+// WaitAll blocks until every currently-active job reaches a terminal state
+// or until d elapses. Pair with CancelAll for graceful shutdown to ensure
+// worker goroutines and their open file handles unwind before the process
+// exits or the test cleanup runs.
+func (r *Registry) WaitAll(d time.Duration) {
+	r.mu.RLock()
+	jobs := make([]*Job, 0, len(r.jobs))
+	for _, j := range r.jobs {
+		if j.IsActive() {
+			jobs = append(jobs, j)
+		}
+	}
+	r.mu.RUnlock()
+	deadline := time.NewTimer(d)
+	defer deadline.Stop()
+	for _, j := range jobs {
+		select {
+		case <-j.Done():
+		case <-deadline.C:
+			return
+		}
+	}
+}
+
 // activeCountLocked counts queued+running jobs. Caller must hold r.mu.
 func (r *Registry) activeCountLocked() int {
 	n := 0
@@ -217,4 +242,14 @@ func sortByCreated(jobs []*Job) {
 	sort.Slice(jobs, func(i, k int) bool {
 		return jobs[i].CreatedAt.Before(jobs[k].CreatedAt)
 	})
+}
+
+// SetMaxQueuedForTesting overrides the active-job cap for tests that want to
+// exercise the ErrTooManyJobs path without filling MaxQueuedJobs slots.
+// Production code must never call this — leaving the field at its
+// constructor-set default (MaxQueuedJobs).
+func SetMaxQueuedForTesting(r *Registry, cap int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.maxQueued = cap
 }

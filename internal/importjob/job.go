@@ -98,6 +98,8 @@ type Job struct {
 	subs       map[uint64]chan Event
 	nextSubID  uint64
 	urlCancels map[int]context.CancelFunc
+	done       chan struct{} // closed when SetStatus transitions to a terminal state
+	doneClosed bool
 }
 
 // Ctx returns the job's context, which the worker should pass into urlfetch
@@ -121,11 +123,24 @@ func (j *Job) IsActive() bool {
 
 // SetStatus transitions the job to a new state. Callers are responsible for
 // emitting the corresponding SSE event (e.g. summary) separately so that the
-// Status field and the broadcast remain in sync.
+// Status field and the broadcast remain in sync. Transitioning into a
+// terminal state also closes the Done channel so callers blocked on
+// graceful shutdown / WaitAll unblock immediately.
 func (j *Job) SetStatus(s Status) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.status = s
+	if s.IsTerminal() && !j.doneClosed {
+		close(j.done)
+		j.doneClosed = true
+	}
+}
+
+// Done returns a channel that is closed when the job reaches a terminal
+// status. Used by graceful shutdown (Registry.WaitAll) and by tests that
+// want to await worker completion deterministically.
+func (j *Job) Done() <-chan struct{} {
+	return j.done
 }
 
 // SetSummary records the terminal counters. Has no effect on Status; the
