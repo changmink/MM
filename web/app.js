@@ -887,6 +887,11 @@ async function submitURLImport() {
   urlSubmittingNow = true;
   updateConfirmButton();
 
+  // Tracks whether the SSE stream actually opened. The HTTP-error branch
+  // pops the batch and returns before flipping this, so orphan-finalize
+  // (below) only runs for streams that did open and were then cut.
+  let sseOpened = false;
+
   try {
     const res = await fetch('/api/import-url?path=' + encodeURIComponent(currentPath), {
       method: 'POST',
@@ -919,6 +924,7 @@ async function submitURLImport() {
     }
     // SSE connected. Free the button so the user can queue another batch
     // without having to wait for this one to finish.
+    sseOpened = true;
     urlSubmittingNow = false;
     updateConfirmButton();
     await consumeSSE(res, ev => handleSSEEvent(batch, ev));
@@ -931,11 +937,34 @@ async function submitURLImport() {
       showURLError('요청 실패: ' + e.message);
     }
   } finally {
+    // The server's contract is start → done|error per URL plus a final
+    // summary, so any URL row still in pending/downloading state means the
+    // stream was cut (network drop, proxy timeout, server crash). Convert
+    // those into explicit failures — otherwise the badge / aggregate
+    // summary undercount and the round can falsely report "0 failed".
+    // Only run when the stream actually opened (sseOpened) — for HTTP
+    // errors the batch was already popped from the registry above.
+    if (sseOpened) finalizeOrphanRows(batch);
     batch.done = true;
     urlSubmittingNow = false;
     maybeFinalize();
     updateConfirmButton();
     updateURLBadge();
+  }
+}
+
+// finalizeOrphanRows promotes any non-terminal row in the batch (still
+// pending or downloading) into a "연결 끊김" failure. Called from
+// submitURLImport's finally when the SSE stream opened but ended without
+// terminal events for every URL.
+function finalizeOrphanRows(batch) {
+  for (const row of batch.rowEls.values()) {
+    if (row.classList.contains('status-done') || row.classList.contains('status-error')) {
+      continue;
+    }
+    row.classList.remove('url-row-indeterminate');
+    setRowStatus(row, 'status-error', '실패 · 연결 끊김');
+    batch.failed++;
   }
 }
 
