@@ -2558,3 +2558,241 @@ S1 (internal/settings 패키지: Store + Snapshot/Update + 경계 검증 + atomi
 - **위험: 진행 중 요청 스냅샷 정책** — 사용자가 cap을 늘리면서 동시에 큰 파일 import 기대 → 진행 중인 import는 원래 작은 cap을 유지하므로 `too_large`로 실패. 스펙대로의 동작이지만 UX 혼란 가능. 완화: "설정 변경은 다음 import부터 적용됩니다" hint를 모달에 추가 고려.
 - **위험: settings.json 권한 이슈** — Docker volume의 `/data` 가 non-root로 mount 된 경우 `.config` 생성 실패. `New(dataDir)` 가 `log.Fatal`로 응답하므로 서버 시작 실패. `Dockerfile`은 이미 root로 run하므로 영향 없지만 host bind-mount 시 주의.
 - **롤백:** Phase 17 커밋 revert → Phase 16 상태 복귀 + `.config/settings.json` 파일은 남지만 서버가 읽지 않음 (무해). 데이터 손실 없음.
+
+---
+
+## Phase 19 — URL Import 백그라운드 진행 (`feature/url-import-background`) — spec [`spec-url-import-background.md`](./spec-url-import-background.md)
+
+URL import 모달 닫기 시 fetch를 abort하던 동작을 뒤집어, 모달은 **뷰**로만 동작하게 한다. 탭이 열려 있는 한 다운로드는 백그라운드에서 계속되고, 헤더 미니 배지로 진행 상황을 노출한다. 진행 중에 새 배치를 제출하면 서버 전역 `sync.Mutex`로 직렬화되고, 대기 중 배치는 `queued` SSE 이벤트 1회로 표시된다.
+
+### 의존성 그래프
+
+```
+B1 (서버: importMu + queued SSE 이벤트 + 단위 테스트)
+  │   └─ 독립: 클라이언트 변경 없이 머지해도 기존 UI 동일 동작 (queued 이벤트는 무시됨)
+  │
+  ▼
+B2 (클라이언트 상태 모델: urlSubmitting/urlAbort → urlBatches[] 리팩토링)
+  │   └─ 외부 동작 변경 없음 — 단일 배치 흐름 그대로. 회귀 방지용 순수 리팩토링.
+  │
+  ▼
+B3 (close 시 abort 제거 + 미니 배지 + 완료 감지)
+  │   └─ 첫 사용자 가시적 가치: "모달 닫아도 계속 받음". 단일 배치 한정.
+  │
+  ▼
+B4 (재오픈 UX + 새 배치 추가 + queued 이벤트 처리)
+  │   └─ 다중 배치 지원. B1의 서버 queued 이벤트 활용. 배치 구분 UI.
+  │
+  ▼
+B5 (E2E 수동 검증 + SPEC.md §2.6 본문 갱신)
+```
+
+**수직 슬라이스 전략:** B1은 서버만, B2는 순수 client 리팩토링, B3부터 실 동작 변경. 각 단계가 독립 커밋 + 이전 단계 회귀 없음이 되게 자른다.
+
+---
+
+### B1 — 서버: `importMu` + `queued` SSE 이벤트
+
+**파일:** `internal/handler/handler.go`, `internal/handler/import_url.go`, `internal/handler/import_url_test.go`
+
+**변경 포인트:**
+- `Handler` 구조체에 `importMu sync.Mutex` 필드 추가 (기존 `streamLocks`/`convertLocks`와 같은 줄맞춤).
+- `handleImportURL`에서 `w.WriteHeader(http.StatusOK)` 직후, 기존 `writeMu`/`emit` 선언 이후, `settingsSnapshot()` 호출 **이전** 지점에:
+  - `emit(sseQueued{Phase: "queued"})` 1회 방출.
+  - mutex acquire. 단, `sync.Mutex.Lock()`은 ctx 취소에 반응 못하므로 **`chan struct{}` size-1 세마포어 패턴**으로 교체 (`Handler.importSem chan struct{}`) — init `make(chan struct{}, 1)` (Register 또는 zero-value 대체 초기화). acquire는 `select { case importSem <- struct{}{}: ...; case <-r.Context().Done(): return }`, release는 `<-importSem`.
+  - **주의:** `sync.Mutex` 대신 세마포어를 쓰는 이유는 context-aware wait. Handler 필드명과 type을 고정하고, Register에서 `importSem: make(chan struct{}, 1)` 초기화.
+- 신규 이벤트 타입:
+  ```go
+  type sseQueued struct {
+      Phase string `json:"phase"` // "queued"
+  }
+  ```
+  기존 `sseStart/sseProgress/sseDone/sseError/sseSummary`와 같은 파일. SPEC §5.1 용 이벤트 스키마 문서화는 B5에서.
+- `fetchOneSSE`는 변경 없음 — acquire는 배치 레벨.
+- 동시에 client가 연결을 끊으면 (ctx cancel) acquire 루프에서 바로 `return` — `emit(summary)`도 없이 종료 (기존 `r.Context().Err() != nil` 조기 리턴과 동치).
+
+**테스트 (`import_url_test.go`):**
+- **TestImportURL_Queued_EventEmittedOnce**: 단일 배치에서 `queued` 1회 + `start` 뒤에도 `queued` 추가 없음 확인.
+- **TestImportURL_Serialization_TwoBatches**: 2개 POST 동시 실행 (goroutine + `sync.WaitGroup`). 첫 POST가 mutex 잡은 상태에서 두 번째가 `queued` 수신 후 block 확인 — 테스트 origin이 첫 요청을 `<-releaseCh` 까지 잡아둠. 두 번째 요청은 `queued` 이벤트 직후 read deadline 200ms → 이벤트 없음 확인 → releaseCh close → 첫 요청 완료 후 두 번째에서 `start` 수신 확인.
+- **TestImportURL_Queued_CanceledWhileWaiting**: 첫 POST 중, 두 번째 POST에 pre-cancelled context. 두 번째는 `queued` 이벤트만 받고 mutex 미획득 상태로 조기 리턴 확인 — origin hit count는 첫 요청의 것만.
+- 기존 테스트 모두 통과 — 특히 `TestImportURL_SSE_Headers`, `TestImportURL_SSE_SingleImage_StartDoneSummary`, `TestImportURL_SSE_ClientCancelled_StopsBatch` 회귀 체크.
+
+**완료 기준:** `go test ./internal/handler -run TestImportURL -v` — 기존 9개 + 신규 3개 모두 통과. `go build ./...` 통과.
+
+**체크포인트:** B1 단독 머지 가능. 프론트엔드는 `queued` phase 이벤트를 모르므로 `handleSSEEvent`의 `switch`에서 default로 조용히 무시됨 (기존 `app.js` 1,600줄 파일에서 `switch (ev.phase)` 구조 확인 후 안전 검증).
+
+---
+
+### B2 — 클라이언트 상태 모델 리팩토링 (`urlBatches[]`)
+
+**파일:** `web/app.js`, `web/index.html` (version bump)
+
+**변경 포인트:**
+- 기존 전역:
+  ```js
+  let urlSubmitting = false;
+  let urlAnySucceeded = false;
+  let urlAbort = null;
+  ```
+  →
+  ```js
+  const urlBatches = [];  // [{ id, abort, rowEls: Map<index,HTMLElement>, succeeded: int, failed: int, total: int, done: bool }]
+  let urlBatchSeq = 0;
+  ```
+  `urlSubmitting`은 `urlBatches.some(b => !b.done)` 로 파생. `urlAnySucceeded`는 `urlBatches.some(b => b.succeeded > 0 && b.done)` 로 파생. 헬퍼 함수 `anyBatchActive()` / `anyBatchSucceeded()`.
+- `submitURLImport`:
+  - 진입 시 새 `batch` 객체 생성: `{ id: ++urlBatchSeq, abort: new AbortController(), rowEls: new Map(), succeeded: 0, failed: 0, total: urls.length, done: false }`.
+  - `urls.forEach((u, i) => ensureURLRow(batch, i, u))` — `ensureURLRow`를 batch-aware로 변경: `urlRows.querySelector([data-batch="${batch.id}"][data-index="${i}"])`.
+  - fetch의 `signal: batch.abort.signal`.
+  - `consumeSSE`에 `onEvent = ev => handleSSEEvent(batch, ev)` 전달.
+  - finally 블록에서 `batch.done = true`.
+- `handleSSEEvent(batch, ev)`:
+  - 기존 `urlRows.querySelector([data-index="${ev.index}"])` → `batch.rowEls.get(ev.index)` 로 룩업. `start` 시 Map 등록.
+  - `done` 시 `batch.succeeded++`, `error` 시 `batch.failed++`.
+  - `summary` 처리는 현재 batch 한정 — 전역 summary 엘리먼트는 B4에서 다중 배치용으로 재설계. B2에서는 기존 단일 배치 가정 유지 (마지막 배치의 summary만 표시).
+- `closeURLModal` 시 abort 호출 지점 — **B2에서는 유지** (동작 변경 없음). 기존 `if (urlSubmitting && urlAbort) { urlAbort.abort(); }` 를 `urlBatches.forEach(b => !b.done && b.abort.abort())` 로 대체만.
+- `index.html`: `<script src="/app.js?v=18">` → `v=19`.
+
+**회귀 방지 검증 (로컬 브라우저):**
+- 단일 URL 성공 → row 진행 → done → modal summary 표시 → close → browse 재조회.
+- 혼합 배치 (2 성공 + 1 에러) → summary "2 성공 / 1 실패".
+- Close 중도 → abort → summary 없음, close 동작.
+- HLS URL → indeterminate bar → 완료.
+
+**완료 기준:** 브라우저 수동 4개 케이스 모두 기존과 동일 동작. `git diff web/app.js`에서 동작 로직은 변경 없음, 상태 저장 방식만 전환.
+
+**체크포인트:** B2 단독 머지 가능. 사용자 가시 변경 없음 — 회귀 안 나면 성공.
+
+---
+
+### B3 — close 시 abort 제거 + 미니 배지 + 완료 감지
+
+**파일:** `web/app.js`, `web/index.html`, `web/style.css`
+
+**변경 포인트:**
+- `closeURLModal()`:
+  ```js
+  function closeURLModal() {
+    urlModal.classList.add('hidden');
+    updateURLBadge();
+    // abort() 호출 제거!
+  }
+  ```
+- 신규 헬퍼 `updateURLBadge()`:
+  - 조건: `anyBatchActive() && urlModal.classList.contains('hidden')` → 배지 보이기.
+  - 내용: `URL ↓ ${완료합계}/${전체합계}` + 실패 있으면 `⚠` 접미.
+  - 클릭 시 `openURLModal()` 재호출.
+- 배치 완료 감지 (`handleSSEEvent`의 `summary` 분기):
+  - `batch.done = true` 설정 후 `maybeFinalize()` 호출.
+  - `maybeFinalize()`: `urlBatches.every(b => b.done)` 이면 →
+    - `anyBatchSucceeded()` 이면 `browse(currentPath, false)` 1회.
+    - 모달이 숨김 상태면 배지 제거 (에러만 있는 경우 3초 후 제거).
+    - **배치 목록은 리셋하지 않음** — 다음 `openURLModal` 에서 초기 판정에 사용.
+- `openURLModal()`:
+  - 모든 배치가 `done` 이면 `urlBatches.length = 0` + row 영역 초기화 (기존 행동).
+  - 아직 진행 중이면 row/상태 유지 + textarea만 빈 상태로 + confirm 라벨 B4에서 전환 (B3에서는 기존 "가져오기" 그대로).
+- `index.html`:
+  - 헤더 `<button id="settings-btn">` 바로 앞에 `<button id="url-badge" class="url-badge hidden" type="button" aria-label="진행 중인 URL 가져오기"></button>` 추가.
+  - `<script src="/app.js?v=19">` → `v=20`.
+- `style.css`:
+  - `.url-badge` — 높이 24~28px, border-radius: 9999px, 작은 pill. hidden 상태 display: none.
+  - `.url-badge.has-error` — 색 톤 변경 (경고 색).
+
+**테스트 (브라우저 수동):**
+1. 단일 URL 배치 중 모달 close → 배지 표시 → 모달 재오픈 → row 진행 유지 → 완료 → 배지 사라짐 + browse 재조회.
+2. Close 후 탭 새로고침 → 서버 context cancel → 서버 로그에서 확인 → 브라우저 재접속 시 배지 없음.
+3. 모달 연 상태에서 완료 → 기존 summary 흐름 유지.
+
+**완료 기준:** 위 3 시나리오 통과. `anyBatchActive`/`maybeFinalize` 를 기반으로 single-source-of-truth 구조가 확립됨.
+
+**체크포인트:** B3 머지 시점에서 단일 배치 사용자는 이미 이득 (close ≠ 취소).
+
+---
+
+### B4 — 재오픈 UX + 새 배치 추가 + `queued` 처리
+
+**파일:** `web/app.js`, `web/index.html`, `web/style.css`
+
+**변경 포인트:**
+- `openURLModal()`:
+  - 진행 중 배치 있음 → confirm 버튼 라벨 "새 배치 추가", textarea는 빈 상태, 기존 row 유지.
+  - 배치 없음 → 라벨 "가져오기", row 초기화 (B3과 동일).
+- `submitURLImport()`:
+  - 진행 중 배치가 있으면 새 row는 **기존 row 아래에 append**. batch separator(얇은 divider 또는 "배치 N" 라벨) 삽입.
+  - 새 batch를 `urlBatches` 에 push. 병렬 fetch — 각 배치가 독립 AbortController.
+- `handleSSEEvent` 에 `queued` phase 추가:
+  ```js
+  case 'queued': {
+    // 배치의 모든 row를 "대기 중 (큐잉)" 상태로
+    for (const row of batch.rowEls.values()) {
+      setRowStatus(row, 'status-pending', '대기 중 (순서 대기)');
+    }
+    break;
+  }
+  ```
+  `start` 이벤트가 오면 자연스럽게 `status-downloading` 으로 덮어씀.
+- `updateURLBadge`: 배지 aggregate 합계 로직 — `urlBatches.reduce((a, b) => a + b.succeeded + b.failed, 0) / urlBatches.reduce((a, b) => a + b.total, 0)`.
+- `maybeFinalize`: 단일 → 다중 변경은 B3에서 완료. B4는 queued 처리만.
+- 새 배치 시작 시 **`urlError`/`urlSummary` 엘리먼트 초기화** — 기존 전역 summary 엘리먼트는 여러 배치 동시엔 의미 없으므로 표시를 변경:
+  - `urlSummary`는 "모든 배치 완료 시 전체 성공/실패 합산" 으로 재해석.
+  - `maybeFinalize`에서 최종 집계 표시.
+- Row DOM:
+  - `<div class="url-row" data-batch="1" data-index="0">` — CSS selector 갱신.
+  - 배치 경계 `<div class="url-batch-divider">배치 N</div>` (첫 배치는 넣지 않음 — 선택사항).
+- `index.html`: `<script src="/app.js?v=20">` → `v=21`.
+- `style.css`:
+  - `.url-batch-divider` — 얇은 구분선 + 작은 배지 라벨.
+  - `.url-row.status-pending` 기존 스타일 재사용 (queued 이벤트도 pending 상태 활용).
+
+**테스트 (브라우저 수동):**
+1. 배치 A 진행 중 → 모달 재오픈 → confirm 라벨 "새 배치 추가" 확인 → 새 URL 입력 → 추가 → row가 아래에 append + "대기 중 (순서 대기)" 상태.
+2. 배치 A 완료 → 배치 B가 `start`로 상태 전환 → 완료.
+3. 배치 A 진행 중 + 배치 B 대기 중 → 모달 close → 배지가 aggregate 진행률 표시.
+4. 배치 A + B 모두 완료 → summary 합산 표시 → browse 재조회.
+5. 서버 측 `queued` 이벤트 서버 로그 + 브라우저 DevTools SSE 탭에서 수신 확인.
+
+**완료 기준:** 위 5 시나리오 통과. 동시 3개 배치까지는 브라우저 HTTP 연결 한도(호스트당 6) 내에서 정상 동작해야 함.
+
+**체크포인트:** B4 머지 시점에 spec의 모든 기능 완료.
+
+---
+
+### B5 — E2E 수동 검증 + SPEC.md §2.6 갱신
+
+**파일:** `SPEC.md`, `tasks/todo.md`
+
+**수동 검증 체크리스트:**
+1. 단일 배치 close → 배지 → 재오픈 → 완료 → browse 재조회. (B3 회귀)
+2. 멀티 배치 A + B, 직렬 처리 확인 (서버 mutex). B5에서는 실제 HLS + 일반 mixed.
+3. 배치 A 중 탭 새로고침 → 서버 context cancel → 임시 파일 정리 확인 (`.urlimport-*.tmp` 없음).
+4. 배치 A 진행 중 설정 PATCH (`url_import_max_bytes` 하향) → 배치 A는 원래 값 유지, 배치 B는 새 값 적용 (스냅샷 정책).
+5. HLS 배치 A + HLS 배치 B → 둘 다 indeterminate bar → 직렬 처리.
+6. 배치 A의 일부 URL 실패 → 배지가 `⚠` 상태 → 모든 배치 완료 후 3초 뒤 배지 사라짐.
+7. 배치 A + B 진행 중 배치 B만 에러로 모두 실패 → summary에서 합산 집계 정확.
+8. Docker 컨테이너로도 동일 확인 — `docker compose up --build`.
+9. 기존 다른 기능(업로드, 삭제, rename, 움짤 필터, 드래그 이동, TS 변환, 설정 UI) 스모크.
+10. 모바일 뷰 — 배지 위치가 헤더에 자연스럽게 배치되는지 + 클릭 동작.
+
+**SPEC.md §2.6 갱신 내역:**
+- "모달 close = abort" 문구 제거, "탭 유지형 백그라운드 진행" 설명 추가.
+- §5.1 SSE 이벤트 스키마 테이블에 `queued` 1종 추가 (페이로드 `{"phase":"queued"}`).
+- §5.1.1 progress throttle 문단 유지.
+- 배치 직렬화 동작 언급 (서버 전역 mutex로 per-request 순차 처리).
+
+**완료 기준:** 10개 모두 통과 + SPEC.md 반영 + `tasks/todo.md` 체크 → `spec-url-import-background.md`는 상단에 "status: merged into SPEC §2.6" 노트 추가 후 보존.
+
+---
+
+### Out of scope (Phase 19)
+- 탭 닫힘/브라우저 종료 시에도 서버가 끝까지 다운로드 (서버 측 잡 레지스트리 필요 — 별도 phase).
+- HTTP Range resume (중단된 다운로드 이어받기).
+- 개별 URL 취소 버튼 (배치 단위 취소는 탭 닫기 + 새로고침이 대체).
+- 우선순위 큐잉 (FIFO로 충분, 단일 사용자).
+- 배치 간 의존성/연쇄 실행.
+- sessionStorage로 탭 새로고침 복구.
+
+### 위험 / 롤백
+- **위험: SSE 연결이 idle proxy timeout에 걸림** — `queued` 후 서버가 mutex 대기 중 침묵하면 중간 프록시(nginx 등)가 연결을 끊을 수 있음. 단일 사용자 + 로컬 네트워크 전제로는 영향 없음. Docker compose 구성에 proxy 없음 — 문제 시 `queued` 이벤트를 주기적으로 keep-alive(`: heartbeat\n\n`)로 보내는 보강 여지.
+- **위험: 배치 수가 많을 때 브라우저 연결 고갈** — 동시 7개+ 배치를 띄우면 브라우저가 일부를 queue. 서버 mutex가 아닌 브라우저 레벨 큐잉이 발생하지만 기능은 동작. 단일 사용자 + 한 번에 1~2개 배치 예상이면 실전 문제 없음.
+- **위험: `queued` 이벤트를 몰라서 무한 대기로 보이는 구 클라이언트** — B1만 머지하고 B2+ 를 미루는 경우. 현재 `handleSSEEvent` switch에 default case 없으므로 `queued` 는 조용히 무시되고, mutex가 acquire되면 `start` 이벤트가 오므로 사용자 체감 변화 없음 (약간의 지연만). 위험 낮음.
+- **롤백:** B1~B5 커밋 순차 revert로 Phase 18 상태 복귀. 서버/클라이언트가 서로 독립적이라 부분 revert도 가능.

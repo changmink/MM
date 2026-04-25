@@ -17,8 +17,9 @@ type Handler struct {
 	thumbPool    *thumb.Pool
 	urlClient    *http.Client
 	settings     *settings.Store
-	streamLocks  sync.Map // cachePath -> *sync.Mutex; serializes ffmpeg per cache key
-	convertLocks sync.Map // absSrcPath -> *sync.Mutex; serializes TS → MP4 per source
+	streamLocks  sync.Map      // cachePath -> *sync.Mutex; serializes ffmpeg per cache key
+	convertLocks sync.Map      // absSrcPath -> *sync.Mutex; serializes TS → MP4 per source
+	importSem    chan struct{} // size-1 semaphore; serializes URL import batches process-wide
 }
 
 // Register wires all API routes. settingsStore may be nil in tests that do
@@ -30,6 +31,7 @@ func Register(mux *http.ServeMux, dataDir, webDir string, settingsStore *setting
 		thumbPool: thumb.NewPool(runtime.NumCPU()),
 		urlClient: urlfetch.NewClient(),
 		settings:  settingsStore,
+		importSem: make(chan struct{}, 1),
 	}
 
 	mux.HandleFunc("/api/browse", h.handleBrowse)

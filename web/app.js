@@ -63,6 +63,7 @@ const urlSummary    = document.getElementById('url-summary');
 const urlResult     = document.getElementById('url-result');
 const urlCancelBtn  = document.getElementById('url-cancel-btn');
 const urlConfirmBtn = document.getElementById('url-confirm-btn');
+const urlBadge     = document.getElementById('url-badge');
 const convertAllBtn       = document.getElementById('convert-all-btn');
 const convertModal        = document.getElementById('convert-modal');
 const convertFileList     = document.getElementById('convert-file-list');
@@ -662,47 +663,175 @@ const URL_ERROR_LABELS = {
   hls_playlist_too_large: 'HLS 플레이리스트 크기 초과',
 };
 
-let urlSubmitting = false;
-let urlAnySucceeded = false;
-let urlAbort = null;
+// Each batch captures one in-flight POST /api/import-url. Several batches
+// can coexist: while one is running, reopening the modal turns the confirm
+// button into "새 배치 추가" and additional submits append a new batch
+// below the existing rows. The server serializes them via `importSem`,
+// emitting a `queued` SSE event we surface as a "waiting" row state.
+//
+// We deliberately do NOT wire up an AbortController per batch — closing
+// the modal must keep the fetch running so the user can reopen and still
+// see progress. Browser-initiated fetch aborts (tab close / navigation)
+// flow to the server as `r.Context()` cancel.
+const urlBatches = [];
+let urlBatchSeq = 0;
+// True only during the short POST setup window of an in-flight submit —
+// prevents accidental double-submits of the same URL list. Once SSE
+// consumption starts we flip it off so the user can queue another batch
+// without waiting for this one to finish.
+let urlSubmittingNow = false;
+// When a round finishes with only failures we keep the batch metadata
+// around briefly so the badge can still surface the ⚠ marker the user
+// might have missed if they were off-screen. Cleared on the next open or
+// the next completion round.
+let urlBadgeLinger = false;
+
+function anyBatchActive() {
+  return urlBatches.some(b => !b.done);
+}
+function anyBatchSucceeded() {
+  return urlBatches.some(b => b.succeeded > 0);
+}
 
 urlImportBtn.addEventListener('click', openURLModal);
 urlCancelBtn.addEventListener('click', closeURLModal);
 urlConfirmBtn.addEventListener('click', submitURLImport);
 urlModal.addEventListener('click', e => { if (e.target === urlModal) closeURLModal(); });
+urlBadge.addEventListener('click', openURLModal);
 document.addEventListener('keydown', e => {
   if (urlModal.classList.contains('hidden')) return;
   if (e.key === 'Escape') closeURLModal();
 });
 
 function openURLModal() {
+  const hasActive = anyBatchActive();
   urlInput.value = '';
   urlError.textContent = '';
   urlError.classList.add('hidden');
-  urlRows.innerHTML = '';
-  urlSummary.textContent = '';
-  urlSummary.className = 'url-summary hidden';
-  urlResult.classList.add('hidden');
-  urlAnySucceeded = false;
+
+  if (!hasActive) {
+    // Fresh start: drop any completed-but-still-listed batches and reset
+    // the row area. Success completions already fired browse() via
+    // maybeFinalize(); failure-only rounds drop their rows here so the
+    // user gets a clean slate to try again.
+    urlBatches.length = 0;
+    urlBadgeLinger = false;
+    urlRows.innerHTML = '';
+    urlSummary.textContent = '';
+    urlSummary.className = 'url-summary hidden';
+    urlResult.classList.add('hidden');
+  }
+  // When hasActive: keep existing rows / summary visible so the modal
+  // picks up right where the background work is.
+
   urlModal.classList.remove('hidden');
+  updateURLBadge();
+  updateConfirmButton();
   urlInput.focus();
 }
 
-function closeURLModal() {
-  if (urlSubmitting && urlAbort) {
-    // Client disconnect flows to the handler as r.Context() cancel → backend
-    // stops the current Fetch and skips remaining URLs in the batch.
-    urlAbort.abort();
-  }
-  urlModal.classList.add('hidden');
-  if (urlAnySucceeded) {
-    urlAnySucceeded = false;
-    browse(currentPath, false);
+// Keeps the confirm button in sync with the current registry state so
+// its label always answers "what happens if I click now?". We re-enter
+// here from every state transition: open, submit entry, SSE started,
+// batch settled.
+function updateConfirmButton() {
+  if (urlSubmittingNow) {
+    urlConfirmBtn.disabled = true;
+    urlConfirmBtn.textContent = '가져오는 중...';
+  } else if (anyBatchActive()) {
+    urlConfirmBtn.disabled = false;
+    urlConfirmBtn.textContent = '새 배치 추가';
+  } else {
+    urlConfirmBtn.disabled = false;
+    urlConfirmBtn.textContent = '가져오기';
   }
 }
 
+function closeURLModal() {
+  // Pure view-hide: fetches keep running, the badge takes over the
+  // progress surface. Tab close or navigation still aborts via the
+  // browser, which the server handles as r.Context() cancel.
+  urlModal.classList.add('hidden');
+  updateURLBadge();
+}
+
+function updateURLBadge() {
+  const modalHidden = urlModal.classList.contains('hidden');
+  const shouldShow = modalHidden && (anyBatchActive() || urlBadgeLinger);
+  if (!shouldShow) {
+    urlBadge.classList.add('hidden');
+    urlBadge.classList.remove('has-error');
+    return;
+  }
+  // Aggregate completion across every batch still on the registry.
+  let completed = 0, total = 0, failed = 0;
+  for (const b of urlBatches) {
+    completed += b.succeeded + b.failed;
+    total     += b.total;
+    failed    += b.failed;
+  }
+  urlBadge.classList.remove('hidden');
+  urlBadge.classList.toggle('has-error', failed > 0);
+  urlBadge.textContent = `URL ↓ ${completed}/${total}` + (failed > 0 ? ' ⚠' : '');
+}
+
+// maybeFinalize runs whenever a batch settles (normal completion, abort,
+// network error, or HTTP error). When every batch is done it renders an
+// aggregate summary, fires browse() once for success rounds, and tears
+// down the badge / linger state.
+function maybeFinalize() {
+  if (anyBatchActive()) return;
+
+  // Nothing to finalize — the HTTP-error path pops its batch before
+  // landing here, so urlBatches may be empty even though we were just
+  // submitting something.
+  if (urlBatches.length === 0) {
+    updateURLBadge();
+    return;
+  }
+
+  // Aggregate per-URL counts across every batch in the current round.
+  let succeeded = 0, failed = 0;
+  for (const b of urlBatches) {
+    succeeded += b.succeeded;
+    failed    += b.failed;
+  }
+  const cls = failed === 0 ? 'status-done'
+            : succeeded === 0 ? 'status-error'
+            : 'status-mixed';
+  urlSummary.className = 'url-summary ' + cls;
+  urlSummary.textContent = `성공 ${succeeded}개 · 실패 ${failed}개`;
+
+  if (succeeded > 0) {
+    // Success: clear the registry so a later close (without reopen)
+    // cannot trigger a second browse(). Badge hides because
+    // anyBatchActive() is now false and linger is off.
+    urlBatches.length = 0;
+    urlBadgeLinger = false;
+    updateURLBadge();
+    browse(currentPath, false);
+    return;
+  }
+
+  // Error-only round: keep the badge up briefly so the user can still
+  // click it to inspect the errors after they dismissed the modal.
+  urlBadgeLinger = true;
+  updateURLBadge();
+  setTimeout(() => {
+    // Guard: the user may have started a new batch during the grace
+    // window. Only clear if nothing is still running.
+    if (!anyBatchActive()) {
+      urlBatches.length = 0;
+      urlBadgeLinger = false;
+      updateURLBadge();
+    }
+  }, 3000);
+}
+
 async function submitURLImport() {
-  if (urlSubmitting) return;
+  // Reject only while a POST is mid-flight — once SSE is flowing the user
+  // is free to queue another batch on top.
+  if (urlSubmittingNow) return;
   const urls = urlInput.value
     .split('\n')
     .map(s => s.trim())
@@ -718,43 +847,124 @@ async function submitURLImport() {
   }
 
   urlError.classList.add('hidden');
-  urlRows.innerHTML = '';
-  urlSummary.textContent = '';
-  urlSummary.className = 'url-summary hidden';
+  const appending = anyBatchActive();
+  if (!appending) {
+    // Fresh round: wipe any lingering rows from a prior completed batch.
+    urlRows.innerHTML = '';
+    urlSummary.textContent = '';
+    urlSummary.className = 'url-summary hidden';
+  }
   urlResult.classList.remove('hidden');
+
+  const batch = {
+    id: ++urlBatchSeq,
+    rowEls: new Map(),
+    succeeded: 0,
+    failed: 0,
+    total: urls.length,
+    done: false,
+  };
+  urlBatches.push(batch);
+
+  if (appending) {
+    // Visual separator between the previous rows and the new batch. The
+    // label counts by registry position in the current round so users see
+    // "배치 2", "배치 3", ... regardless of the monotonic batch.id value.
+    const divider = document.createElement('div');
+    divider.className = 'url-batch-divider';
+    divider.dataset.batch = String(batch.id);
+    divider.textContent = `배치 ${urlBatches.length}`;
+    urlRows.appendChild(divider);
+  }
+
   // Pre-create one pending row per URL so users see immediate feedback even
   // before the first SSE event arrives.
-  urls.forEach((u, i) => ensureURLRow(i, u));
-  urlSubmitting = true;
-  urlConfirmBtn.disabled = true;
-  urlConfirmBtn.textContent = '가져오는 중...';
-  urlAbort = new AbortController();
+  urls.forEach((u, i) => ensureURLRow(batch, i, u));
+  // Clear the textarea so the user can immediately type another batch
+  // without having to select-all-and-delete first.
+  urlInput.value = '';
+
+  urlSubmittingNow = true;
+  updateConfirmButton();
+
+  // Tracks whether the SSE stream actually opened. The HTTP-error branch
+  // pops the batch and returns before flipping this, so orphan-finalize
+  // (below) only runs for streams that did open and were then cut.
+  let sseOpened = false;
 
   try {
     const res = await fetch('/api/import-url?path=' + encodeURIComponent(currentPath), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
       body: JSON.stringify({ urls }),
-      signal: urlAbort.signal,
     });
     if (!res.ok) {
       let msg = '';
       try { msg = (await res.json()).error || ''; } catch { /* not JSON */ }
       if (!msg) msg = `요청 실패 (${res.status})`;
       showURLError(msg);
-      urlResult.classList.add('hidden');
+      if (!appending) {
+        // Only this (failed) batch exists in the result area, so hide it
+        // entirely and let the main error banner carry the message.
+        urlResult.classList.add('hidden');
+      } else {
+        // Other batches are still running above. Tear down this batch's
+        // DOM contributions only — pre-created rows and the divider —
+        // so they don't linger as stuck pending placeholders.
+        for (const row of batch.rowEls.values()) row.remove();
+        const divider = urlRows.querySelector(
+          `.url-batch-divider[data-batch="${batch.id}"]`);
+        if (divider) divider.remove();
+      }
+      // Drop the batch from the registry — aggregate counters would
+      // otherwise show a stuck 0/N entry in the badge.
+      const idx = urlBatches.indexOf(batch);
+      if (idx !== -1) urlBatches.splice(idx, 1);
       return;
     }
-    await consumeSSE(res, handleSSEEvent);
+    // SSE connected. Free the button so the user can queue another batch
+    // without having to wait for this one to finish.
+    sseOpened = true;
+    urlSubmittingNow = false;
+    updateConfirmButton();
+    await consumeSSE(res, ev => handleSSEEvent(batch, ev));
   } catch (e) {
+    // AbortError can still arrive on browser-initiated cancels (tab
+    // navigation) even though we no longer wire up an AbortController —
+    // the document's lifecycle signal aborts pending fetches. Swallow
+    // those silently; the page is going away anyway.
     if (e.name !== 'AbortError') {
       showURLError('요청 실패: ' + e.message);
     }
   } finally {
-    urlSubmitting = false;
-    urlAbort = null;
-    urlConfirmBtn.disabled = false;
-    urlConfirmBtn.textContent = '가져오기';
+    // The server's contract is start → done|error per URL plus a final
+    // summary, so any URL row still in pending/downloading state means the
+    // stream was cut (network drop, proxy timeout, server crash). Convert
+    // those into explicit failures — otherwise the badge / aggregate
+    // summary undercount and the round can falsely report "0 failed".
+    // Only run when the stream actually opened (sseOpened) — for HTTP
+    // errors the batch was already popped from the registry above.
+    if (sseOpened) finalizeOrphanRows(batch);
+    batch.done = true;
+    urlSubmittingNow = false;
+    maybeFinalize();
+    updateConfirmButton();
+    updateURLBadge();
+  }
+}
+
+// finalizeOrphanRows promotes any non-terminal row in the batch (still
+// pending or downloading) into a "연결 끊김" failure. Called from
+// submitURLImport's finally when the SSE stream opened but ended without
+// terminal events for every URL.
+function finalizeOrphanRows(batch) {
+  for (const row of batch.rowEls.values()) {
+    if (row.classList.contains('status-done') || row.classList.contains('status-error')) {
+      continue;
+    }
+    row.classList.remove('url-row-indeterminate');
+    setRowStatus(row, 'status-error', '실패 · 연결 끊김');
+    batch.failed++;
   }
 }
 
@@ -786,11 +996,12 @@ async function consumeSSE(res, onEvent) {
   }
 }
 
-function ensureURLRow(index, fallbackUrl) {
-  let row = urlRows.querySelector(`[data-index="${index}"]`);
+function ensureURLRow(batch, index, fallbackUrl) {
+  let row = batch.rowEls.get(index);
   if (row) return row;
   row = document.createElement('div');
   row.className = 'url-row status-pending';
+  row.dataset.batch = String(batch.id);
   row.dataset.index = String(index);
   row.dataset.total = '0';
   row.innerHTML = `
@@ -801,6 +1012,7 @@ function ensureURLRow(index, fallbackUrl) {
     <div class="url-progress-bar"><div class="url-progress-fill"></div></div>
   `;
   urlRows.appendChild(row);
+  batch.rowEls.set(index, row);
   return row;
 }
 
@@ -810,10 +1022,22 @@ function setRowStatus(row, statusClass, statusText) {
   row.querySelector('.url-row-status').textContent = statusText;
 }
 
-function handleSSEEvent(ev) {
+function handleSSEEvent(batch, ev) {
   switch (ev.phase) {
+    case 'queued': {
+      // Server accepted the POST but has not yet acquired the batch
+      // semaphore — another batch is still running. Flip this batch's
+      // rows to a distinct "waiting behind another batch" status so the
+      // user isn't left staring at a stale generic "대기 중" forever.
+      // The `start` event will overwrite this to "downloading" once the
+      // semaphore clears.
+      for (const row of batch.rowEls.values()) {
+        setRowStatus(row, 'status-pending', '대기 중 (순서 대기)');
+      }
+      break;
+    }
     case 'start': {
-      const row = ensureURLRow(ev.index, ev.url);
+      const row = ensureURLRow(batch, ev.index, ev.url);
       row.querySelector('.url-row-name').textContent = ev.name || ev.url;
       const total = Number(ev.total) || 0;
       row.dataset.total = String(total);
@@ -827,7 +1051,7 @@ function handleSSEEvent(ev) {
       break;
     }
     case 'progress': {
-      const row = urlRows.querySelector(`[data-index="${ev.index}"]`);
+      const row = batch.rowEls.get(ev.index);
       if (!row) return;
       const total = Number(row.dataset.total) || 0;
       if (total > 0) {
@@ -841,28 +1065,30 @@ function handleSSEEvent(ev) {
       break;
     }
     case 'done': {
-      const row = ensureURLRow(ev.index, ev.url);
+      const row = ensureURLRow(batch, ev.index, ev.url);
       row.querySelector('.url-row-name').textContent = ev.name || ev.url;
       row.classList.remove('url-row-indeterminate');
       row.querySelector('.url-progress-fill').style.width = '100%';
       const warn = (ev.warnings && ev.warnings.length > 0) ? ` · ${ev.warnings.join(', ')}` : '';
       setRowStatus(row, 'status-done', `완료 (${formatSize(ev.size)})${warn}`);
-      urlAnySucceeded = true;
+      batch.succeeded++;
+      updateURLBadge();
       break;
     }
     case 'error': {
-      const row = ensureURLRow(ev.index, ev.url);
+      const row = ensureURLRow(batch, ev.index, ev.url);
       row.classList.remove('url-row-indeterminate');
       const label = URL_ERROR_LABELS[ev.error] || ev.error || '알 수 없는 오류';
       setRowStatus(row, 'status-error', '실패 · ' + label);
+      batch.failed++;
+      updateURLBadge();
       break;
     }
     case 'summary': {
-      const cls = ev.failed === 0 ? 'status-done'
-                : ev.succeeded === 0 ? 'status-error'
-                : 'status-mixed';
-      urlSummary.className = 'url-summary ' + cls;
-      urlSummary.textContent = `성공 ${ev.succeeded}개 · 실패 ${ev.failed}개`;
+      // Per-batch summary is no longer rendered directly — with multiple
+      // batches possibly in flight, consecutive summaries would overwrite
+      // each other unpredictably. maybeFinalize() aggregates across every
+      // batch in the round once the last one settles.
       break;
     }
   }
