@@ -288,6 +288,14 @@ func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destA
 			}
 			break
 		}
+		// Per-URL cancel may have flipped this index to "cancelled" before we
+		// reached it (cancel API sets state + emits error event for pending
+		// URLs). Skip the fetch entirely; the count is correct because the
+		// cancel handler did NOT increment counters — we own that.
+		if job.URLStatus(i) == "cancelled" {
+			cancelled++
+			continue
+		}
 		switch h.fetchOneJob(job, i, urlState.URL, destAbs, rel, maxBytes, perURLTimeout) {
 		case fetchSucceeded:
 			succeeded++

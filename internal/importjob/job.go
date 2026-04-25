@@ -172,6 +172,28 @@ func (j *Job) UpdateURL(idx int, fn func(*URLState)) {
 	fn(&j.urls[idx])
 }
 
+// URLStatus returns the per-URL status string at idx, or empty for out-of-
+// range indices. Cheap accessor used by the worker loop to check for
+// pre-cancellation without paying the Snapshot() deep-copy cost on every
+// iteration.
+func (j *Job) URLStatus(idx int) string {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if idx < 0 || idx >= len(j.urls) {
+		return ""
+	}
+	return j.urls[idx].Status
+}
+
+// URLCount returns the number of URLs in the job — fixed at Create time.
+// Cheap accessor used by handlers that need to validate an `index` query
+// parameter without taking a snapshot.
+func (j *Job) URLCount() int {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return len(j.urls)
+}
+
 // Snapshot returns a deep copy of the job's externally visible state safe to
 // hand to JSON encoders or other goroutines. The slice length and per-index
 // `URL` field are immutable after Create — only Status / Received / Total /

@@ -2,9 +2,11 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/chang/file_server/internal/importjob"
@@ -28,14 +30,18 @@ type snapshotEnvelope struct {
 	Job   importjob.JobSnapshot  `json:"job"`
 }
 
-// handleJobsRoot routes GET /api/import-url/jobs (no trailing slash). The
-// path-with-trailing-slash variant goes through handleJobsByID below — the
-// two registrations together cover the full /jobs and /jobs/{id}/... space
-// without ambiguity.
+// handleJobsRoot routes /api/import-url/jobs (no trailing slash). GET
+// returns the active+finished snapshot; DELETE with `?status=finished`
+// clears every terminal job in one call. Other methods/queries 405/400.
+// The path-with-trailing-slash variant goes through handleJobsByID below —
+// the two registrations together cover the full /jobs and /jobs/{id}/...
+// space without ambiguity.
 func (h *Handler) handleJobsRoot(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		h.handleListJobs(w, r)
+	case http.MethodDelete:
+		h.handleDeleteFinishedJobs(w, r)
 	default:
 		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
 	}
@@ -68,10 +74,13 @@ func snapshotSlice(jobs []*importjob.Job) []importjob.JobSnapshot {
 	return out
 }
 
-// handleJobsByID dispatches /api/import-url/jobs/{id}/{action}. Only the
-// `events` action is wired in J4; J5 adds /cancel and DELETE on the bare id.
-// Unknown actions return 404 so a typo doesn't get silently routed somewhere
-// nonsensical.
+// handleJobsByID dispatches /api/import-url/jobs/{id}/{action}. Three
+// shapes are wired:
+//   GET  /jobs/{id}/events         → SSE snapshot + live stream (J4)
+//   POST /jobs/{id}/cancel         → batch or per-URL cancel (J5)
+//   DEL  /jobs/{id}                → remove a terminal job (J5)
+// Anything else (typo'd action, extra path segments, wrong method) returns
+// 404 / 405 so nothing falls through to a default handler.
 func (h *Handler) handleJobsByID(w http.ResponseWriter, r *http.Request) {
 	suffix := strings.TrimPrefix(r.URL.Path, "/api/import-url/jobs/")
 	parts := strings.Split(suffix, "/")
@@ -81,9 +90,13 @@ func (h *Handler) handleJobsByID(w http.ResponseWriter, r *http.Request) {
 	}
 	jobID := parts[0]
 	if len(parts) == 1 {
-		// /jobs/{id} with no action — J5 will add DELETE here. For J4 the
-		// only legal endpoint is /events.
-		writeError(w, r, http.StatusNotFound, "unknown route", nil)
+		// /jobs/{id} bare — only DELETE is valid here.
+		switch r.Method {
+		case http.MethodDelete:
+			h.handleDeleteJob(w, r, jobID)
+		default:
+			writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
+		}
 		return
 	}
 	switch parts[1] {
@@ -97,8 +110,123 @@ func (h *Handler) handleJobsByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.handleSubscribeJob(w, r, jobID)
+	case "cancel":
+		if len(parts) != 2 {
+			writeError(w, r, http.StatusNotFound, "unknown route", nil)
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
+			return
+		}
+		h.handleCancelJob(w, r, jobID)
 	default:
 		writeError(w, r, http.StatusNotFound, "unknown route", nil)
+	}
+}
+
+// handleCancelJob fires either a per-URL cancel (?index=N) or a whole-batch
+// cancel. Per-URL cancellation has two paths:
+//
+//   - Currently in flight: CancelURL fires the registered ctx and the
+//     worker translates that into the standard error("cancelled") event +
+//     summary counter increment.
+//   - Pending (not yet started): we set URLState to cancelled and emit the
+//     error event ourselves; the worker's loop checks URLStatus before
+//     each fetch and skips already-terminal entries.
+//
+// Already-terminal URLs return 409. The job itself must still be active
+// (queued or running); a cancel against a finished job is 409.
+func (h *Handler) handleCancelJob(w http.ResponseWriter, r *http.Request, jobID string) {
+	job, ok := h.registry.Get(jobID)
+	if !ok {
+		writeError(w, r, http.StatusNotFound, "job not found", nil)
+		return
+	}
+	if !job.IsActive() {
+		writeError(w, r, http.StatusConflict, "job already finished", nil)
+		return
+	}
+
+	indexStr := r.URL.Query().Get("index")
+	if indexStr == "" {
+		// Whole-batch cancel — worker observes job.Ctx().Done() and emits
+		// the cancelled events / summary itself.
+		job.Cancel()
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	idx, err := strconv.Atoi(indexStr)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid index", err)
+		return
+	}
+	if idx < 0 || idx >= job.URLCount() {
+		writeError(w, r, http.StatusBadRequest, "index out of range", nil)
+		return
+	}
+
+	// CancelURL covers the running case: it returns true if a per-URL
+	// cancel func was registered (i.e. fetchOneJob is currently the owner
+	// of this index) and fires it. The worker handles the rest.
+	if job.CancelURL(idx) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Not currently in flight. Inspect status to distinguish pending (needs
+	// pre-cancellation marking) from a URL already past terminal (409).
+	switch job.URLStatus(idx) {
+	case "pending":
+		state := job.Snapshot().URLs[idx]
+		job.UpdateURL(idx, func(s *importjob.URLState) {
+			s.Status = "cancelled"
+			s.Error = "cancelled"
+		})
+		job.Publish(mustEvent("error", sseError{
+			Phase: "error", Index: idx, URL: state.URL, Error: "cancelled",
+		}))
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		// Either terminal (done/error/cancelled) or in the brief race window
+		// where status flipped past running before CancelURL ran. Either
+		// way the user should refresh — 409.
+		writeError(w, r, http.StatusConflict, "url already finished", nil)
+	}
+}
+
+// handleDeleteJob removes a terminal job from the registry. Active jobs
+// (queued/running) require an explicit cancel first → 409. Unknown ids 404.
+// Subscribers, if any, were already detached at SetStatus(terminal) time so
+// no broadcast is needed here.
+func (h *Handler) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID string) {
+	if err := h.registry.Remove(jobID); err != nil {
+		switch {
+		case errors.Is(err, importjob.ErrJobNotFound):
+			writeError(w, r, http.StatusNotFound, "job not found", nil)
+		case errors.Is(err, importjob.ErrJobActive):
+			writeError(w, r, http.StatusConflict, "job_active", nil)
+		default:
+			writeError(w, r, http.StatusInternalServerError, "remove failed", err)
+		}
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleDeleteFinishedJobs removes every terminal job at once. Validates
+// the `status=finished` query so a stray DELETE without filter cannot be
+// silently interpreted as "wipe everything".
+func (h *Handler) handleDeleteFinishedJobs(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("status") != "finished" {
+		writeError(w, r, http.StatusBadRequest, "missing status=finished filter", nil)
+		return
+	}
+	n := h.registry.RemoveFinished()
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]int{"removed": n}); err != nil {
+		slog.Error("remove finished encode", "err", err)
 	}
 }
 
