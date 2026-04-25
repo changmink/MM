@@ -303,10 +303,18 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
   8. 다운로드 중 누적 바이트가 `url_import_max_bytes` 초과 시 즉시 중단 + 임시 파일 삭제 (`error: "too_large"`)
   9. 검증 통과 시 임시 파일 → 최종 경로로 atomic rename
   10. 이미지·동영상 성공 시 `.thumb/{name}.jpg` 섬네일 비동기 생성 (음악은 생략)
-- [ ] **진행 이벤트 (SSE)**: URL당 최소 `start` → `done` 또는 `start` → `error`. 큰 파일은 중간에 `progress` 이벤트를 주기적으로 방출 (§5.1.1 참고). 배치 단위로는 응답 헤더 직후 `queued` 이벤트 1회를 먼저 송출하고 마지막에 `summary` 이벤트로 종료한다 (§5.1).
+- [ ] **진행 이벤트 (SSE)**: URL당 최소 `start` → `done` 또는 `start` → `error`. 큰 파일은 중간에 `progress` 이벤트를 주기적으로 방출 (§5.1.1). 배치 단위로는 응답 헤더 직후 `register` 이벤트 1회(jobId 부여) → `queued` 이벤트 1회 → URL 단위 이벤트들 → `summary` 이벤트로 종료한다 (§5.1).
 - [ ] **타임아웃**: 연결 10초 + 전체 다운로드는 설정값 `url_import_timeout_seconds`(§2.7, 기본 30분, 개별 URL 단위). 초과 시 `error: "download_timeout"`
-- [ ] **배치 직렬화**: 서버는 `Handler.importSem`(size-1 채널 세마포어)로 `POST /api/import-url`을 **프로세스 전역에서 한 번에 한 배치씩 순차 처리**한다. 동시에 여러 클라이언트(또는 같은 사용자가 모달 재오픈으로 추가한 두 번째 배치)가 POST를 보내면, 응답 헤더는 즉시 가고 `queued` 이벤트가 곧바로 송출되지만, 후속 `start` 이벤트는 앞선 배치가 끝날 때까지 대기한다. 세마포어 wait는 **요청 context와 함께 select** 되므로 클라이언트가 그 사이에 연결을 끊으면(탭 닫힘 등) 세마포어 미획득 상태로 즉시 종료된다. `sync.Mutex`는 cancel 불가라 사용하지 않는다.
-- [ ] **백그라운드 진행**: SSE 스트림은 클라이언트 fetch 단위로 살아있다. 클라이언트(§2.5)는 모달 close 시 fetch를 abort하지 **않으며**, 헤더 미니 배지로 진행 집계를 보여주면서 다운로드를 끝까지 받는다. 탭 닫힘/네비게이션은 브라우저가 fetch를 abort → 서버는 `r.Context().Done()`으로 인지하고 진행 중 URL 중단 + 임시 파일 삭제 + 남은 URL 스킵. 별도 잡 레지스트리·재개(resume) 없음.
+- [ ] **배치 직렬화**: 서버는 `Handler.importSem`(size-1 채널 세마포어)로 `POST /api/import-url`을 **프로세스 전역에서 한 번에 한 배치씩 순차 처리**한다. 동시에 여러 클라이언트(또는 같은 사용자가 모달 재오픈으로 추가한 두 번째 배치)가 POST를 보내면, 응답 헤더는 즉시 가고 `queued` 이벤트가 곧바로 송출되지만, 후속 `start` 이벤트는 앞선 배치가 끝날 때까지 대기한다. 세마포어 wait는 **잡 컨텍스트(`Job.Ctx()`)와 함께 select** 되므로, 잡이 명시적 취소되면 미획득 상태로 즉시 종료된다. 클라이언트 disconnect는 잡을 취소하지 않는다 — 아래 *백그라운드 진행*.
+- [ ] **잡 레지스트리 (인메모리)**: 모든 import 배치는 서버 `internal/importjob.Registry`에 등록되어 **request lifecycle과 분리**되어 산다. POST 응답 첫 `register` 프레임으로 받는 `jobId`(`imp_[a-z2-7]{8}`)는 새로고침/탭 재오픈 후 `GET /api/import-url/jobs/{id}/events`(§5.1)로 다시 구독할 수 있는 영구 식별자.
+- [ ] **백그라운드 진행**: 클라이언트 fetch가 끊겨도(모달 close, 새로고침, 탭 닫음) **서버 잡은 끝까지 실행된다**. 클라이언트(§2.5)는 페이지 로드 시 `GET /api/import-url/jobs`로 활성/이력 잡 목록을 받아 row와 헤더 배지를 복원하고, 활성 잡에 대해 `EventSource`로 라이브 진행 stream에 재합류한다. 같은 사용자가 탭 두 개를 열면 같은 잡의 진행을 양쪽이 fan-out으로 본다(subscriber당 64-event 버퍼, drop on full — lifecycle 이벤트 누락 시 SetStatus(terminal)이 채널을 close하므로 핸들러가 hang하지 않는다).
+- [ ] **취소**: `POST /api/import-url/jobs/{id}/cancel`(배치 전체) 또는 `POST .../cancel?index=N`(개별 URL). 진행 중 URL이면 per-URL ctx cancel → urlfetch 종료 → `error: "cancelled"` 이벤트. 대기 중 URL이면 즉시 `cancelled`로 마킹 + 이벤트 emit, 워커는 도달 시점에 skip. 잡 status 결정 규칙: succeeded≥1 → `completed`, 그 외 cancelled가 있으면 `cancelled`, 아니면 `failed`.
+- [ ] **이력 dismiss**: 종료된 잡은 `DELETE /api/import-url/jobs/{id}`로 history에서 제거. 활성 잡은 409(먼저 cancel 필요). 종료된 잡 일괄 정리는 `DELETE /api/import-url/jobs?status=finished`. UI는 모달 footer "완료 항목 모두 지우기" 버튼.
+- [ ] **활성 잡 cap**: 동시에 active(`queued`+`running`) 잡은 `MaxQueuedJobs=100`개로 제한. 초과 시 POST → `429 too_many_jobs`. 단일 사용자 + 직렬 처리라 사실상 도달 불가능한 안전장치.
+- [ ] **서버 재시작 시 휘발**: 잡 레지스트리는 인메모리. SIGINT/SIGTERM은 `signal.NotifyContext` → `Registry.CancelAll()` → `Registry.WaitAll(5s)`(병렬 fan-in) → 진행 중 urlfetch/ffmpeg 정리 → `httpServer.Shutdown(10s)`. 재시작 후 새로고침하면 잡이 0건이고 임시 파일은 정리되어 있다. **디스크 영속 잡 큐는 의도적 비목표** (단일 사용자 LAN, 비용 대비 가치 낮음).
+- [ ] **워커 panic 보호**: `runImportJob`은 `defer recover()`로 panic 시 `summary{Failed: len(URLs)}` + `SetStatus(StatusFailed)`로 잡을 종료 상태에 안착시킨다. 그렇지 않으면 슬롯이 영구 점유되고 graceful shutdown이 5초 대기를 모두 소비.
+- [ ] **로그 redact**: `urlfetch` 실패 로그(`logFetchError`)는 URL의 userinfo(`user:pass@host`)와 sensitive query 키(`token`, `signature`, `key`, `apikey`, `password`, `secret` + AWS 시그니처 키)를 자동 마스킹한다. `*url.Error`도 동일하게 처리.
+- [ ] **URL 길이 cap**: `normalizeURLs`에서 2 KB 초과 URL은 무시. JobSnapshot에 임의 길이 텍스트가 영구 적재되어 `GET /jobs`로 노출되는 것을 차단.
 - [ ] **설정 스냅샷 시점**: `url_import_max_bytes` / `url_import_timeout_seconds`(§2.7)는 **POST 도착 시점**(세마포어 acquire 이전)에 스냅샷을 찍는다. 큐잉 중인 배치는 자기가 받은 시점의 값을 그대로 쓰며, 진행 중에 PATCH /api/settings로 값이 바뀌어도 영향받지 않는다.
 - [ ] **SSRF 정책**: 약하게 — 사설 IP(127.0.0.1, 10.x, 172.16-31.x, 192.168.x, 169.254.x, ::1, fc00::/7, fe80::/10) 차단 안 함 (LAN 미디어 서버 자기 호출 등 정상 케이스 허용)
 - [ ] **인증/쿠키**: 자동 첨부 절대 안 함 (인증 필요한 URL은 실패 처리)
@@ -580,17 +588,21 @@ file_server/
 - **응답**: `200 OK`, `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`
 - SSE 프레임: 각 이벤트는 `data: {JSON}\n\n` 형식. 이벤트 이름은 생략(기본 `message`), JSON의 `phase` 필드로 구분
 - **배치 단위 흐름**:
-  1. `queued` — 응답 헤더 직후 1회. 서버가 POST를 받아들였음을 즉시 알리는 시그널 — 다른 배치가 진행 중이면 후속 `start`가 지연될 수 있다 (§2.6 배치 직렬화). 세마포어가 비어있으면 acquire 직후 바로 `start`가 이어지므로 클라이언트는 보통 이 이벤트를 보지 못하지만, 큐잉이 발생하면 모든 URL row를 "대기 중 (순서 대기)" 상태로 표시한다.
-  2. URL당 이벤트 (아래)
-  3. `summary` — 배치의 성공/실패 합계 1회로 종료
+  1. `register` — 응답 헤더 직후 1회. `jobId`(영구 식별자)를 클라이언트에게 전달한다. 새로고침/다른 탭에서 이 jobId로 `GET /api/import-url/jobs/{id}/events`에 재구독 가능 (§2.6 잡 레지스트리)
+  2. `queued` — 1회. 서버가 POST를 받아들였음을 알리는 시그널 — 다른 배치가 진행 중이면 후속 `start`가 지연될 수 있다 (§2.6 배치 직렬화). 세마포어가 비어있으면 acquire 직후 바로 `start`가 이어지므로 클라이언트는 보통 이 이벤트를 보지 못하지만, 큐잉이 발생하면 모든 URL row를 "대기 중 (순서 대기)" 상태로 표시한다.
+  3. URL당 이벤트 (아래)
+  4. `summary` — 배치의 성공/실패/취소 합계 1회로 종료
 - **URL당 이벤트 흐름**:
   1. `start` — 다운로드 시작 (응답 헤더 검증 통과 직후)
   2. `progress` — 다운로드 진행 (0개 이상, throttled, §5.1.1)
-  3. `done` 또는 `error` — 종료 (URL당 정확히 1개)
+  3. `done` 또는 `error` — 종료 (URL당 정확히 1개; 취소된 URL은 `error: "cancelled"`)
 
 **이벤트 스키마**
 
 ```jsonc
+// phase: "register" — 배치당 1회. POST 응답 첫 프레임에만 등장 (snapshot replay에는 미포함).
+{"phase":"register","jobId":"imp_a3f8k2lm"}
+
 // phase: "queued"  — 배치당 1회. 페이로드는 phase 필드뿐.
 {"phase":"queued"}
 
@@ -610,8 +622,8 @@ file_server/
 {"phase":"error","index":1,"url":"http://example.com/x.html",
  "error":"unsupported_content_type"}
 
-// phase: "summary"
-{"phase":"summary","succeeded":2,"failed":1}
+// phase: "summary"  — `cancelled`는 0이면 omitempty
+{"phase":"summary","succeeded":2,"failed":1,"cancelled":0}
 ```
 
 - `index`는 요청 `urls` 배열의 0-based 인덱스
@@ -636,11 +648,77 @@ file_server/
   - `"ffmpeg_missing"` — ffmpeg 바이너리가 서버 PATH에 없음 (운영자 설치 필요) — `ffmpeg_error`와 구분됨
   - `"network_error"` — 기타 네트워크 실패
   - `"write_error"` — 디스크 저장 실패
+  - `"cancelled"` — 명시적 cancel API 호출 또는 배치 cancel로 중단 (§2.6 취소)
 - 4xx 케이스 (요청 자체 거부 — SSE 스트림 시작 전 일반 JSON 에러 응답):
   - `400 {"error": "invalid path"}` — path traversal
   - `400 {"error": "no urls"}` — 빈 배열
   - `400 {"error": "too many urls"}` — 한 번에 50개 초과
   - `404 {"error": "path not found"}` — 저장 디렉토리 미존재
+  - `429 {"error": "too_many_jobs"}` — 활성 잡 수가 `MaxQueuedJobs=100` 초과 (§2.6 활성 잡 cap)
+
+#### GET /api/import-url/jobs
+- 응답: `200 OK`, `Content-Type: application/json`
+- Body:
+  ```json
+  {
+    "active":   [/* JobSnapshot, ... */],
+    "finished": [/* JobSnapshot, ... */]
+  }
+  ```
+  - 두 배열 모두 `createdAt` asc 정렬
+- `JobSnapshot`:
+  ```jsonc
+  {
+    "id":        "imp_a3f8k2lm",
+    "destPath":  "movies/2026",      // dataDir-relative slash 경로
+    "status":    "running",          // queued | running | completed | failed | cancelled
+    "createdAt": "2026-04-25T12:00:00Z",
+    "urls": [
+      {
+        "url":      "https://...",
+        "name":     "foo.mp4",       // 알려진 후에만 채워짐
+        "type":     "video",         // image | video | audio
+        "status":   "running",       // pending | running | done | error | cancelled
+        "received": 12345,
+        "total":    67890,           // 알 수 없으면 omitempty
+        "warnings": [],
+        "error":    ""               // status=error/cancelled에서만 채워짐
+      }
+    ],
+    "summary": { "succeeded": 1, "failed": 0, "cancelled": 0 }  // 종료 상태 진입 시에만
+  }
+  ```
+
+#### GET /api/import-url/jobs/{id}/events
+- 응답: `200 OK`, `Content-Type: text/event-stream`
+- 첫 프레임: snapshot envelope
+  ```jsonc
+  {"phase":"snapshot","job": <JobSnapshot>}
+  ```
+- 이후 라이브 라이프사이클 이벤트 (`queued` / `start` / `progress` / `done` / `error` / `summary`). `register`는 POST 응답 전용이라 여기에 등장하지 않음.
+- 잡이 이미 종료 상태면 snapshot 1회 후 connection close. 종료 상태로 전이된 활성 잡도 동일 — `SetStatus(terminal)`이 subscriber 채널을 close하면 핸들러는 `summary` 또는 channel-closed 중 먼저 도달한 쪽을 보고 리턴.
+- 미존재 ID → `404 {"error":"job not found"}`
+
+#### POST /api/import-url/jobs/{id}/cancel
+- 쿼리:
+  - 미지정 → 잡 전체 cancel
+  - `?index=N` → URL N만 cancel (잡 진행은 다음 URL부터 계속)
+- 응답: `204 No Content`
+- 동작: §2.6 *취소* 항목 참고
+- 이미 종료된 잡 또는 URL → `409 {"error":"job already finished"}` / `409 {"error":"url already finished"}`
+- 잘못된 index (비숫자, 음수, ≥ urls 길이) → `400`
+- 미존재 ID → `404`
+
+#### DELETE /api/import-url/jobs/{id}
+- 응답: `204 No Content`
+- 활성 잡(`queued`/`running`) → `409 {"error":"job_active"}` (먼저 cancel 필요)
+- 종료된 잡 → history에서 제거. SetStatus(terminal) 시점에 subscriber 채널은 이미 close되어 있어 broadcast 불필요.
+- 미존재 ID → `404`
+
+#### DELETE /api/import-url/jobs?status=finished
+- 쿼리 `status=finished` 필수 (누락 시 `400 {"error":"missing status=finished filter"}`) — 의도하지 않은 "wipe everything" 방지
+- 응답: `200 OK`, `{"removed": <int>}`
+- 종료된 잡만 일괄 제거. 활성 잡은 영향 없음.
 
 ##### 5.1.1 Progress 이벤트 throttling
 - `progress` 이벤트는 **수신 바이트 1 MiB마다** 또는 **250 ms마다** 중 먼저 도달하는 시점에 방출 (양쪽 모두 ticker/카운터 기반)

@@ -4,7 +4,7 @@
 >
 > 선행: [`spec-url-import-background.md`](spec-url-import-background.md) (status: merged) — "모달 닫아도 백그라운드 진행"까지 다룸. 본 문서는 그 §1 Non-goals 첫 항목("탭/브라우저 닫힘 후에도 서버가 끝까지 다운로드")을 별도 spec으로 분리한 것.
 >
-> Status: draft.
+> **Status: merged** — 구현 완료 후 `SPEC.md §2.6` / `§5.1` 본문에 반영됨 (Phase 20 J6). 이후 변경은 `SPEC.md`를 단일 출처로 삼고 이 문서는 결정 이력 보존용으로 그대로 둔다.
 
 ## 1. Objective
 
