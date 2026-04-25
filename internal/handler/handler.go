@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"runtime"
 	"sync"
 	"time"
@@ -65,21 +66,61 @@ func Register(mux *http.ServeMux, dataDir, webDir string, settingsStore *setting
 	// cancel into every active job.
 	h.registry = importjob.New(h.serverCtx)
 
+	// Read-only routes pass through directly. Mutating routes go through
+	// requireSameOrigin so a request whose Origin (when present) does not
+	// match the server's host is rejected before any state changes — a
+	// belt-and-suspenders CSRF mitigation for the no-auth single-user
+	// LAN deployment. GET/HEAD always pass; missing Origin (curl, server-
+	// side calls) also passes since CSRF requires a browser.
 	mux.HandleFunc("/api/browse", h.handleBrowse)
 	mux.HandleFunc("/api/tree", h.handleTree)
 	mux.HandleFunc("/api/stream", h.handleStream)
 	mux.HandleFunc("/api/thumb", h.handleThumb)
-	mux.HandleFunc("/api/upload", h.handleUpload)
-	mux.HandleFunc("/api/file", h.handleFile)
-	mux.HandleFunc("/api/folder", h.handleFolder)
-	mux.HandleFunc("/api/import-url", h.handleImportURL)
-	mux.HandleFunc("/api/import-url/jobs", h.handleJobsRoot)
-	mux.HandleFunc("/api/import-url/jobs/", h.handleJobsByID)
-	mux.HandleFunc("/api/convert", h.handleConvert)
-	mux.HandleFunc("/api/settings", h.handleSettings)
+	mux.HandleFunc("/api/upload", requireSameOrigin(h.handleUpload))
+	mux.HandleFunc("/api/file", requireSameOrigin(h.handleFile))
+	mux.HandleFunc("/api/folder", requireSameOrigin(h.handleFolder))
+	mux.HandleFunc("/api/import-url", requireSameOrigin(h.handleImportURL))
+	mux.HandleFunc("/api/import-url/jobs", requireSameOrigin(h.handleJobsRoot))
+	mux.HandleFunc("/api/import-url/jobs/", requireSameOrigin(h.handleJobsByID))
+	mux.HandleFunc("/api/convert", requireSameOrigin(h.handleConvert))
+	mux.HandleFunc("/api/settings", requireSameOrigin(h.handleSettings))
 
 	mux.Handle("/", http.FileServer(http.Dir(webDir)))
 	return h
+}
+
+// requireSameOrigin wraps a handler so requests with a cross-origin Origin
+// header are rejected with 403 before reaching the inner handler. Safe-method
+// requests (GET/HEAD) always pass through — they cannot mutate state and
+// EventSource needs them. Missing Origin is treated as same-origin (curl,
+// SSR, internal calls). The CLAUDE.md threat model is single-user LAN with
+// no auth; a malicious page on another origin should not be able to issue
+// POST/PATCH/DELETE/PUT against the file server even if the user happens
+// to visit it while having the file server open in another tab.
+func requireSameOrigin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			if !sameOrigin(r) {
+				writeError(w, r, http.StatusForbidden, "cross_origin", nil)
+				return
+			}
+		}
+		next(w, r)
+	}
+}
+
+// sameOrigin reports whether the request's Origin header (if present)
+// matches the request's Host. An absent Origin is treated as same-origin.
+func sameOrigin(r *http.Request) bool {
+	o := r.Header.Get("Origin")
+	if o == "" {
+		return true
+	}
+	u, err := url.Parse(o)
+	if err != nil {
+		return false
+	}
+	return u.Host == r.Host
 }
 
 // settingsSnapshot returns the current URL import settings, falling back to
