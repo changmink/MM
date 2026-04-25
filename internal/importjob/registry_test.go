@@ -134,6 +134,53 @@ func TestRegistry_CancelAll_AffectsAllActive(t *testing.T) {
 	}
 }
 
+// TestRegistry_WaitAll_ParallelDeadline: the deadline budget applies to the
+// pool, not to each job sequentially. With 5 stuck jobs and a 100ms budget
+// the call must return in roughly 100ms (not 500ms) — a regression here
+// would silently extend graceful-shutdown timing.
+func TestRegistry_WaitAll_ParallelDeadline(t *testing.T) {
+	reg := New(context.Background())
+	for i := 0; i < 5; i++ {
+		if _, err := reg.Create("dest", []string{"u"}); err != nil {
+			t.Fatalf("Create #%d: %v", i, err)
+		}
+	}
+
+	start := time.Now()
+	reg.WaitAll(100 * time.Millisecond)
+	elapsed := time.Since(start)
+
+	if elapsed > 250*time.Millisecond {
+		t.Errorf("WaitAll took %v, want ≤ 250ms (budget should apply to the pool, not per-job)", elapsed)
+	}
+}
+
+// TestRegistry_WaitAll_ReturnsEarlyWhenAllDone: when every active job
+// finishes before the deadline, WaitAll must return immediately (no
+// pointless deadline wait).
+func TestRegistry_WaitAll_ReturnsEarlyWhenAllDone(t *testing.T) {
+	reg := New(context.Background())
+	jobs := make([]*Job, 3)
+	for i := range jobs {
+		j, err := reg.Create("dest", []string{"u"})
+		if err != nil {
+			t.Fatalf("Create #%d: %v", i, err)
+		}
+		jobs[i] = j
+	}
+	for _, j := range jobs {
+		j.SetStatus(StatusCompleted)
+	}
+
+	start := time.Now()
+	reg.WaitAll(5 * time.Second)
+	elapsed := time.Since(start)
+
+	if elapsed > 200*time.Millisecond {
+		t.Errorf("WaitAll took %v with all jobs done, want fast return", elapsed)
+	}
+}
+
 func TestRegistry_List_SortedByCreated(t *testing.T) {
 	// Sanity check on the sort guarantee List makes — it is what the API
 	// handler depends on for stable client-side row ordering.

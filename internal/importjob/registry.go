@@ -181,7 +181,8 @@ func (r *Registry) CancelAll() {
 // WaitAll blocks until every currently-active job reaches a terminal state
 // or until d elapses. Pair with CancelAll for graceful shutdown to ensure
 // worker goroutines and their open file handles unwind before the process
-// exits or the test cleanup runs.
+// exits or the test cleanup runs. Jobs are awaited in parallel so a single
+// stuck job cannot starve the rest of the pool of their wait budget.
 func (r *Registry) WaitAll(d time.Duration) {
 	r.mu.RLock()
 	jobs := make([]*Job, 0, len(r.jobs))
@@ -191,14 +192,25 @@ func (r *Registry) WaitAll(d time.Duration) {
 		}
 	}
 	r.mu.RUnlock()
-	deadline := time.NewTimer(d)
-	defer deadline.Stop()
-	for _, j := range jobs {
-		select {
-		case <-j.Done():
-		case <-deadline.C:
-			return
+	if len(jobs) == 0 {
+		return
+	}
+	allDone := make(chan struct{})
+	go func() {
+		var wg sync.WaitGroup
+		wg.Add(len(jobs))
+		for _, j := range jobs {
+			go func(j *Job) {
+				defer wg.Done()
+				<-j.Done()
+			}(j)
 		}
+		wg.Wait()
+		close(allDone)
+	}()
+	select {
+	case <-allDone:
+	case <-time.After(d):
 	}
 }
 

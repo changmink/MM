@@ -196,7 +196,8 @@ func TestImportURL_SSE_Mixed_PartialSuccess(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root, nil)
+	h := Register(mux, root, root, nil)
+	defer h.Close()
 
 	rw := postImport(t, mux, "/", []string{
 		srv.URL + "/ok.jpg",
@@ -246,6 +247,26 @@ func TestImportURL_SSE_Mixed_PartialSuccess(t *testing.T) {
 	}
 	if summary["succeeded"].(float64) != 1 || summary["failed"].(float64) != 2 {
 		t.Errorf("summary = %v, want {1, 2}", summary)
+	}
+
+	// Spec §3.6 status precedence: succeeded ≥ 1 → completed even when other
+	// URLs failed. Lock the rule with an explicit status check.
+	regEv := events[0]
+	jobID, _ := regEv["jobId"].(string)
+	if jobID == "" {
+		t.Fatal("register event missing jobId")
+	}
+	job, ok := h.registry.Get(jobID)
+	if !ok {
+		t.Fatalf("job %q not in registry", jobID)
+	}
+	select {
+	case <-job.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("job did not finish within 2s")
+	}
+	if got := job.Status(); got != importjob.StatusCompleted {
+		t.Errorf("status = %q, want %q (any success → completed)", got, importjob.StatusCompleted)
 	}
 }
 
@@ -449,6 +470,50 @@ func TestImportURL_InvalidBody(t *testing.T) {
 	mux.ServeHTTP(rw, req)
 	if rw.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rw.Code)
+	}
+}
+
+// TestRedactURL covers the credential-stripping log helper. The helper is
+// applied inside logFetchError so signed-URL secrets do not bleed into
+// journald or pasted log snippets when an origin fetch fails.
+func TestRedactURL(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"no secrets", "https://host/path", "https://host/path"},
+		{"userinfo stripped", "https://user:pass@host/path", "https://host/path"},
+		{"userinfo only user", "https://alice@host/path", "https://host/path"},
+		{"token query masked", "https://h/x?token=abc", "https://h/x?token=REDACTED"},
+		{"signature masked, other preserved", "https://h/x?Signature=abc&q=z", "https://h/x?Signature=REDACTED&q=z"},
+		{"case-insensitive key match", "https://h/x?TOKEN=abc", "https://h/x?TOKEN=REDACTED"},
+		{"empty url", "", ""},
+		{"unparseable", "://nope", "<unparseable>"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := redactURL(tc.in)
+			if got != tc.want {
+				t.Errorf("redactURL(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNormalizeURLs_LengthCap drops over-length entries silently so a
+// payload that pads URLs into the registry cannot bloat GET /jobs once
+// J4 ships.
+func TestNormalizeURLs_LengthCap(t *testing.T) {
+	huge := strings.Repeat("a", maxImportURLLength+1)
+	out := normalizeURLs([]string{"https://ok", huge, "https://also-ok"})
+	if len(out) != 2 || out[0] != "https://ok" || out[1] != "https://also-ok" {
+		t.Errorf("normalizeURLs = %v, want [https://ok https://also-ok]", out)
+	}
+
+	exact := "https://" + strings.Repeat("b", maxImportURLLength-len("https://"))
+	if got := normalizeURLs([]string{exact}); len(got) != 1 || got[0] != exact {
+		t.Errorf("URL of exact maxImportURLLength dropped unexpectedly")
 	}
 }
 
@@ -834,8 +899,8 @@ func TestImportURL_TooManyJobs(t *testing.T) {
 
 	// Pre-fill the registry up to a small cap so the next POST is rejected
 	// without having to actually run anything to completion.
-	const cap = 3
-	for i := 0; i < cap; i++ {
+	const maxJobs = 3
+	for i := 0; i < maxJobs; i++ {
 		_, err := h.registry.Create("/", []string{"https://placeholder/" + strconv.Itoa(i)})
 		if err != nil {
 			t.Fatalf("pre-fill #%d: %v", i, err)
@@ -844,7 +909,7 @@ func TestImportURL_TooManyJobs(t *testing.T) {
 	// Tighten the cap so the next Create returns ErrTooManyJobs without us
 	// having to fill 100 slots. SetMaxQueuedForTesting is a documented test
 	// seam in importjob; production code never calls it.
-	importjob.SetMaxQueuedForTesting(h.registry, cap)
+	importjob.SetMaxQueuedForTesting(h.registry, maxJobs)
 
 	rw := postImport(t, mux, "/", []string{srv.URL + "/cat.jpg"})
 	if rw.Code != http.StatusTooManyRequests {

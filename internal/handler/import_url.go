@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -20,6 +22,11 @@ import (
 
 const (
 	maxImportURLs = 50
+	// maxImportURLLength bounds individual URL strings so the registry cannot
+	// be force-fed arbitrarily large blobs that later surface verbatim through
+	// GET /api/import-url/jobs. 2 KB is well above any legitimate signed-URL
+	// length seen in practice (S3, Cloudfront, Mux ~1.5 KB worst case).
+	maxImportURLLength = 2048
 	// progressChanBuffer lets the Fetch goroutine drop samples instead of
 	// blocking when broadcast falls behind. A slow subscriber must never
 	// stall the download.
@@ -203,7 +210,26 @@ func (h *Handler) handleImportURL(w http.ResponseWriter, r *http.Request) {
 // owns the URLState mutations and SSE event publication; the HTTP handler
 // is just one of (potentially) many subscribers and never touches Job state
 // directly.
+//
+// The deferred recover guarantees that even on a panic in urlfetch / ffmpeg
+// helpers the job lands in a terminal state — without it the goroutine dies
+// silently, Done() never closes, the slot stays counted against
+// MaxQueuedJobs forever, and Handler.Close stalls the full WaitAll
+// deadline on shutdown.
 func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destAbs string) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			slog.Error("import worker panic",
+				"jobId", job.ID, "panic", rec, "stack", string(debug.Stack()))
+			urls := job.Snapshot().URLs
+			job.SetSummary(importjob.Summary{Failed: len(urls)})
+			job.Publish(mustEvent("summary", sseSummary{
+				Phase: "summary", Failed: len(urls),
+			}))
+			job.SetStatus(importjob.StatusFailed)
+		}
+	}()
+
 	maxBytes := snap.URLImportMaxBytes
 	perURLTimeout := time.Duration(snap.URLImportTimeoutSeconds) * time.Second
 
@@ -422,13 +448,72 @@ func isCancelled(urlCtx, jobCtx context.Context, ferr *urlfetch.FetchError) bool
 // The client only ever receives the opaque error code; this is where operators
 // see what actually broke — especially useful for ffmpeg_missing (operator
 // must install ffmpeg) and ffmpeg_error (stream-specific stderr can be
-// inspected to tell DRM/format issues apart).
+// inspected to tell DRM/format issues apart). URLs are redacted before
+// logging because user-supplied origins commonly carry signed query
+// parameters and credentials (`?token=`, `user:pass@host`) that should not
+// land in journald or pasted log snippets.
 func logFetchError(u string, ferr *urlfetch.FetchError) {
-	attrs := []any{"code", ferr.Code, "url", u}
+	attrs := []any{"code", ferr.Code, "url", redactURL(u)}
 	if unwrapped := ferr.Unwrap(); unwrapped != nil {
-		attrs = append(attrs, "err", unwrapped.Error())
+		attrs = append(attrs, "err", redactErr(unwrapped))
 	}
 	slog.Warn("url import failed", attrs...)
+}
+
+// sensitiveQueryKeys lists query parameters whose value the URL redactor
+// strips before logging. The match is case-insensitive and is intentionally
+// narrow — broad redaction would obscure useful diagnostic info on benign
+// origins.
+var sensitiveQueryKeys = map[string]struct{}{
+	"token":         {},
+	"access_token":  {},
+	"signature":     {},
+	"sig":           {},
+	"x-amz-signature": {},
+	"key":           {},
+	"apikey":        {},
+	"api_key":       {},
+	"password":      {},
+	"secret":        {},
+}
+
+// redactURL strips userinfo and masks values for query parameters that look
+// like credentials or signatures. Returns "<unparseable>" for inputs that
+// fail url.Parse so a malformed string never short-circuits the rest of the
+// log line.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "<unparseable>"
+	}
+	if u.User != nil {
+		u.User = nil
+	}
+	q := u.Query()
+	changed := false
+	for k := range q {
+		if _, ok := sensitiveQueryKeys[strings.ToLower(k)]; ok {
+			q.Set(k, "REDACTED")
+			changed = true
+		}
+	}
+	if changed {
+		u.RawQuery = q.Encode()
+	}
+	return u.String()
+}
+
+// redactErr applies redactURL to *url.Error wrappers so the URL embedded by
+// net/http inside the error string is also masked. Other errors fall through
+// to err.Error() unchanged.
+func redactErr(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		copy := *ue
+		copy.URL = redactURL(ue.URL)
+		return copy.Error()
+	}
+	return err.Error()
 }
 
 func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, payload any) {
@@ -454,13 +539,17 @@ func mustEvent(phase string, payload any) importjob.Event {
 	return importjob.Event{Phase: phase, Data: data}
 }
 
-// normalizeURLs trims whitespace and drops empty entries while preserving
-// order and intentional duplicates (collisions get _N suffixes downstream).
+// normalizeURLs trims whitespace, drops empty entries, and discards any URL
+// over maxImportURLLength. Order and intentional duplicates are preserved
+// (collisions get _N suffixes downstream). Over-length entries are silently
+// dropped; the request still goes through with the remaining URLs and the
+// downstream count check (maxImportURLs) catches batches whose every URL was
+// rejected.
 func normalizeURLs(in []string) []string {
 	out := make([]string, 0, len(in))
 	for _, u := range in {
 		u = strings.TrimSpace(u)
-		if u == "" {
+		if u == "" || len(u) > maxImportURLLength {
 			continue
 		}
 		out = append(out, u)

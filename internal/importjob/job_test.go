@@ -151,6 +151,50 @@ func TestJob_Cancel_PropagatesContext(t *testing.T) {
 	}
 }
 
+// TestJob_SetStatus_ClosesSubsOnTerminal: handlers blocked reading the
+// events channel must wake up when the worker hits a terminal state, even
+// if the final summary frame was dropped from a full per-subscriber
+// buffer. Without this, a slow client + a cap-1 ResponseWriter would hang
+// the request goroutine until the client disconnected.
+func TestJob_SetStatus_ClosesSubsOnTerminal(t *testing.T) {
+	for _, terminal := range []Status{StatusCompleted, StatusFailed, StatusCancelled} {
+		t.Run(string(terminal), func(t *testing.T) {
+			job := newTestJob(t, "a")
+			sub, _ := job.Subscribe()
+
+			job.SetStatus(terminal)
+
+			select {
+			case _, ok := <-sub:
+				if ok {
+					t.Errorf("channel still open after SetStatus(%q)", terminal)
+				}
+			case <-time.After(200 * time.Millisecond):
+				t.Errorf("channel not closed within 200ms after SetStatus(%q)", terminal)
+			}
+		})
+	}
+}
+
+// TestJob_Subscribe_AfterTerminal returns a pre-closed channel so a J4
+// /jobs/{id}/events subscriber that arrives after the job finished does not
+// block forever. The snapshot is the source of truth in that path.
+func TestJob_Subscribe_AfterTerminal(t *testing.T) {
+	job := newTestJob(t, "a")
+	job.SetStatus(StatusCompleted)
+
+	sub, unsub := job.Subscribe()
+	defer unsub() // must be a no-op
+	select {
+	case _, ok := <-sub:
+		if ok {
+			t.Errorf("expected pre-closed channel for terminal job, got open one")
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Error("Subscribe on terminal job returned an open channel")
+	}
+}
+
 func TestJob_CancelURL_OnlyAffectsTarget(t *testing.T) {
 	job := newTestJob(t, "a", "b", "c")
 

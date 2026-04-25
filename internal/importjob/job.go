@@ -124,8 +124,12 @@ func (j *Job) IsActive() bool {
 // SetStatus transitions the job to a new state. Callers are responsible for
 // emitting the corresponding SSE event (e.g. summary) separately so that the
 // Status field and the broadcast remain in sync. Transitioning into a
-// terminal state also closes the Done channel so callers blocked on
-// graceful shutdown / WaitAll unblock immediately.
+// terminal state also (a) closes the Done channel so graceful shutdown /
+// WaitAll unblocks and (b) closes every subscriber channel so HTTP handlers
+// blocked reading the events stream return promptly even if the final
+// summary frame was dropped from a full per-subscriber buffer. Order is
+// important: callers that want subscribers to see a final summary must
+// Publish it BEFORE calling SetStatus(terminal).
 func (j *Job) SetStatus(s Status) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -133,6 +137,10 @@ func (j *Job) SetStatus(s Status) {
 	if s.IsTerminal() && !j.doneClosed {
 		close(j.done)
 		j.doneClosed = true
+		for id, ch := range j.subs {
+			delete(j.subs, id)
+			close(ch)
+		}
 	}
 }
 
@@ -165,7 +173,11 @@ func (j *Job) UpdateURL(idx int, fn func(*URLState)) {
 }
 
 // Snapshot returns a deep copy of the job's externally visible state safe to
-// hand to JSON encoders or other goroutines.
+// hand to JSON encoders or other goroutines. The slice length and per-index
+// `URL` field are immutable after Create — only Status / Received / Total /
+// Warnings / Error / Name / Type can change — so iterating a snapshot to
+// drive index-keyed work (e.g. cancel-marker loops) is correct even if the
+// worker mutates URLState concurrently via UpdateURL.
 func (j *Job) Snapshot() JobSnapshot {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -192,18 +204,25 @@ func (j *Job) Snapshot() JobSnapshot {
 }
 
 // Subscribe registers a new live event listener. The returned channel is
-// closed by the unsubscribe function — callers should always defer it to
-// avoid leaking the channel. The channel uses a small buffer (defaultSubBuffer)
-// and Publish drops events on overflow rather than blocking.
+// closed either by the unsubscribe function or automatically when the job
+// reaches a terminal state — callers should always defer the unsubscribe
+// to avoid leaking the channel on early returns. If the job is already
+// terminal at subscribe time, the returned channel is pre-closed so the
+// caller's read loop exits immediately; the snapshot reflects the final
+// state in that case.
 func (j *Job) Subscribe() (<-chan Event, func()) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	ch := make(chan Event, defaultSubBuffer)
+	if j.status.IsTerminal() {
+		close(ch)
+		return ch, func() {}
+	}
 	if j.subs == nil {
 		j.subs = make(map[uint64]chan Event)
 	}
 	id := j.nextSubID
 	j.nextSubID++
-	ch := make(chan Event, defaultSubBuffer)
 	j.subs[id] = ch
 	return ch, func() {
 		j.mu.Lock()
