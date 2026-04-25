@@ -573,7 +573,11 @@ func TestImportURL_Queued_EventEmittedOnce(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root, nil)
+	h := Register(mux, root, root, nil)
+	// thumbPool spawns goroutines that write `.thumb/*.jpg` sidecars after
+	// the JPEG import succeeds; without Shutdown they can race with
+	// t.TempDir cleanup and produce "directory not empty" failures.
+	defer h.Close()
 
 	rw := postImport(t, mux, "/", []string{srv.URL + "/cat.jpg"})
 	events := parseSSEEvents(t, rw.Body.String())
@@ -631,7 +635,8 @@ func TestImportURL_Serialization_TwoBatches(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root, nil)
+	h := Register(mux, root, root, nil)
+	defer h.Close() // drains thumbPool; see TestImportURL_Queued_EventEmittedOnce.
 
 	// Batch A acquires the semaphore and then blocks inside the origin.
 	recA, waitA := postImportStreaming(context.Background(), t, mux,
@@ -696,7 +701,8 @@ func TestImportURL_Queued_CanceledWhileWaiting(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root, nil)
+	h := Register(mux, root, root, nil)
+	defer h.Close() // drains thumbPool; see TestImportURL_Queued_EventEmittedOnce.
 
 	// Batch A holds the semaphore.
 	recA, waitA := postImportStreaming(context.Background(), t, mux,
