@@ -2796,3 +2796,374 @@ B5 (E2E 수동 검증 + SPEC.md §2.6 본문 갱신)
 - **위험: 배치 수가 많을 때 브라우저 연결 고갈** — 동시 7개+ 배치를 띄우면 브라우저가 일부를 queue. 서버 mutex가 아닌 브라우저 레벨 큐잉이 발생하지만 기능은 동작. 단일 사용자 + 한 번에 1~2개 배치 예상이면 실전 문제 없음.
 - **위험: `queued` 이벤트를 몰라서 무한 대기로 보이는 구 클라이언트** — B1만 머지하고 B2+ 를 미루는 경우. 현재 `handleSSEEvent` switch에 default case 없으므로 `queued` 는 조용히 무시되고, mutex가 acquire되면 `start` 이벤트가 오므로 사용자 체감 변화 없음 (약간의 지연만). 위험 낮음.
 - **롤백:** B1~B5 커밋 순차 revert로 Phase 18 상태 복귀. 서버/클라이언트가 서로 독립적이라 부분 revert도 가능.
+
+---
+
+## Phase 20 — URL Import 잡 영속성 (`feature/url-import-persistence`) — spec [`spec-url-import-persistence.md`](./spec-url-import-persistence.md)
+
+새로고침/탭 닫고 재오픈해도 진행 중 다운로드가 안 끊기게 한다. 핵심 변화: 잡 lifecycle을 **request lifecycle에서 분리**. 인메모리 잡 레지스트리(`internal/importjob`)가 잡의 진실. handler는 등록 후 첫 subscriber 역할만 하고, 다른 탭/새로고침은 GET 엔드포인트로 snapshot + live stream 구독. 사용자는 개별 URL/배치 단위 취소 + 종료 잡 dismiss 가능.
+
+### 의존성 그래프
+
+```
+J1 (registry 모듈: Job + Registry + Subscribe/Publish/Cancel/Remove + 단위 테스트)
+  │   └─ 독립: Handler가 사용 안 하는 동안은 외부 영향 없음.
+  │
+  ▼
+J2 (graceful shutdown: serverCtx + signal handler)
+  │   └─ 외부 동작 변경 없음. 회귀 검증만. J3 이후 잡 cancel 흐름의 기반.
+  │
+  ▼
+J3 (handleImportURL registry 통합 + handler ctx ≠ job ctx + register 이벤트)
+  │   └─ **첫 사용자 가시 변경**: 모달 닫기 + 새로고침해도 잡 계속. 진행 상황 복원은 J4까지 대기.
+  │
+  ▼
+J4 (GET /jobs + GET /jobs/{id}/events + 클라이언트 bootstrap + subscribe)
+  │   └─ 새로고침/재오픈 시 진행 상황 자동 복원. 다중 탭 fan-out.
+  │
+  ▼
+J5 (cancel + dismiss API + per-URL ctx + UI)
+  │   └─ 명시적 컨트롤. 개별 URL / 배치 / 종료 dismiss / 모두 지우기.
+  │
+  ▼
+J6 (E2E 수동 8개 + SPEC.md §2.6 / §5.1 본문 갱신)
+```
+
+**수직 슬라이스 전략:** J1·J2는 격리, J3는 첫 가시 변경(클라이언트 호환), J4부터 클라이언트 동반. 각 단계 독립 커밋 + 회귀 없음.
+
+**Spec 단순화 결정:** snapshot replay에서 history(이벤트 로그) 별도 보존 안 함. **`JobSnapshot` 자체가 진실** — `URLState.Received`로 progress 누적, `URLState.Status`로 start/done/error/cancelled lifecycle, `Job.Summary`로 종료 카운트. 새 subscriber는 snapshot 1회 + 라이브 stream만 받는다. spec §10 Q2 결론.
+
+---
+
+### J1 — `internal/importjob` 모듈
+
+**파일:** `internal/importjob/job.go`, `internal/importjob/registry.go`, `internal/importjob/registry_test.go`
+
+**타입 (`job.go`):**
+```go
+type Status string
+const (
+    StatusQueued    Status = "queued"
+    StatusRunning   Status = "running"
+    StatusCompleted Status = "completed"
+    StatusFailed    Status = "failed"
+    StatusCancelled Status = "cancelled"
+)
+
+type URLState struct {
+    URL      string   `json:"url"`
+    Name     string   `json:"name,omitempty"`
+    Type     string   `json:"type,omitempty"`
+    Status   string   `json:"status"` // pending | running | done | error | cancelled
+    Received int64    `json:"received"`
+    Total    int64    `json:"total,omitempty"`
+    Warnings []string `json:"warnings,omitempty"`
+    Error    string   `json:"error,omitempty"`
+}
+
+type Summary struct {
+    Succeeded int `json:"succeeded"`
+    Failed    int `json:"failed"`
+    Cancelled int `json:"cancelled"`
+}
+
+type Event struct {
+    Phase string          `json:"phase"`
+    Data  json.RawMessage `json:"-"` // 클라이언트로 전달될 SSE payload (이미 marshalled)
+}
+
+type Job struct {
+    ID        string
+    DestPath  string    // dataDir-relative, slash 경로
+    CreatedAt time.Time
+
+    ctx       context.Context
+    cancel    context.CancelFunc
+
+    mu          sync.Mutex
+    status      Status
+    urls        []URLState
+    summary     *Summary
+    subs        map[uint64]chan Event
+    nextSubID   uint64
+    urlCancels  map[int]context.CancelFunc // index → per-URL cancel
+}
+```
+
+**메서드 (`job.go`):**
+- `(j *Job) Snapshot() JobSnapshot` — mu Lock, deep copy 후 반환.
+- `(j *Job) Subscribe() (<-chan Event, func() unsubscribe)` — 신규 채널(buffer 64) 등록 + 해제 함수.
+- `(j *Job) Publish(ev Event)` — 모든 sub에 non-blocking send (full이면 drop). 또한 mu 안에서 URLState 업데이트는 caller가 별도 헬퍼로.
+- `(j *Job) UpdateURL(idx int, fn func(*URLState))` — mu 안에서 mutation.
+- `(j *Job) SetStatus(s Status)`, `(j *Job) SetSummary(s Summary)`.
+- `(j *Job) Cancel()` — j.cancel 호출 (전체 ctx).
+- `(j *Job) RegisterURLCancel(idx int, cancel context.CancelFunc)` / `UnregisterURLCancel(idx int)`.
+- `(j *Job) CancelURL(idx int) bool` — urlCancels[idx] 호출, ok 반환.
+- `(j *Job) Status() Status`, `(j *Job) IsActive() bool` — convenience.
+
+**Registry (`registry.go`):**
+```go
+const MaxQueuedJobs = 100
+
+var ErrTooManyJobs = errors.New("too many queued jobs")
+var ErrJobNotFound = errors.New("job not found")
+var ErrJobActive = errors.New("job is still active")
+
+type Registry struct {
+    mu        sync.RWMutex
+    jobs      map[string]*Job
+    parentCtx context.Context
+}
+
+func New(parentCtx context.Context) *Registry
+func (r *Registry) Create(destPath string, urls []string) (*Job, error)
+    // ID 생성 (crypto/rand 5 byte → base32lower 8자), 활성+queued > MaxQueuedJobs면 ErrTooManyJobs.
+    // ctx, cancel := context.WithCancel(r.parentCtx). 잡 등록.
+func (r *Registry) Get(id string) (*Job, bool)
+func (r *Registry) List() (active, finished []*Job)
+    // active = queued|running, finished = completed|failed|cancelled. createdAt asc.
+func (r *Registry) Remove(id string) error
+    // 활성 잡이면 ErrJobActive. 종료면 삭제 + 모든 sub에 removed 이벤트 broadcast.
+func (r *Registry) RemoveFinished() int
+    // 종료 잡 일괄 제거 + 각각 broadcast.
+func (r *Registry) CancelAll()
+    // graceful shutdown 시 모든 활성 잡 cancel.
+```
+
+**테스트 (`registry_test.go`):**
+- `TestRegistry_Create_AssignsID` — ID 형식 `imp_[a-z2-7]{8}` 매칭.
+- `TestRegistry_Create_RejectsWhenFull` — Mock으로 MaxQueuedJobs 한계 검증 (테스트용 작은 cap 노출 또는 실제 100 채우기).
+- `TestJob_Subscribe_BroadcastsToAll` — sub 3개 등록, Publish 1회 → 모두 수신.
+- `TestJob_Subscribe_SlowConsumerDropped` — buffer 가득 차도 다른 sub은 수신.
+- `TestJob_Unsubscribe_StopsDelivery` — 해제 후 Publish 안 옴.
+- `TestJob_Cancel_PropagatesContext` — j.ctx.Done() 발화 + status = cancelled (caller가 SetStatus).
+- `TestJob_CancelURL_OnlyAffectsTarget` — index N의 cancel 호출됨, 다른 index는 영향 없음.
+- `TestRegistry_Remove_RejectsActive` — running 상태 잡 → ErrJobActive.
+- `TestRegistry_RemoveFinished_LeavesActive` — 활성/종료 섞인 상태에서 종료만 제거.
+- `TestRegistry_CancelAll_AffectsAllActive` — 모든 active 잡 ctx done.
+
+**완료 기준:** `go test ./internal/importjob -v` 모두 통과. `go build ./...` 통과. 외부 패키지에서 import 가능한 상태이지만 아직 사용처 없음.
+
+**체크포인트:** 단독 머지 가능. 외부 영향 없음.
+
+---
+
+### J2 — graceful shutdown (serverCtx)
+
+**파일:** `cmd/server/main.go`, `internal/handler/handler.go`
+
+**변경 포인트:**
+- `cmd/server/main.go`:
+  - `signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)` 로 `serverCtx` 생성.
+  - HTTP server `ListenAndServe`를 별도 goroutine, main은 `<-serverCtx.Done()` 대기.
+  - 종료 시: `httpServer.Shutdown(shutCtx5s)` → handler.Close() (registry는 J3 이후 추가).
+- `internal/handler/handler.go`:
+  - `Handler` 구조체에 `serverCtx context.Context` 필드 추가.
+  - `Register` 시그니처에 `ctx context.Context` 인자 추가 — 호출 사이트는 `cmd/server/main.go` 1곳.
+  - 시그니처 변경 영향: `internal/handler/*_test.go`의 `Register` 호출 모두 업데이트. nil ctx 허용 위해 `if ctx == nil { ctx = context.Background() }` 가드.
+
+**테스트:**
+- 기존 모든 핸들러 테스트 회귀 통과. 새 단위 테스트 없음.
+- 수동: `go run ./cmd/server` → Ctrl+C → "server shut down gracefully" 로그 확인 (또는 필요 시 slog 한 줄 추가).
+
+**완료 기준:** `go test ./...` 통과. `go build ./...` 통과. 수동 SIGINT 종료 검증.
+
+**체크포인트:** 단독 머지 가능. 외부 동작 변경 없음 — registry 통합은 J3에서.
+
+---
+
+### J3 — `handleImportURL` registry 통합 + handler ctx 분리
+
+**파일:** `internal/handler/handler.go`, `internal/handler/import_url.go`, `internal/handler/import_url_test.go`
+
+**변경 포인트:**
+- `handler.go`:
+  - `Handler` 구조체에 `registry *importjob.Registry` 필드.
+  - `Register`에서 `registry: importjob.New(serverCtx)` 초기화.
+  - `Close()`에서 `h.registry.CancelAll()` 호출 (graceful shutdown 시 진행 잡 cancel).
+- `import_url.go`:
+  - `handleImportURL` 흐름 재구성:
+    1. 기존 path/body 검증 그대로.
+    2. `urls := normalizeURLs(...)` 후 `job, err := h.registry.Create(rel, urls)` — `ErrTooManyJobs`면 429.
+    3. 응답 헤더 + flusher 준비 (기존).
+    4. `events, unsubscribe := job.Subscribe(); defer unsubscribe()`.
+    5. handler goroutine은 `events` 채널을 drain해서 `writeSSEEvent`로 SSE 직접 write. handler context done 시 종료 (잡은 unaffected).
+    6. **별도 worker goroutine** 시작: 배치 처리 (queued emit, importSem acquire, fetch loop, summary). 모든 emit은 `job.Publish(...)` 호출. importSem acquire 대기는 `job.ctx`로 (handler ctx 아님 — 잡은 클라이언트 disconnect 후에도 살아남음).
+    7. handler goroutine은 events 다 drain 후 (worker가 close)) 또는 r.Context().Done() 시 리턴.
+  - **register 이벤트** — worker 시작 직전에 `job.Publish({"phase":"register","jobId":job.ID})` 1회.
+  - per-URL ctx: `fetchOneSSE` 진입 시 `urlCtx, cancel := context.WithCancel(job.ctx)` + `job.RegisterURLCancel(idx, cancel)`, defer로 unregister + cancel. (cancel API는 J5에서 활용, J3에서는 등록만.)
+  - **emit 함수가 두 가지 일** 단순화: 모든 이벤트는 `job.UpdateURL(idx, ...)` (URLState 갱신) + `job.Publish(ev)` (broadcast). handler subscriber가 SSE write를 책임.
+  - 잡 status 전이: Create 직후 queued → importSem acquire 직후 SetStatus(running) → fetch loop 끝 후 summary 산정 → SetStatus(completed/failed/cancelled).
+  - 큐잉 cap: J1의 `MaxQueuedJobs=100` 사용. 초과 시 429 + `{"error":"too_many_jobs"}`.
+- `import_url_test.go`:
+  - 기존 테스트 회귀 — emit 경로 변경되어도 SSE 응답 스키마는 동일해야 함.
+  - **신규 `TestImportURL_Register_FirstEvent`** — POST 응답 첫 SSE가 `register` phase + jobId 형식.
+  - **신규 `TestImportURL_HandlerDisconnect_JobContinues`** — 모의 클라이언트가 첫 progress 받자마자 ctx cancel → 일정 시간 후 `registry.Get(jobId)`로 잡이 여전히 active인지 + 결국 completed/failed로 종료되는지 (mock origin이 진행).
+  - **신규 `TestImportURL_TooManyJobs`** — 큐잉 100개 채우고 101번째 → 429 + `too_many_jobs`.
+
+**완료 기준:** `go test ./internal/handler -run TestImportURL -v` 모두 통과. `go build ./...` 통과.
+
+**체크포인트:** **첫 사용자 가시 변경**. 모달 닫기 + 새로고침해도 잡 계속 (서버 로그로 확인). 단, 새로고침 후 클라이언트는 잡을 발견할 수단 없음 — UI는 빈 상태로 시작 (J4에서 복원). 클라이언트는 `register` phase 무시 (현재 switch에 default 없음, 해롭지 않음).
+
+---
+
+### J4 — `GET /jobs` + `GET /jobs/{id}/events` + 클라이언트 bootstrap
+
+**파일:** `internal/handler/import_url_jobs.go` (신규), `internal/handler/import_url_jobs_test.go` (신규), `internal/handler/handler.go`(라우팅), `web/app.js`, `web/index.html`(version bump)
+
+**서버:**
+- `import_url_jobs.go`:
+  - `handleListJobs(w, r)` — GET only. `registry.List()` → `{active, finished}` JSON. 각 잡은 `JobSnapshot` 모양 (URLs, Summary, Status, CreatedAt, DestPath, ID).
+  - `handleSubscribeJob(w, r)` — GET only. URL path에서 jobId 추출. `registry.Get(id)`, 없으면 404.
+    - SSE 헤더 set + 첫 이벤트 `{"phase":"snapshot","job":<JobSnapshot>}` emit.
+    - 종료 상태 잡이면 snapshot emit 후 close.
+    - 활성 잡이면 `job.Subscribe()`로 채널 받아 r.Context().Done() 또는 채널 close까지 SSE write.
+  - 라우팅 (handler.go):
+    - `mux.HandleFunc("/api/import-url/jobs", h.handleListJobs)` (정확 매치).
+    - `mux.HandleFunc("/api/import-url/jobs/", h.handleJobsRouter)` — path suffix 분기 (`/{id}` GET → reject (snapshot은 list에 있음), `/{id}/events` GET → subscribe). cancel/dismiss는 J5에서 추가.
+- `import_url_jobs_test.go`:
+  - `TestListJobs_Empty` — 잡 없음 → `{active:[], finished:[]}`.
+  - `TestListJobs_ActiveAndFinished` — registry에 직접 잡 주입 후 분류 확인.
+  - `TestSubscribeJob_NotFound` — 404.
+  - `TestSubscribeJob_FinishedReturnsSnapshotAndCloses` — finished 잡 → snapshot 1회 후 connection close.
+  - `TestSubscribeJob_ActiveReceivesLiveEvents` — 진행 중 잡에 외부에서 Publish → snapshot + 후속 이벤트 수신.
+
+**클라이언트 (`app.js`):**
+- 신규 함수 `bootstrapURLJobs()`:
+  - 페이지 로드 직후 `fetch('/api/import-url/jobs')` → 활성/종료 잡들.
+  - 활성 잡 → `urlBatches`에 push (jobId 포함) + URLState 기반 row DOM 복원 (모달 안 열어도 데이터는 유지) + `subscribeToJob(jobId)` 시작.
+  - 종료 잡 → `urlBatches`에 push (이미 done=true) + row 복원 (모달 열면 보임).
+  - `updateURLBadge()` 호출.
+  - app.js 진입 지점(현재 `init()` 또는 동등 위치)에서 1회 호출.
+- 신규 함수 `subscribeToJob(jobId)`:
+  - `new EventSource('/api/import-url/jobs/' + jobId + '/events')`.
+  - onmessage 핸들러: 기존 `handleSSEEvent(batch, ev)` 재사용 (스키마 호환). `snapshot` phase는 무시 (이미 bootstrap에서 처리) 또는 row 갱신.
+  - 끊김 시 EventSource 자동 재연결.
+- `submitURLImport()` 개정:
+  - 응답 첫 이벤트 `register`에서 jobId 추출 → `batch.jobId = ev.jobId`. (POST 응답 자체가 첫 subscriber 역할.)
+- 새 phase handler:
+  - `register` — batch에 jobId 저장 (UI 변경 없음).
+  - `snapshot` — bootstrap 시 이미 처리, 라이브 subscriber에서는 row 일괄 갱신 (멱등).
+- `index.html`: `<script src="/app.js?v=21">` → `v=22`.
+
+**테스트 (수동):**
+1. URL 다운로드 시작 → 모달 닫음 → 새로고침 → 배지에 진행률 + 모달 클릭하면 row 진행 표시.
+2. 탭 두 개 → A에서 시작 → B 새로고침 → 같은 진행 보임.
+3. 종료된 잡들 + 활성 잡 1개 → 새로고침 → 모달 열면 종료 잡 + 활성 잡 row 모두 보임.
+
+**완료 기준:** 핸들러 테스트 5개 통과. 수동 시나리오 3개 통과.
+
+**체크포인트:** 새로고침/재오픈 흐름 완성. 단, 취소/dismiss UI 없음 (J5).
+
+---
+
+### J5 — cancel + dismiss (API + UI)
+
+**파일:** `internal/handler/import_url_jobs.go`, `internal/handler/import_url_jobs_test.go`, `web/app.js`, `web/index.html`, `web/style.css`
+
+**서버:**
+- 라우터 분기 추가 (`handleJobsRouter`):
+  - `POST /api/import-url/jobs/{id}/cancel` (?index=N optional) → `handleCancelJob`.
+  - `DELETE /api/import-url/jobs/{id}` → `handleDeleteJob`.
+  - `DELETE /api/import-url/jobs?status=finished` → `handleDeleteFinishedJobs`.
+- `handleCancelJob`:
+  - jobId 추출, 잡 lookup, 없으면 404.
+  - `index` 쿼리 파라미터 파싱:
+    - 없음 → `job.Cancel()` 호출 → ctx done. fetch loop가 자연스레 cancelled로 종료. (worker goroutine이 미시작 URL은 cancelled로 emit + summary emit + status 전이.)
+    - 있음 → `job.CancelURL(idx)` → false면 400 (이미 종료된 URL or 미존재 idx). true면 fetchOneSSE의 ctx done → urlfetch가 자연스레 종료. emit은 worker가 cancelled error code로.
+  - 활성 URL 없는 종료 잡에 cancel → 409.
+  - 응답 204.
+- `handleDeleteJob`:
+  - 활성 잡 → 409 + `{"error":"job_active"}`.
+  - 종료 잡 → `registry.Remove(id)` + broadcast `{"phase":"removed","jobId":id}`.
+  - 응답 204.
+- `handleDeleteFinishedJobs`:
+  - `?status=finished` 쿼리 검증 (다른 값은 400). `registry.RemoveFinished()` → `{"removed": N}`.
+- `import_url.go` worker 변경:
+  - fetch loop 진입 전 `urlCtx, cancel := context.WithCancel(job.ctx)`, `job.RegisterURLCancel(idx, cancel)`.
+  - `urlfetch.Fetch(urlCtx, ...)` — ctx done이면 cancelled 처리:
+    - `urlCtx.Err() != nil && job.ctx.Err() == nil` → 개별 cancel.
+    - `job.ctx.Err() != nil` → 배치 cancel.
+    - URLState.Status = "cancelled", emit `{"phase":"error","index":N,"error":"cancelled"}` (또는 신규 `cancelled` phase — 호환 위해 error+code "cancelled" 권장).
+  - 잡 종료 status 결정: succeeded≥1 → completed, 그 외 cancelled가 있으면 cancelled, 아니면 failed.
+
+- 핸들러 테스트:
+  - `TestCancelJob_Batch` — 진행 중 잡 cancel → status cancelled, summary broadcast.
+  - `TestCancelJob_PerURL` — 5개 URL 중 index 1 cancel → 그 URL만 cancelled, 잡은 계속, 종료 status는 completed (다른 succeeded 있으면).
+  - `TestCancelJob_NotFound` / `TestCancelJob_AlreadyDone` → 404 / 409.
+  - `TestDeleteJob_Active` → 409.
+  - `TestDeleteJob_Finished` → 204 + 후속 List에서 사라짐.
+  - `TestDeleteFinishedJobs` → 종료 잡들만 일괄 제거.
+
+**클라이언트:**
+- Row UI:
+  - 활성 URL row 우측에 ✕ 버튼 (취소) — `data-job-id` + `data-index`.
+  - 종료 row(succeeded/failed/cancelled) 우측에 X 버튼 (dismiss는 잡 단위, 그래서 row 단위 dismiss는 안 함 — 잡 헤더에서). row 단위는 표시만.
+- 배치 헤더:
+  - 활성 배치: "전체 취소" 버튼.
+  - 종료 배치: "닫기" 버튼 (잡 dismiss).
+- 모달 footer:
+  - "완료 항목 모두 지우기" 버튼 → `DELETE /api/import-url/jobs?status=finished`.
+- `removed` phase handler — 해당 잡의 row + divider DOM 제거 + `urlBatches`에서 splice.
+- `cancelled` 표시 — error code "cancelled"는 `URL_ERROR_LABELS`에 "취소됨"으로 매핑.
+- `index.html`: `<script src="/app.js?v=22">` → `v=23`. 모달 footer "모두 지우기" 버튼 추가.
+- `style.css`: row cancel/dismiss 버튼, 모두 지우기 버튼.
+
+**테스트 (수동):**
+1. 5개 URL 진행 중 2번째만 ✕ → 그것만 cancelled, 나머지 진행, summary "3 성공 / 0 실패 / 1 취소".
+2. 진행 중 "전체 취소" → 모든 미종료 cancelled, 부분파일 정리.
+3. 완료 배치 "닫기" → row 사라짐, 양쪽 탭 동기화.
+4. "모두 지우기" → 종료 잡 일괄 제거.
+5. 활성 잡 dismiss 시도 → UI에서 차단되거나 409 표시.
+
+**완료 기준:** 핸들러 테스트 6개 통과. 수동 5개 통과.
+
+**체크포인트:** spec 모든 기능 완료.
+
+---
+
+### J6 — E2E + SPEC.md 갱신
+
+**파일:** `SPEC.md`, `tasks/spec-url-import-persistence.md`, `tasks/todo.md`
+
+**수동 E2E 8개 시나리오** (spec §8.수동 시나리오와 동일):
+1. 큰 URL 다운로드 시작 → 새로고침 → 배지 복원 + 진행 바 끊김 없이 갱신.
+2. 탭 두 개 → A 시작 → B 새로고침 → 진행 표시.
+3. URL 5개 중 2번째 개별 취소 → 2번만 cancelled, 3~5 정상 진행 + 부분파일 정리.
+4. 다운로드 중 "전체 취소" → 모든 URL 즉시 중단, summary 표시, 부분파일 정리.
+5. 종료 배치 dismiss → 양쪽 탭 row 제거.
+6. 서버 재시작 (Ctrl+C → 재실행) → 새로고침 → 배지 없음, 임시파일 정리됨.
+7. HLS 배치 동일 흐름 (시작 → 새로고침 → 진행 복원 → 취소).
+8. 큐잉 100개 가득 → 101번째 POST → 429 + 사용자에게 에러 메시지.
+
+**SPEC.md §2.6 / §5.1 갱신 내역:**
+- §2.6 본문에 "잡 lifecycle은 클라이언트 세션과 분리, 새로고침/탭 재오픈 후에도 진행" 명시.
+- §2.6에 잡 ID, 새로고침 복원, 다중 탭 fan-out, 취소 단위(개별 URL/배치), dismiss/전체 정리 규칙.
+- §2.6 명시: 서버 재시작 시 잡 손실 (디스크 영속 안 함), graceful shutdown 시 임시파일 정리.
+- §5.1에 신규 엔드포인트 4개 추가:
+  - `GET /api/import-url/jobs` — active/finished snapshot.
+  - `GET /api/import-url/jobs/{id}/events` — snapshot + live SSE.
+  - `POST /api/import-url/jobs/{id}/cancel?index=N` — 개별/배치 cancel.
+  - `DELETE /api/import-url/jobs/{id}` 및 `DELETE /api/import-url/jobs?status=finished`.
+- §5.1 SSE 이벤트 스키마 표에 `register`, `snapshot`, `removed` 3종 추가.
+- `MaxQueuedJobs=100` 한도 명시.
+
+**spec-url-import-persistence.md** 상단 Status를 `merged into SPEC §2.6` 로 갱신.
+
+**완료 기준:** 8개 모두 통과 + SPEC.md 반영 + `tasks/todo.md` 체크.
+
+---
+
+### Out of scope (Phase 20)
+- 디스크 영속 잡 큐 (서버 재시작 후 자동 재개) — 별도 phase.
+- HTTP Range resume (끊긴 바이트 이어받기).
+- 다중 탭 실시간 push (탭 B에서 새 잡 발견은 페이지 로드 시점에만).
+- 사용자 인증 / 멀티 사용자.
+- 잡 history 자동 TTL.
+
+### 위험 / 롤백
+- **위험: handler ctx와 job ctx 분리 후 첫 subscriber(POST 응답) goroutine 누수** — handler가 일찍 return해도 worker는 job.ctx로 살아있어야 한다. handler subscriber 채널은 unsubscribe로 정리, worker는 별도 goroutine에서 job.ctx까지 살아있다가 종료 시 publish summary + status 전이 후 자연 종료. 테스트로 검증 (`TestImportURL_HandlerDisconnect_JobContinues`).
+- **위험: subscriber buffer 가득 시 lifecycle 이벤트 drop** — start/done/error/summary가 dropped되면 클라이언트 상태 불일치. buffer 64로 충분하지만, 안전장치로 lifecycle 이벤트는 drop 시 sub detach + close (클라이언트가 EventSource 재연결로 snapshot 다시 받음).
+- **위험: graceful shutdown 시 ffmpeg HLS 자식 프로세스 좀비** — registry.CancelAll() → job.ctx done → urlfetch/hls의 ctx 감지 → ffmpeg.Process.Kill() 또는 SIGTERM. 기존 `runHLSRemux`의 ctx cancel 경로 검증 필요 (재사용 가능해야 함).
+- **위험: 클라이언트가 `register`/`snapshot`/`removed` phase 모르는 구버전** — J3만 머지 시 `register`는 default case 없으므로 무시됨. J4 머지 후엔 `snapshot`/`removed`도 동일. switch에 명시 default(no-op) 추가해 forward-compatibility 확보.
+- **롤백:** J1~J6 커밋 순차 revert로 Phase 19 상태 복귀. J1~J2는 격리되어 있어 부분 revert 가능. J3는 emit 경로 재구성이라 클라이언트 호환만 유지되면 단독 revert 안전.
