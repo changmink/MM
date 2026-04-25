@@ -707,25 +707,26 @@ document.addEventListener('keydown', e => {
 });
 
 function openURLModal() {
-  const hasActive = anyBatchActive();
   urlInput.value = '';
   urlError.textContent = '';
   urlError.classList.add('hidden');
 
-  if (!hasActive) {
-    // Fresh start: drop any completed-but-still-listed batches and reset
-    // the row area. Success completions already fired browse() via
-    // maybeFinalize(); failure-only rounds drop their rows here so the
-    // user gets a clean slate to try again.
-    urlBatches.length = 0;
+  // Preserve the modal's contents whenever urlBatches has anything to
+  // show. That includes:
+  //   - active batches (live progress)
+  //   - finished batches restored from bootstrapURLJobs (history rows
+  //     the user can dismiss via "닫기" / "완료 항목 모두 지우기")
+  //   - finished batches still lingering from an in-session error round
+  // Only fully-empty registry counts as a "fresh start" — that's when
+  // maybeFinalize already cleared everything after a successful round
+  // or after the 3-second linger of an error-only round.
+  if (urlBatches.length === 0) {
     urlBadgeLinger = false;
     urlRows.innerHTML = '';
     urlSummary.textContent = '';
     urlSummary.className = 'url-summary hidden';
     urlResult.classList.add('hidden');
   }
-  // When hasActive: keep existing rows / summary visible so the modal
-  // picks up right where the background work is.
 
   urlModal.classList.remove('hidden');
   updateURLBadge();
@@ -1049,22 +1050,28 @@ function handleSSEEvent(batch, ev) {
       // the rows from GET /jobs, this just overwrites with the same
       // values. The job inside `ev` mirrors the JobSnapshot wire shape.
       applyJobSnapshotToBatch(batch, ev.job);
-      break;
-    }
-    case 'removed': {
-      // J5 broadcast: a finished job was dismissed. The bootstrap row is
-      // owned by us, so tear it down and drop the batch from the
-      // registry. POST batches never see this phase (they are still
-      // tracked by the active session that submitted them).
-      removeBatchRows(batch);
-      const idx = urlBatches.indexOf(batch);
-      if (idx !== -1) urlBatches.splice(idx, 1);
-      if (batch.eventSource) {
-        batch.eventSource.close();
-        batch.eventSource = null;
+      // Race window: the job may have transitioned to terminal between
+      // bootstrap's GET /jobs and our subscribe. The server's stream
+      // closes cleanly in that case (Subscribe pre-closes the channel
+      // for terminal jobs and never publishes summary), so without this
+      // guard the browser's default EventSource auto-reconnect would
+      // spin against a finished job every ~3s — wasting connections and
+      // re-encoding the same snapshot indefinitely. Detect the terminal
+      // status here and finalize locally just like the live summary
+      // path would have.
+      const status = ev.job && ev.job.status;
+      if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+        if (batch.eventSource) {
+          batch.eventSource.close();
+          batch.eventSource = null;
+        }
+        if (!batch.done) {
+          batch.done = true;
+          updateBatchControls(batch);
+          maybeFinalize();
+          updateURLBadge();
+        }
       }
-      maybeFinalize();
-      updateURLBadge();
       break;
     }
     case 'queued': {
