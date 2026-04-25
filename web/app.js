@@ -1024,6 +1024,38 @@ function setRowStatus(row, statusClass, statusText) {
 
 function handleSSEEvent(batch, ev) {
   switch (ev.phase) {
+    case 'register': {
+      // First frame on POST responses — server hands us the jobId so a
+      // refresh can rebind via GET /jobs/{id}/events. Restored batches
+      // already have jobId from the bootstrap fetch and never see this
+      // phase.
+      if (!batch.jobId) batch.jobId = ev.jobId;
+      break;
+    }
+    case 'snapshot': {
+      // First frame on EventSource subscriptions — re-apply server state
+      // to every row. Idempotent: if bootstrapURLJobs already restored
+      // the rows from GET /jobs, this just overwrites with the same
+      // values. The job inside `ev` mirrors the JobSnapshot wire shape.
+      applyJobSnapshotToBatch(batch, ev.job);
+      break;
+    }
+    case 'removed': {
+      // J5 broadcast: a finished job was dismissed. The bootstrap row is
+      // owned by us, so tear it down and drop the batch from the
+      // registry. POST batches never see this phase (they are still
+      // tracked by the active session that submitted them).
+      removeBatchRows(batch);
+      const idx = urlBatches.indexOf(batch);
+      if (idx !== -1) urlBatches.splice(idx, 1);
+      if (batch.eventSource) {
+        batch.eventSource.close();
+        batch.eventSource = null;
+      }
+      maybeFinalize();
+      updateURLBadge();
+      break;
+    }
     case 'queued': {
       // Server accepted the POST but has not yet acquired the batch
       // semaphore — another batch is still running. Flip this batch's
@@ -1089,6 +1121,18 @@ function handleSSEEvent(batch, ev) {
       // batches possibly in flight, consecutive summaries would overwrite
       // each other unpredictably. maybeFinalize() aggregates across every
       // batch in the round once the last one settles.
+      //
+      // For EventSource-subscribed batches (restored via bootstrap or a
+      // second tab) the POST submitURLImport finally never runs, so we
+      // close the stream and finalize here instead. POST-driven batches
+      // have no eventSource and fall through — their finally handles it.
+      if (batch.eventSource) {
+        batch.eventSource.close();
+        batch.eventSource = null;
+        batch.done = true;
+        maybeFinalize();
+        updateURLBadge();
+      }
       break;
     }
   }
@@ -1097,6 +1141,160 @@ function handleSSEEvent(batch, ev) {
 function showURLError(msg) {
   urlError.textContent = msg;
   urlError.classList.remove('hidden');
+}
+
+// ── Background job bootstrap / fan-out subscription (Phase 20 J4) ────────────
+// On every page load we ask the server which import jobs are alive, restore
+// rows for them, and (for active jobs) attach an EventSource so live progress
+// keeps flowing into the same UI the POST flow uses. A second tab opening
+// the page sees the same jobs with no extra ceremony.
+
+async function bootstrapURLJobs() {
+  let body;
+  try {
+    const res = await fetch('/api/import-url/jobs');
+    if (!res.ok) return;
+    body = await res.json();
+  } catch (e) {
+    // Network or parse failure: silently fall through. The user sees no
+    // restored progress, but the rest of the app still works.
+    console.warn('bootstrapURLJobs failed', e);
+    return;
+  }
+  const active = Array.isArray(body.active) ? body.active : [];
+  const finished = Array.isArray(body.finished) ? body.finished : [];
+  if (active.length === 0 && finished.length === 0) return;
+
+  // Render finished first so they sit at the top of the result area —
+  // active progress rows naturally land below as the user-current focus.
+  for (const job of finished) restoreJobBatch(job, false);
+  for (const job of active) restoreJobBatch(job, true);
+
+  if (urlBatches.length > 0) {
+    urlResult.classList.remove('hidden');
+  }
+  updateConfirmButton();
+  updateURLBadge();
+}
+
+// restoreJobBatch builds a batch from a server JobSnapshot and renders one
+// row per URL with the correct status/progress already applied.
+function restoreJobBatch(jobSnap, isActive) {
+  const batch = {
+    id: ++urlBatchSeq,
+    jobId: jobSnap.id,
+    rowEls: new Map(),
+    succeeded: 0,
+    failed: 0,
+    total: jobSnap.urls.length,
+    done: !isActive,
+    eventSource: null,
+  };
+  urlBatches.push(batch);
+
+  // Visual separator with a synthetic "복원" tag instead of "배치 N" so the
+  // user can tell at a glance which rows are picked up from a prior tab vs
+  // freshly submitted in this session.
+  const divider = document.createElement('div');
+  divider.className = 'url-batch-divider';
+  divider.dataset.batch = String(batch.id);
+  divider.textContent = isActive ? `복원된 배치` : `이전 결과`;
+  urlRows.appendChild(divider);
+
+  jobSnap.urls.forEach((u, i) => {
+    const row = ensureURLRow(batch, i, u.url);
+    applyURLStateToRow(row, u);
+    if (u.status === 'done') batch.succeeded++;
+    else if (u.status === 'error' || u.status === 'cancelled') batch.failed++;
+  });
+
+  if (isActive) subscribeToJob(batch);
+}
+
+// applyURLStateToRow reflects a server URLState onto an existing DOM row.
+// Used both by the bootstrap restore path and by the EventSource snapshot
+// frame for late subscribers — the operation is idempotent.
+function applyURLStateToRow(row, u) {
+  row.querySelector('.url-row-name').textContent = u.name || u.url;
+  const total = Number(u.total) || 0;
+  row.dataset.total = String(total);
+  row.classList.toggle('url-row-indeterminate', total === 0 && u.status === 'running');
+  const fill = row.querySelector('.url-progress-fill');
+  switch (u.status) {
+    case 'pending':
+      setRowStatus(row, 'status-pending', '대기 중');
+      fill.style.width = '0%';
+      break;
+    case 'running': {
+      if (total > 0) {
+        const received = Number(u.received) || 0;
+        const pct = Math.min(100, (received / total) * 100);
+        fill.style.width = pct.toFixed(1) + '%';
+        setRowStatus(row, 'status-downloading',
+          `${formatSize(received)} / ${formatSize(total)} · ${Math.floor(pct)}%`);
+      } else {
+        setRowStatus(row, 'status-downloading', formatSize(Number(u.received) || 0));
+      }
+      break;
+    }
+    case 'done': {
+      fill.style.width = '100%';
+      const warn = (u.warnings && u.warnings.length > 0) ? ` · ${u.warnings.join(', ')}` : '';
+      setRowStatus(row, 'status-done', `완료 (${formatSize(Number(u.received) || 0)})${warn}`);
+      break;
+    }
+    case 'cancelled':
+      setRowStatus(row, 'status-error', '취소됨');
+      break;
+    case 'error': {
+      const label = URL_ERROR_LABELS[u.error] || u.error || '알 수 없는 오류';
+      setRowStatus(row, 'status-error', '실패 · ' + label);
+      break;
+    }
+  }
+}
+
+// applyJobSnapshotToBatch is the EventSource analogue: re-apply the server
+// snapshot to every row in the batch. Used when a fresh subscriber's first
+// frame arrives.
+function applyJobSnapshotToBatch(batch, job) {
+  if (!job || !Array.isArray(job.urls)) return;
+  job.urls.forEach((u, i) => {
+    const row = ensureURLRow(batch, i, u.url);
+    applyURLStateToRow(row, u);
+  });
+}
+
+// removeBatchRows tears down every DOM contribution this batch made — the
+// per-URL rows and the divider. Used by the `removed` phase from J5.
+function removeBatchRows(batch) {
+  for (const row of batch.rowEls.values()) row.remove();
+  batch.rowEls.clear();
+  const divider = urlRows.querySelector(
+    `.url-batch-divider[data-batch="${batch.id}"]`);
+  if (divider) divider.remove();
+}
+
+// subscribeToJob opens an EventSource against /api/import-url/jobs/{id}/events
+// and routes every frame through the existing handleSSEEvent path. The
+// EventSource is closed explicitly on summary so the auto-reconnect default
+// does not waste a round-trip on a finished job.
+function subscribeToJob(batch) {
+  if (!batch.jobId) return;
+  const es = new EventSource('/api/import-url/jobs/' + encodeURIComponent(batch.jobId) + '/events');
+  batch.eventSource = es;
+  es.onmessage = e => {
+    let ev;
+    try { ev = JSON.parse(e.data); }
+    catch (err) { console.warn('bad sse frame', e.data, err); return; }
+    handleSSEEvent(batch, ev);
+  };
+  es.onerror = () => {
+    // EventSource auto-reconnects on transient failures. We close
+    // explicitly only after summary was processed (in handleSSEEvent),
+    // so an onerror here means a real network drop. Let the browser
+    // retry; if the server is back we resync via the snapshot frame.
+  };
 }
 
 // ── TS → MP4 변환 ─────────────────────────────────────────────────────────────
@@ -1868,3 +2066,7 @@ syncToolbarUI();
 const initPath = new URLSearchParams(location.search).get('path') || '/';
 browse(initPath, false);
 loadTree();
+// Restore in-progress URL imports from the server (Phase 20 J4). Independent
+// of browse/tree — safe to fire-and-forget; the badge appears asynchronously
+// when the response arrives.
+bootstrapURLJobs();
