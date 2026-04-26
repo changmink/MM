@@ -7,11 +7,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
-	"github.com/chromedp/cdproto/runtime"
+	cdpruntime "github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 )
 
@@ -38,11 +40,49 @@ func startStickyServer(t *testing.T, dataDir string) *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
+// findChromeBinary returns the path to a Chrome/Chromium executable that
+// chromedp can drive, or "" if none is available. It first probes $PATH for
+// the common binary names, then falls back to the canonical install paths
+// on Windows and macOS where Chrome typically lives outside $PATH.
+func findChromeBinary() string {
+	for _, name := range []string{"google-chrome", "chrome", "chromium", "chromium-browser"} {
+		if p, err := exec.LookPath(name); err == nil {
+			return p
+		}
+	}
+	switch runtime.GOOS {
+	case "windows":
+		for _, p := range []string{
+			`C:\Program Files\Google\Chrome\Application\chrome.exe`,
+			`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		} {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+	case "darwin":
+		for _, p := range []string{
+			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+			"/Applications/Chromium.app/Contents/MacOS/Chromium",
+		} {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+	}
+	return ""
+}
+
 // newStickyChromeCtx allocates a headless Chrome context. Skips the test when
 // no Chrome/Chromium is installed (CI without browser, fresh dev box, etc.).
 func newStickyChromeCtx(t *testing.T) (context.Context, context.CancelFunc) {
 	t.Helper()
+	chromePath := findChromeBinary()
+	if chromePath == "" {
+		t.Skip("chrome/chromium not installed; skipping sticky e2e test")
+	}
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.ExecPath(chromePath),
 		chromedp.WindowSize(stickyViewportW, stickyViewportH),
 		chromedp.NoFirstRun,
 		chromedp.NoDefaultBrowserCheck,
@@ -200,6 +240,6 @@ func TestSidebarSticky_LongTree(t *testing.T) {
 
 // awaitPromise lets chromedp.Evaluate await async expressions; without it the
 // scroll-and-rAF script returns before layout has settled.
-func awaitPromise(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+func awaitPromise(p *cdpruntime.EvaluateParams) *cdpruntime.EvaluateParams {
 	return p.WithAwaitPromise(true)
 }
