@@ -8,6 +8,8 @@ let videoEntries = [];   // videos in current dir for grid (visible set)
 let lbIndex = 0;
 let playlist = [];       // audio playlist (visible set)
 let playlistIndex = 0;
+let visibleFilePaths = [];
+const selectedPaths = new Set();
 
 // Sort/filter state. Drives toolbar + URL sync. Defaults match the URL
 // defaults that are omitted from the querystring.
@@ -39,6 +41,9 @@ const browseToolbar = document.getElementById('browse-toolbar');
 const typeButtons   = browseToolbar.querySelectorAll('.type-btn');
 const toolbarSearch = document.getElementById('toolbar-search');
 const toolbarSort   = document.getElementById('toolbar-sort');
+const selectAllFiles = document.getElementById('select-all-files');
+const selectionSummary = document.getElementById('selection-summary');
+const clearSelectionBtn = document.getElementById('clear-selection-btn');
 const folderModal   = document.getElementById('folder-modal');
 const folderNameInput = document.getElementById('folder-name-input');
 const folderCancelBtn = document.getElementById('folder-cancel-btn');
@@ -88,6 +93,7 @@ const DND_MIME = 'application/x-fileserver-move';
 // dataTransfer.getData() is only readable on drop; types[] is readable
 // always but doesn't include the value.
 let dragSrcPath = null;
+let dragSrcPaths = [];
 
 // ── Routing ───────────────────────────────────────────────────────────────────
 // popstate treats the URL as the source of truth — read view + path out of it,
@@ -149,12 +155,14 @@ async function browse(path, pushState = true) {
 // in sync with the visible set so prev/next don't land on hidden entries.
 function renderView() {
   const visible = applyView(allEntries);
+  syncSelectionWithVisible(visible);
   imageEntries = visible.filter(e => e.type === 'image');
   videoEntries = visible.filter(e => e.type === 'video');
   playlist     = visible.filter(e => e.type === 'audio');
   renderBrowseSummary(visible);
   renderFileList(visible);
   updateConvertAllBtn(visible);
+  renderSelectionControls();
 }
 
 function visibleTSPaths(visible) {
@@ -298,6 +306,51 @@ function renderFileList(entries) {
   }
 }
 
+function syncSelectionWithVisible(entries) {
+  visibleFilePaths = entries.filter(e => !e.is_dir).map(e => e.path);
+  const visibleSet = new Set(visibleFilePaths);
+  for (const path of Array.from(selectedPaths)) {
+    if (!visibleSet.has(path)) selectedPaths.delete(path);
+  }
+}
+
+function renderSelectionControls() {
+  const total = visibleFilePaths.length;
+  const selected = visibleFilePaths.filter(path => selectedPaths.has(path)).length;
+  selectAllFiles.disabled = total === 0;
+  selectAllFiles.checked = total > 0 && selected === total;
+  selectAllFiles.indeterminate = selected > 0 && selected < total;
+  selectionSummary.textContent = selected
+    ? `선택 ${selected}개 / ${total}개`
+    : `선택 0개${total ? ` / ${total}개` : ''}`;
+  clearSelectionBtn.hidden = selected === 0;
+}
+
+function setSelected(path, selected) {
+  if (selected) selectedPaths.add(path);
+  else selectedPaths.delete(path);
+  renderView();
+}
+
+function selectedMovePathsFor(entry) {
+  if (selectedPaths.has(entry.path)) return Array.from(selectedPaths);
+  return [entry.path];
+}
+
+selectAllFiles.addEventListener('change', () => {
+  if (selectAllFiles.checked) {
+    visibleFilePaths.forEach(path => selectedPaths.add(path));
+  } else {
+    visibleFilePaths.forEach(path => selectedPaths.delete(path));
+  }
+  renderView();
+});
+
+clearSelectionBtn.addEventListener('click', () => {
+  selectedPaths.clear();
+  renderView();
+});
+
 function sectionTitle(text) {
   const el = document.createElement('div');
   el.className = 'section-title';
@@ -317,12 +370,16 @@ function buildImageGrid(images) {
       : '/api/stream?path=' + encodeURIComponent(entry.path);
 
     card.innerHTML = `
+      <label class="select-check" title="선택">
+        <input type="checkbox" aria-label="${esc(entry.name)} 선택">
+      </label>
       <img src="${esc(thumbSrc)}" alt="${esc(entry.name)}" loading="lazy">
       <div class="thumb-name">${esc(entry.name)}</div>
       <span class="size-badge">${esc(formatSize(entry.size))}</span>
       <button class="rename-btn" title="이름 변경" aria-label="이름 변경">✎</button>
       <button class="delete-btn" title="삭제" aria-label="삭제">✕</button>
     `;
+    bindEntrySelection(card, entry);
     card.querySelector('img').addEventListener('click', () => openLightboxImage(i));
     card.querySelector('.rename-btn').addEventListener('click', (ev) => {
       ev.stopPropagation();
@@ -354,6 +411,9 @@ function buildVideoGrid(videos) {
       : '';
 
     card.innerHTML = `
+      <label class="select-check" title="선택">
+        <input type="checkbox" aria-label="${esc(entry.name)} 선택">
+      </label>
       <img src="${esc(thumbSrc)}" alt="${esc(entry.name)}" loading="lazy">
       <div class="thumb-name">${esc(entry.name)}</div>
       <span class="size-badge">${esc(formatSize(entry.size))}</span>
@@ -362,6 +422,7 @@ function buildVideoGrid(videos) {
       <button class="rename-btn" title="이름 변경" aria-label="이름 변경">✎</button>
       <button class="delete-btn" title="삭제" aria-label="삭제">✕</button>
     `;
+    bindEntrySelection(card, entry);
     card.querySelector('img').addEventListener('click', () => openLightboxVideo(entry));
     card.querySelector('.rename-btn').addEventListener('click', (ev) => {
       ev.stopPropagation();
@@ -387,6 +448,7 @@ function buildTable(entries) {
   const table = document.createElement('table');
   table.className = 'file-table';
   table.innerHTML = `<thead><tr>
+    <th class="select-cell"></th>
     <th>이름</th>
     <th class="size-cell">크기</th>
     <th></th>
@@ -398,6 +460,7 @@ function buildTable(entries) {
     const icon = iconFor(entry.type, entry.is_dir);
     const size = entry.is_dir ? '—' : formatSize(entry.size);
     tr.innerHTML = `
+      <td class="select-cell"><input type="checkbox" aria-label="${esc(entry.name)} 선택"></td>
       <td class="name-cell"><span class="icon">${icon}</span>${esc(entry.name)}</td>
       <td class="size-cell">${size}</td>
       <td class="action-cell">
@@ -405,6 +468,7 @@ function buildTable(entries) {
         <button class="delete-action" title="삭제" aria-label="삭제">🗑</button>
       </td>
     `;
+    bindEntrySelection(tr, entry);
     tr.querySelector('.name-cell').addEventListener('click', () => handleClick(entry));
     tr.querySelector('.rename-action').addEventListener('click', () => openRenameModal(entry));
     tr.querySelector('.delete-action').addEventListener('click', () =>
@@ -418,6 +482,14 @@ function buildTable(entries) {
 
   table.appendChild(tbody);
   return table;
+}
+
+function bindEntrySelection(container, entry) {
+  const checkbox = container.querySelector('input[type="checkbox"]');
+  checkbox.checked = selectedPaths.has(entry.path);
+  container.classList.toggle('selected', checkbox.checked);
+  checkbox.addEventListener('click', ev => ev.stopPropagation());
+  checkbox.addEventListener('change', () => setSelected(entry.path, checkbox.checked));
 }
 
 function handleClick(entry) {
@@ -1741,29 +1813,38 @@ function isInternalMove(e) {
 function attachDragHandlers(el, entry) {
   el.draggable = true;
   el.addEventListener('dragstart', e => {
+    const paths = selectedMovePathsFor(entry);
     dragSrcPath = entry.path;
+    dragSrcPaths = paths;
     e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData(DND_MIME, JSON.stringify({ src: entry.path }));
+    e.dataTransfer.setData(DND_MIME, JSON.stringify({ src: entry.path, paths }));
     // Firefox won't initiate a drag without text/plain or text/uri-list set.
-    e.dataTransfer.setData('text/plain', entry.path);
+    e.dataTransfer.setData('text/plain', paths.join('\n'));
     el.classList.add('dragging');
   });
   el.addEventListener('dragend', () => {
     dragSrcPath = null;
+    dragSrcPaths = [];
     el.classList.remove('dragging');
   });
+}
+
+function canDropMoveTo(destPath) {
+  const paths = dragSrcPaths.length ? dragSrcPaths : (dragSrcPath ? [dragSrcPath] : []);
+  if (!paths.length) return true;
+  return paths.some(path => parentDir(path) !== destPath);
 }
 
 function attachDropHandlers(el, destPath) {
   el.addEventListener('dragenter', e => {
     if (!isInternalMove(e)) return;
-    if (dragSrcPath && parentDir(dragSrcPath) === destPath) return;
+    if (!canDropMoveTo(destPath)) return;
     e.preventDefault();
     el.classList.add('drop-target');
   });
   el.addEventListener('dragover', e => {
     if (!isInternalMove(e)) return;
-    if (dragSrcPath && parentDir(dragSrcPath) === destPath) {
+    if (!canDropMoveTo(destPath)) {
       e.dataTransfer.dropEffect = 'none';
       return;
     }
@@ -1785,25 +1866,40 @@ function attachDropHandlers(el, destPath) {
       return;
     }
     if (!payload || !payload.src) return;
-    if (parentDir(payload.src) === destPath) return; // defensive — also blocked by backend
-    moveFile(payload.src, destPath);
+    const paths = Array.isArray(payload.paths) && payload.paths.length
+      ? payload.paths
+      : [payload.src];
+    moveFiles(paths, destPath);
   });
 }
 
 async function moveFile(srcPath, destDir) {
+  moveFiles([srcPath], destDir);
+}
+
+async function moveFiles(srcPaths, destDir) {
+  const paths = Array.from(new Set(srcPaths)).filter(path => parentDir(path) !== destDir);
+  if (paths.length === 0) return; // defensive — also blocked by backend
+  const failed = [];
   try {
-    const res = await fetch('/api/file?path=' + encodeURIComponent(srcPath), {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ to: destDir }),
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      alert('이동 실패: ' + (data.error || res.statusText));
-      return;
+    for (const path of paths) {
+      const res = await fetch('/api/file?path=' + encodeURIComponent(path), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: destDir }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        failed.push(`${path}: ${data.error || res.statusText}`);
+        continue;
+      }
+      selectedPaths.delete(path);
     }
     // Folder structure unchanged on file move; only the listing needs a refresh.
     browse(currentPath, false);
+    if (failed.length) {
+      alert(`이동 실패 ${failed.length}개\n` + failed.join('\n'));
+    }
   } catch (e) {
     alert('이동 실패: ' + e.message);
   }

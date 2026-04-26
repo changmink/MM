@@ -285,6 +285,32 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   font-size: 0.85rem;
   cursor: pointer;
 }
+.select-all-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  white-space: nowrap;
+  user-select: none;
+}
+.select-all-wrap input {
+  accent-color: var(--accent);
+}
+.clear-selection-btn {
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--text-dim);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+.clear-selection-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.clear-selection-btn[hidden] { display: none; }
 
 /* File list */
 #file-list { padding: 0 24px; }
@@ -311,6 +337,11 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   overflow: hidden;
   cursor: pointer;
   background: var(--surface);
+  outline: 1px solid transparent;
+  outline-offset: -1px;
+}
+.thumb-card.selected {
+  outline-color: var(--accent);
 }
 .thumb-card img {
   width: 100%;
@@ -348,6 +379,25 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   justify-content: center;
   font-size: 12px;
 }
+.thumb-card .select-check {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  z-index: 2;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,0.6);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.thumb-card .select-check input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+}
 .thumb-card .delete-btn { right: 4px; }
 .thumb-card .rename-btn { right: 30px; }
 .thumb-card .convert-btn { right: 56px; width: auto; padding: 0 6px; font-size: 10px; font-weight: 600; }
@@ -369,7 +419,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .thumb-card .size-badge {
   position: absolute;
   top: 4px;
-  left: 4px;
+  left: 34px;
   background: rgba(0,0,0,0.6);
   color: #fff;
   padding: 2px 6px;
@@ -394,6 +444,16 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .file-table .name-cell { cursor: pointer; }
 .file-table .name-cell:hover { color: var(--accent); }
 .file-table .size-cell { color: var(--text-dim); white-space: nowrap; }
+.file-table .select-cell {
+  width: 32px;
+  text-align: center;
+}
+.file-table .select-cell input {
+  accent-color: var(--accent);
+}
+.file-table tr.selected td {
+  background: rgba(79,142,247,0.1);
+}
 .file-table .action-cell { text-align: right; }
 .file-table .action-cell button {
   background: none;
