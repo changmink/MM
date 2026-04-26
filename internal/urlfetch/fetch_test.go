@@ -41,7 +41,7 @@ func TestFetch_OK_JPEG(t *testing.T) {
 	defer srv.Close()
 
 	dest := t.TempDir()
-	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/photo.jpg", dest, "/photos", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
@@ -73,7 +73,7 @@ func TestFetch_OK_MP4(t *testing.T) {
 	defer srv.Close()
 
 	dest := t.TempDir()
-	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/clip.mp4", dest, "/movies", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
@@ -92,7 +92,7 @@ func TestFetch_OK_MP3(t *testing.T) {
 	defer srv.Close()
 
 	dest := t.TempDir()
-	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/song.mp3", dest, "/music", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
@@ -112,7 +112,7 @@ func TestFetch_ExtensionReplaced_MKV(t *testing.T) {
 
 	dest := t.TempDir()
 	// URL declares .mp4 but the server returns MKV; extension must flip to .mkv.
-	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/clip.mp4", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
@@ -135,7 +135,7 @@ func TestFetch_DefaultName_Video(t *testing.T) {
 
 	dest := t.TempDir()
 	// URL path is "/" so there is no usable basename.
-	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
@@ -151,7 +151,7 @@ func TestFetch_DefaultName_Audio(t *testing.T) {
 	defer srv.Close()
 
 	dest := t.TempDir()
-	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
@@ -163,7 +163,7 @@ func TestFetch_DefaultName_Audio(t *testing.T) {
 
 func TestFetch_InvalidScheme(t *testing.T) {
 	dest := t.TempDir()
-	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		"file:///etc/passwd", dest, "/", testMaxBytes, nil)
 	if ferr == nil || ferr.Code != "invalid_scheme" {
 		t.Fatalf("got %v, want invalid_scheme", ferr)
@@ -172,7 +172,7 @@ func TestFetch_InvalidScheme(t *testing.T) {
 
 func TestFetch_InvalidURL(t *testing.T) {
 	dest := t.TempDir()
-	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		"://no-scheme", dest, "/", testMaxBytes, nil)
 	if ferr == nil || ferr.Code != "invalid_url" {
 		t.Fatalf("got %v, want invalid_url", ferr)
@@ -194,7 +194,7 @@ func TestFetch_NoContentLength_Succeeds(t *testing.T) {
 	defer srv.Close()
 
 	dest := t.TempDir()
-	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/photo.jpg", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
@@ -215,7 +215,7 @@ func TestFetch_ContentLengthTooLarge(t *testing.T) {
 	defer srv.Close()
 
 	dest := t.TempDir()
-	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/big.jpg", dest, "/", cap, nil)
 	if ferr == nil || ferr.Code != "too_large" {
 		t.Fatalf("got %v, want too_large", ferr)
@@ -241,7 +241,7 @@ func TestFetch_NoContentLength_RuntimeCap(t *testing.T) {
 	defer srv.Close()
 
 	dest := t.TempDir()
-	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/over.jpg", dest, "/", cap, nil)
 	if ferr == nil || ferr.Code != "too_large" {
 		t.Fatalf("got %v, want too_large", ferr)
@@ -255,7 +255,7 @@ func TestFetch_UnsupportedContentType(t *testing.T) {
 	defer srv.Close()
 
 	dest := t.TempDir()
-	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/page.html", dest, "/", testMaxBytes, nil)
 	if ferr == nil || ferr.Code != "unsupported_content_type" {
 		t.Fatalf("got %v, want unsupported_content_type", ferr)
@@ -269,7 +269,7 @@ func TestFetch_ExtensionMismatch_Replaced(t *testing.T) {
 	defer srv.Close()
 
 	dest := t.TempDir()
-	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/cat.jpg", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
@@ -288,7 +288,7 @@ func TestFetch_NoExtensionInURL(t *testing.T) {
 	defer srv.Close()
 
 	dest := t.TempDir()
-	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/photo", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
@@ -308,7 +308,7 @@ func TestFetch_ExtensionEquivalent_NoWarning(t *testing.T) {
 	defer srv.Close()
 
 	dest := t.TempDir()
-	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/photo.jpeg", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
@@ -330,7 +330,7 @@ func TestFetch_RedirectCap(t *testing.T) {
 	defer srv.Close()
 
 	dest := t.TempDir()
-	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/start", dest, "/", testMaxBytes, nil)
 	if ferr == nil || ferr.Code != "too_many_redirects" {
 		t.Fatalf("got %v, want too_many_redirects", ferr)
@@ -344,7 +344,7 @@ func TestFetch_HTTP404(t *testing.T) {
 	defer srv.Close()
 
 	dest := t.TempDir()
-	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/missing.jpg", dest, "/", testMaxBytes, nil)
 	if ferr == nil || ferr.Code != "http_error" {
 		t.Fatalf("got %v, want http_error", ferr)
@@ -358,7 +358,7 @@ func TestFetch_FilenameSanitize_DotDot(t *testing.T) {
 	defer srv.Close()
 
 	dest := t.TempDir()
-	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/a/..", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
@@ -383,7 +383,7 @@ func TestFetch_Collision_RenamesUnique(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/photo.jpg", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
@@ -407,7 +407,7 @@ func TestFetch_TempFileCleaned_OnRejection(t *testing.T) {
 	defer srv.Close()
 
 	dest := t.TempDir()
-	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/x.txt", dest, "/", testMaxBytes, nil)
 	if ferr == nil {
 		t.Fatal("expected failure")
@@ -423,7 +423,7 @@ func TestFetch_ExtensionReplaced_FromNonImageExt(t *testing.T) {
 	defer srv.Close()
 
 	dest := t.TempDir()
-	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/blob.bin", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
@@ -449,7 +449,7 @@ func TestFetch_Start_Called_WithNameTotalType(t *testing.T) {
 		},
 	}
 	dest := t.TempDir()
-	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/clip.mp4", dest, "/", testMaxBytes, cb)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
@@ -477,7 +477,7 @@ func TestFetch_Progress_Emitted_ForLargePayload(t *testing.T) {
 	}
 
 	dest := t.TempDir()
-	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/big.jpg", dest, "/", testMaxBytes, cb)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
@@ -510,7 +510,7 @@ func TestFetch_Progress_NotEmitted_ForTinyPayload(t *testing.T) {
 	}
 
 	dest := t.TempDir()
-	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/tiny.jpg", dest, "/", testMaxBytes, cb)
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
@@ -528,7 +528,7 @@ func TestFetch_Progress_NilCallback_OK(t *testing.T) {
 
 	dest := t.TempDir()
 	// Explicit zero-value Callbacks — both fields nil.
-	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(),
+	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/any.jpg", dest, "/", testMaxBytes, &urlfetch.Callbacks{})
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)

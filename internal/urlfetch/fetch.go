@@ -16,6 +16,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path"
@@ -31,6 +32,8 @@ const (
 	MaxRedirects = 5
 	// DialTimeout limits TCP connection establishment.
 	DialTimeout = 10 * time.Second
+	// DNSLookupTimeout bounds hostname resolution before each protected dial.
+	DNSLookupTimeout = 5 * time.Second
 
 	// progressByteThreshold and progressTimeThreshold bound how often the
 	// Progress callback fires so a very fast download does not emit thousands
@@ -72,6 +75,7 @@ type Callbacks struct {
 var (
 	errTooManyRedirects = errors.New("too_many_redirects")
 	errInvalidScheme    = errors.New("invalid_scheme")
+	errPrivateNetwork   = errors.New("private_network")
 
 	contentTypeToExt = map[string]string{
 		"image/jpeg":       ".jpg",
@@ -112,18 +116,67 @@ var (
 	}
 )
 
+type clientConfig struct {
+	allowPrivateNetworks bool
+	resolver             Resolver
+}
+
+// ClientOption configures the URL import HTTP client.
+type ClientOption func(*clientConfig)
+
+type secureTransport struct {
+	*http.Transport
+	allowPrivateNetworks bool
+	resolver             Resolver
+}
+
+// AllowPrivateNetworks permits loopback, private, link-local, multicast, and
+// unspecified destination IPs. Production code should not use this; it exists
+// for local-only tests and explicitly trusted deployments.
+func AllowPrivateNetworks() ClientOption {
+	return func(cfg *clientConfig) {
+		cfg.allowPrivateNetworks = true
+	}
+}
+
+// WithResolver overrides DNS resolution for the URL import client. Production
+// callers normally use net.DefaultResolver; tests use this to pin resolution
+// outcomes without relying on real DNS.
+func WithResolver(resolver Resolver) ClientOption {
+	return func(cfg *clientConfig) {
+		cfg.resolver = resolver
+	}
+}
+
 // NewClient returns the http.Client used by Fetch. It enforces a 10s dial
-// timeout, a 5-redirect cap, and refuses any redirect hop whose scheme is
-// not http/https. No cookie jar — auth headers and cookies are never carried
-// over by default. The per-URL total timeout is enforced via context by the
-// caller (see handler/import_url.go) so it can be adjusted at runtime via
-// /api/settings without reconstructing the client.
-func NewClient() *http.Client {
+// timeout, a 5-redirect cap, refuses any redirect hop whose scheme is not
+// http/https, and blocks requests to private network addresses by default.
+// No cookie jar — auth headers and cookies are never carried over by default.
+// The per-URL total timeout is enforced via context by the caller (see
+// handler/import_url.go) so it can be adjusted at runtime via /api/settings
+// without reconstructing the client.
+func NewClient(opts ...ClientOption) *http.Client {
+	var cfg clientConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	if cfg.resolver == nil {
+		cfg.resolver = net.DefaultResolver
+	}
 	dialer := &net.Dialer{Timeout: DialTimeout}
-	return &http.Client{
+	dialContext := dialer.DialContext
+	if !cfg.allowPrivateNetworks {
+		dialContext = publicOnlyDialContext(dialer, cfg.resolver)
+	}
+	transport := &secureTransport{
 		Transport: &http.Transport{
-			DialContext: dialer.DialContext,
+			DialContext: dialContext,
 		},
+		allowPrivateNetworks: cfg.allowPrivateNetworks,
+		resolver:             cfg.resolver,
+	}
+	return &http.Client{
+		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= MaxRedirects {
 				return errTooManyRedirects
@@ -135,6 +188,105 @@ func NewClient() *http.Client {
 			return nil
 		},
 	}
+}
+
+func clientAllowsPrivateNetworks(client *http.Client) bool {
+	if client == nil {
+		return false
+	}
+	transport, ok := client.Transport.(*secureTransport)
+	return ok && transport.allowPrivateNetworks
+}
+
+func clientResolver(client *http.Client) Resolver {
+	if client == nil {
+		return net.DefaultResolver
+	}
+	transport, ok := client.Transport.(*secureTransport)
+	if !ok || transport.resolver == nil {
+		return net.DefaultResolver
+	}
+	return transport.resolver
+}
+
+func publicOnlyDialContext(dialer *net.Dialer, resolver Resolver) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		ips, err := lookupPublicIPs(ctx, resolver, host)
+		if err != nil {
+			return nil, err
+		}
+		for _, ip := range ips {
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			if ctx.Err() != nil {
+				return nil, err
+			}
+		}
+		return nil, fmt.Errorf("dial %s: no reachable addresses", address)
+	}
+}
+
+// Resolver resolves hostnames for protected URL import dials.
+type Resolver interface {
+	LookupIPAddr(context.Context, string) ([]net.IPAddr, error)
+}
+
+func lookupPublicIPs(ctx context.Context, resolver Resolver, host string) ([]netip.Addr, error) {
+	lookupCtx, cancel := context.WithTimeout(ctx, DNSLookupTimeout)
+	defer cancel()
+	ips, err := resolveHost(lookupCtx, resolver, host)
+	if err != nil {
+		return nil, err
+	}
+	for _, ip := range ips {
+		if isBlockedDestination(ip) {
+			return nil, errPrivateNetwork
+		}
+	}
+	return ips, nil
+}
+
+func resolveHost(ctx context.Context, resolver Resolver, host string) ([]netip.Addr, error) {
+	if ip, err := netip.ParseAddr(host); err == nil {
+		return []netip.Addr{ip.Unmap()}, nil
+	}
+	addrs, err := resolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		// Fail closed: partial DNS results that arrive with an error are not
+		// trusted for SSRF decisions.
+		return nil, err
+	}
+	ips := make([]netip.Addr, 0, len(addrs))
+	for _, addr := range addrs {
+		ip, ok := netip.AddrFromSlice(addr.IP)
+		if !ok {
+			continue
+		}
+		ips = append(ips, ip.Unmap())
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("resolve %s: no addresses", host)
+	}
+	return ips, nil
+}
+
+func isBlockedDestination(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	// CGNAT (100.64.0.0/10) is intentionally not covered by IsPrivate and is
+	// treated as publicly routable for this single-user import policy.
+	return !ip.IsValid() ||
+		ip.IsLoopback() ||
+		ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() ||
+		ip.IsUnspecified()
 }
 
 // Fetch downloads rawURL into destDir (absolute path, caller-validated) and
@@ -183,7 +335,7 @@ func Fetch(ctx context.Context, client *http.Client, rawURL, destDir, relDir str
 
 	rawContentType := resp.Header.Get("Content-Type")
 	if isHLSResponse(rawContentType, parsed.Path) {
-		return fetchHLS(ctx, resp, parsed, rawURL, destDir, relDir, warnings, maxBytes, cb)
+		return fetchHLS(ctx, resp, parsed, rawURL, destDir, relDir, warnings, maxBytes, cb, clientAllowsPrivateNetworks(client), clientResolver(client))
 	}
 
 	// A declared Content-Length above the cap is rejected up front so we
@@ -269,6 +421,9 @@ func classifyHTTPError(err error) *FetchError {
 	}
 	if errors.Is(err, errInvalidScheme) {
 		return &FetchError{Code: "invalid_scheme", Err: err}
+	}
+	if errors.Is(err, errPrivateNetwork) {
+		return &FetchError{Code: "private_network", Err: err}
 	}
 	var ce *x509.CertificateInvalidError
 	var hve x509.HostnameError

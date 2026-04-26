@@ -68,7 +68,8 @@ func TestUpload(t *testing.T) {
 func TestUploadResponseFields(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root, nil)
+	h := Register(mux, root, root, nil)
+	defer h.Close()
 
 	upload := func(filename string, content []byte) *httptest.ResponseRecorder {
 		body := &bytes.Buffer{}

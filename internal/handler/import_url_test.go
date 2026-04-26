@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/chang/file_server/internal/importjob"
+	"github.com/chang/file_server/internal/urlfetch"
 )
 
 // jpegBody is a minimal JFIF byte sequence — enough for tests; we don't decode it.
@@ -25,6 +26,11 @@ var jpegBody = []byte{
 	0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00,
 	0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
 	0xFF, 0xD9,
+}
+
+func registerImportTest(mux *http.ServeMux, root string) *Handler {
+	return Register(mux, root, root, nil,
+		WithURLClient(urlfetch.NewClient(urlfetch.AllowPrivateNetworks())))
 }
 
 // newHoldReleaseOrigin returns an origin that blocks any request whose URL
@@ -107,6 +113,28 @@ func postImport(t *testing.T, mux *http.ServeMux, path string, urls []string) *h
 	return rw
 }
 
+func TestImportURL_DefaultClientBlocksPrivateNetwork(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	h := Register(mux, root, root, nil)
+	defer h.Close()
+
+	rw := postImport(t, mux, "/", []string{"http://127.0.0.1/photo.jpg"})
+	if rw.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rw.Code, rw.Body.String())
+	}
+	events := parseSSEEvents(t, rw.Body.String())
+	var gotPrivate bool
+	for _, ev := range events {
+		if ev["phase"] == "error" && ev["error"] == "private_network" {
+			gotPrivate = true
+		}
+	}
+	if !gotPrivate {
+		t.Fatalf("events = %+v, want private_network error", events)
+	}
+}
+
 // parseSSEEvents splits an SSE response body into JSON payloads. It expects
 // each event to be a single `data: {json}\n\n` frame (no event names, no IDs)
 // and returns the parsed payloads in order. Malformed frames fail the test.
@@ -148,7 +176,7 @@ func TestImportURL_SSE_Headers(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root, nil)
+	registerImportTest(mux, root)
 
 	rw := postImport(t, mux, "/", []string{srv.URL + "/cat.jpg"})
 	if rw.Code != http.StatusOK {
@@ -171,7 +199,7 @@ func TestImportURL_SSE_SingleImage_StartDoneSummary(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root, nil)
+	registerImportTest(mux, root)
 
 	rw := postImport(t, mux, "/", []string{srv.URL + "/cat.jpg"})
 	events := parseSSEEvents(t, rw.Body.String())
@@ -202,7 +230,7 @@ func TestImportURL_SSE_HeaderError_NoStart(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root, nil)
+	registerImportTest(mux, root)
 
 	// page.html → unsupported_content_type rejected before Start fires.
 	rw := postImport(t, mux, "/", []string{srv.URL + "/page.html"})
@@ -226,7 +254,7 @@ func TestImportURL_SSE_Mixed_PartialSuccess(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close()
 
 	rw := postImport(t, mux, "/", []string{
@@ -306,7 +334,7 @@ func TestImportURL_SSE_LargeFile_ProgressEmitted(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root, nil)
+	registerImportTest(mux, root)
 
 	rw := postImport(t, mux, "/", []string{srv.URL + "/big.jpg"})
 	events := parseSSEEvents(t, rw.Body.String())
@@ -335,7 +363,7 @@ func TestImportURL_SSE_AudioSkipsThumbPool(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root, nil)
+	registerImportTest(mux, root)
 
 	rw := postImport(t, mux, "/", []string{srv.URL + "/song.mp3"})
 	events := parseSSEEvents(t, rw.Body.String())
@@ -374,7 +402,7 @@ func TestImportURL_HandlerDisconnect_JobContinues(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close() // drains thumbPool + registry.WaitAll for clean t.TempDir cleanup
 
 	// Cancel the request context after the first frame so we observe a real
@@ -413,7 +441,7 @@ func TestImportURL_HandlerDisconnect_JobContinues(t *testing.T) {
 func TestImportURL_EmptyArray(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root, nil)
+	registerImportTest(mux, root)
 
 	rw := postImport(t, mux, "/", []string{})
 	if rw.Code != http.StatusBadRequest {
@@ -427,7 +455,7 @@ func TestImportURL_EmptyArray(t *testing.T) {
 func TestImportURL_OnlyWhitespace(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root, nil)
+	registerImportTest(mux, root)
 
 	rw := postImport(t, mux, "/", []string{"  ", "\t", ""})
 	if rw.Code != http.StatusBadRequest {
@@ -438,7 +466,7 @@ func TestImportURL_OnlyWhitespace(t *testing.T) {
 func TestImportURL_TooMany(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root, nil)
+	registerImportTest(mux, root)
 
 	urls := make([]string, 51)
 	for i := range urls {
@@ -456,7 +484,7 @@ func TestImportURL_TooMany(t *testing.T) {
 func TestImportURL_PathTraversal(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root, nil)
+	registerImportTest(mux, root)
 
 	rw := postImport(t, mux, "../escape", []string{"https://example.com/x.jpg"})
 	if rw.Code != http.StatusBadRequest {
@@ -467,7 +495,7 @@ func TestImportURL_PathTraversal(t *testing.T) {
 func TestImportURL_PathNotFound(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root, nil)
+	registerImportTest(mux, root)
 
 	rw := postImport(t, mux, "/no-such-dir", []string{"https://example.com/x.jpg"})
 	if rw.Code != http.StatusNotFound {
@@ -478,7 +506,7 @@ func TestImportURL_PathNotFound(t *testing.T) {
 func TestImportURL_MethodNotAllowed(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root, nil)
+	registerImportTest(mux, root)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/import-url?path=/", nil)
 	rw := httptest.NewRecorder()
@@ -491,7 +519,7 @@ func TestImportURL_MethodNotAllowed(t *testing.T) {
 func TestImportURL_InvalidBody(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root, nil)
+	registerImportTest(mux, root)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/import-url?path=/",
 		strings.NewReader("not json"))
@@ -766,7 +794,7 @@ func TestImportURL_AllFailed_StatusIsFailed(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close()
 
 	rw := postImport(t, mux, "/", []string{
@@ -805,7 +833,7 @@ func TestImportURL_Queued_EventEmittedOnce(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	// thumbPool spawns goroutines that write `.thumb/*.jpg` sidecars after
 	// the JPEG import succeeds; without Shutdown they can race with
 	// t.TempDir cleanup and produce "directory not empty" failures.
@@ -868,7 +896,7 @@ func TestImportURL_Serialization_TwoBatches(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close() // drains thumbPool; see TestImportURL_Queued_EventEmittedOnce.
 
 	// Batch A acquires the semaphore and then blocks inside the origin.
@@ -934,7 +962,7 @@ func TestImportURL_Queued_CanceledWhileWaiting(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close() // drains thumbPool; see TestImportURL_Queued_EventEmittedOnce.
 
 	// Batch A holds the semaphore.
@@ -989,7 +1017,7 @@ func TestImportURL_Register_FirstEvent(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close()
 
 	rw := postImport(t, mux, "/", []string{srv.URL + "/cat.jpg"})
@@ -1022,7 +1050,7 @@ func TestImportURL_TooManyJobs(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	// Pre-filled placeholder jobs have no worker so they would never reach a
 	// terminal state on their own — mark them done before Close so its 5s
 	// WaitAll(grace) returns immediately.
