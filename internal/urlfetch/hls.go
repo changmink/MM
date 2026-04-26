@@ -23,10 +23,19 @@ import (
 // context.Canceled / context.DeadlineExceeded to stable FetchError.Code values
 // documented in SPEC §5.1.
 var (
-	errHLSVariantScheme = errors.New("invalid_scheme")
-	errFFmpegMissing    = errors.New("ffmpeg_missing")
-	errHLSTooLarge      = errors.New("hls_too_large")
+	errHLSVariantScheme    = errors.New("invalid_scheme")
+	errFFmpegMissing       = errors.New("ffmpeg_missing")
+	errHLSTooLarge         = errors.New("hls_too_large")
+	errHLSTooManySegments  = errors.New("hls_too_many_segments")
+	errHLSMissingMapURI    = errors.New("hls_map_missing_uri")
 )
+
+// hlsMaxSegments caps how many #EXTINF segments a single media playlist may
+// declare. 10,000 ≈ 16 hours of 6-second VOD — comfortably above any normal
+// movie or lecture, but below an attacker's "1 byte × millions" request-rate
+// flood that the cumulative byte cap (url_import_max_bytes) cannot stop on
+// its own. See spec §3.2 D-8.
+const hlsMaxSegments = 10000
 
 // ffmpegExitError wraps a non-zero ffmpeg termination with captured stderr so
 // the caller can surface diagnostic context in logs.
@@ -145,6 +154,150 @@ func parseMasterPlaylist(body []byte, base *url.URL) (*url.URL, error) {
 func validatePublicURL(ctx context.Context, resolver Resolver, u *url.URL) error {
 	_, err := lookupPublicIPs(ctx, resolver, u.Hostname())
 	return err
+}
+
+// entryKind tags playlistEntry by its source tag — needed by materializeHLS to
+// decide naming convention (seg_NNNN.ext vs key_N.bin vs init.ext) and what
+// kind of URI rewrite to perform.
+type entryKind int
+
+const (
+	entrySegment entryKind = iota
+	entryKey
+	entryInit
+)
+
+// playlistEntry represents one remote resource referenced by a media playlist.
+// lineIdx points at the rawLines element materializeHLS should rewrite — for
+// segments that's the URI line, for #EXT-X-KEY / #EXT-X-MAP it's the tag line
+// itself (the URI is an attribute embedded in the tag).
+type playlistEntry struct {
+	lineIdx int
+	uri     *url.URL
+	kind    entryKind
+}
+
+// mediaPlaylist is the parsed view of a media playlist. rawLines preserves
+// the input verbatim so materializeHLS can output a near-identical playlist
+// with only URI substrings replaced; entries enumerates every external
+// resource that needs to be downloaded and rewritten before ffmpeg consumes
+// the rewritten playlist.
+type mediaPlaylist struct {
+	rawLines []string
+	entries  []playlistEntry
+}
+
+// uriAttrRE extracts the value from a URI="..." attribute used by
+// #EXT-X-KEY and #EXT-X-MAP. Real HLS attribute lists are CSV with quoted
+// strings and unquoted enumerations; we only need URI which is always
+// quoted per RFC 8216 §4.2.
+var uriAttrRE = regexp.MustCompile(`URI="([^"]*)"`)
+
+// parseMediaPlaylist walks the playlist body and collects every external
+// resource (#EXTINF segments, #EXT-X-KEY URIs except METHOD=NONE, and
+// #EXT-X-MAP init segments) with its URL resolved against base. Returns
+// errHLSVariantScheme for any URI whose resolved scheme is not http/https,
+// errHLSTooManySegments past hlsMaxSegments, errHLSMissingMapURI for an
+// #EXT-X-MAP without URI. Empty / comment-only bodies return a playlist
+// with no entries (no error) — fetchHLS will treat that as a degenerate
+// stream and let ffmpeg fail naturally.
+func parseMediaPlaylist(body []byte, base *url.URL) (*mediaPlaylist, error) {
+	rawLines := splitPlaylistLines(body)
+	pl := &mediaPlaylist{rawLines: rawLines}
+
+	// State: have we just seen #EXTINF? Then the next non-comment, non-blank
+	// line is the segment URI for that segment.
+	pendingSeg := false
+	segCount := 0
+
+	for i, line := range rawLines {
+		trim := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trim, "#EXTINF"):
+			pendingSeg = true
+		case strings.HasPrefix(trim, "#EXT-X-KEY"):
+			uriStr := uriAttrValue(trim)
+			if uriStr == "" {
+				// METHOD=NONE has no URI — nothing to download. Other tags
+				// without URI also fall through (defensive).
+				continue
+			}
+			entry, err := makePlaylistEntry(uriStr, base, i, entryKey)
+			if err != nil {
+				return nil, err
+			}
+			pl.entries = append(pl.entries, entry)
+		case strings.HasPrefix(trim, "#EXT-X-MAP"):
+			uriStr := uriAttrValue(trim)
+			if uriStr == "" {
+				return nil, errHLSMissingMapURI
+			}
+			entry, err := makePlaylistEntry(uriStr, base, i, entryInit)
+			if err != nil {
+				return nil, err
+			}
+			pl.entries = append(pl.entries, entry)
+		case strings.HasPrefix(trim, "#"):
+			// Other tag (#EXTM3U, #EXT-X-VERSION, #EXT-X-BYTERANGE, etc.) —
+			// preserved in rawLines, no entry created.
+		case trim == "":
+			// Blank line — preserved in rawLines, no entry.
+		default:
+			// Non-comment, non-blank line. If a segment is pending, this is
+			// the segment URI. Otherwise treat as orphan and ignore — could
+			// be a continuation of an unknown tag.
+			if !pendingSeg {
+				continue
+			}
+			entry, err := makePlaylistEntry(trim, base, i, entrySegment)
+			if err != nil {
+				return nil, err
+			}
+			pl.entries = append(pl.entries, entry)
+			pendingSeg = false
+			segCount++
+			if segCount > hlsMaxSegments {
+				return nil, errHLSTooManySegments
+			}
+		}
+	}
+
+	return pl, nil
+}
+
+func makePlaylistEntry(uriStr string, base *url.URL, lineIdx int, kind entryKind) (playlistEntry, error) {
+	parsed, err := url.Parse(uriStr)
+	if err != nil {
+		return playlistEntry{}, err
+	}
+	resolved := base.ResolveReference(parsed)
+	scheme := strings.ToLower(resolved.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return playlistEntry{}, errHLSVariantScheme
+	}
+	return playlistEntry{lineIdx: lineIdx, uri: resolved, kind: kind}, nil
+}
+
+// uriAttrValue extracts the URI attribute value from an #EXT-X-KEY or
+// #EXT-X-MAP tag line. Returns "" if URI is absent.
+func uriAttrValue(tagLine string) string {
+	m := uriAttrRE.FindStringSubmatch(tagLine)
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
+// splitPlaylistLines normalizes CRLF → LF and splits on LF, preserving every
+// line (including the trailing empty one when the body ends with a newline).
+// Used by parseMediaPlaylist so rawLines indices match the original byte
+// layout for materializeHLS rewrite.
+func splitPlaylistLines(body []byte) []string {
+	if len(body) == 0 {
+		return nil
+	}
+	normalized := strings.ReplaceAll(string(body), "\r\n", "\n")
+	return strings.Split(normalized, "\n")
 }
 
 // sameURL compares two URLs by scheme/host/path — query/fragment ignored — so
