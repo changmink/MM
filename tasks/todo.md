@@ -183,3 +183,13 @@
 - [ ] FM-9: `app.js → main.js` 이름 변경 + `index.html`의 `<script type="module" src="/main.js?v=29">` 갱신 + 모든 모듈 상단 한 줄 요약 주석. **체크포인트: spec §7 acceptance criteria 전부**
 
 검증 시 매 단계: `go test ./... && go vet ./...` + 브라우저 콘솔 0 에러 + 해당 도메인 회귀.
+
+## Phase 24 — 폴더 이동 + 사이드바 폴더 작업 정리 + 0.0.1 릴리즈 (`feature/folder-move-and-release-v0.0.1`) — spec [`SPEC.md §2.1.2 / §2.1.3 / §10`](../SPEC.md), plan [`plan.md` Phase 24](./plan.md)
+
+폴더 이동 백엔드 신설(`media.MoveDir` + `PATCH /api/folder {to}`) + 사이드바 트리 🗑 + 새 폴더 버튼 사이드바 이전 + 폴더 DnD + 0.0.1 릴리즈 노트.
+
+- [ ] F1: `internal/media/move.go` — `MoveDir(srcAbs, destDir)` + `ErrSrcNotDir`/`ErrDestExists`/`ErrCircular`/`ErrCrossDevice` sentinel. `move_test.go` 6 케이스(Success / DestExists / Circular_Self / Circular_Descendant / PrefixFalsePositive `/tmp/a` ↛ `/tmp/ab` / NotADir + DestNotFound). 사이드카는 폴더 rename과 동일 원리로 자동 따라감.
+- [ ] F2: `internal/handler/files.go` — `handleFolder` PATCH를 `patchFolder` dispatcher로 교체(`patchFile` 패턴), `moveFolder` 신설(루트·동일부모 가드 + `media.MoveDir` 에러 매핑). `files_test.go` 10 케이스(Success / BothFields / MissingFields / RootRejected / DestNotDir / DestNotFound / Circular / SameDir / Conflict / Traversal). **체크포인트 ①**: curl 6단계로 백엔드 단독 검증.
+- [ ] F3: `web/index.html` 새 폴더 버튼을 `<header>`에서 `<aside id="sidebar">` 내부 `.sidebar-header`로 이전, `main.js` 버전 v=29→v=30. `web/style.css` `.sidebar-header` 규칙. `web/tree.js` `wireTree(deps)`에 `deleteFolder` 주입 + `buildTreeNode`에 `.tree-delete` 🗑 버튼 추가. `web/main.js` `wireTree({...,deleteFolder})` 갱신.
+- [ ] F4: `web/state.js` 필요 시 `dragSrcIsDir` 추가. `web/tree.js` `.tree-node-row.draggable=true` + `dragstart`/`dragend` (`DND_MIME` payload `{src,paths,isDir:true}` + Firefox용 `text/plain` fallback). `web/browse.js` `buildTable`에서 `is_dir` 분기 제거하여 폴더 행도 draggable. `web/fileOps.js` `attachDragHandlers`에 `is_dir` 반영, `canDropMoveTo`에 자기 자손 거부, drop 핸들러에 `payload.isDir` 분기 + `moveFolder(srcPath, destDir)` 신설(`PATCH /api/folder {to}` + `rewritePathAfterFolderRename` navigate + `_loadTree()`). `index.html` 버전 v=30→v=31. **체크포인트 ②**: 브라우저 E2E 10케이스.
+- [ ] F5: `README.md` features 목록을 SPEC §2.1과 동기, "사이드바에서 폴더 작업" 동선 한 줄 추가, "0.0.1 릴리즈 노트" 섹션 신설(F1~F4 변경 + breaking change 없음 명시). **체크포인트 ③**: SPEC §10 5개 항목 모두 체크.

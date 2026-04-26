@@ -173,6 +173,158 @@ func TestMoveFile_MissingSidecarOK(t *testing.T) {
 	}
 }
 
+func TestMoveDir_Success(t *testing.T) {
+	root := t.TempDir()
+	srcParent := filepath.Join(root, "a")
+	srcDir := filepath.Join(srcParent, "sub")
+	destDir := filepath.Join(root, "b")
+	writeFile(t, filepath.Join(srcDir, "foo.txt"), []byte("hello"))
+	writeFile(t, filepath.Join(srcDir, ".thumb", "foo.txt.jpg"), []byte("thumb"))
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := MoveDir(srcDir, destDir)
+	if err != nil {
+		t.Fatalf("MoveDir: %v", err)
+	}
+	want := filepath.Join(destDir, "sub")
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if _, err := os.Stat(srcDir); !os.IsNotExist(err) {
+		t.Error("src directory still exists after move")
+	}
+	if data, err := os.ReadFile(filepath.Join(want, "foo.txt")); err != nil || string(data) != "hello" {
+		t.Errorf("dest file content = %q (err=%v)", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(want, ".thumb", "foo.txt.jpg")); err != nil {
+		t.Errorf(".thumb sidecar missing at dest: %v", err)
+	}
+}
+
+func TestMoveDir_DestExists(t *testing.T) {
+	root := t.TempDir()
+	srcDir := filepath.Join(root, "src")
+	destDir := filepath.Join(root, "dest")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(destDir, "src"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := MoveDir(srcDir, destDir)
+	if !errors.Is(err, ErrDestExists) {
+		t.Errorf("got %v, want ErrDestExists", err)
+	}
+	// src untouched
+	if _, err := os.Stat(srcDir); err != nil {
+		t.Errorf("src removed despite rejected move: %v", err)
+	}
+}
+
+func TestMoveDir_Circular_Self(t *testing.T) {
+	root := t.TempDir()
+	srcDir := filepath.Join(root, "a")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := MoveDir(srcDir, srcDir)
+	if !errors.Is(err, ErrCircular) {
+		t.Errorf("got %v, want ErrCircular", err)
+	}
+}
+
+func TestMoveDir_Circular_Descendant(t *testing.T) {
+	root := t.TempDir()
+	srcDir := filepath.Join(root, "a")
+	descendant := filepath.Join(srcDir, "b", "c")
+	if err := os.MkdirAll(descendant, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := MoveDir(srcDir, descendant)
+	if !errors.Is(err, ErrCircular) {
+		t.Errorf("got %v, want ErrCircular", err)
+	}
+}
+
+func TestMoveDir_PrefixFalsePositive(t *testing.T) {
+	// /tmp/a → /tmp/ab must succeed: ab is NOT a descendant of a.
+	root := t.TempDir()
+	srcDir := filepath.Join(root, "a")
+	destDir := filepath.Join(root, "ab")
+	writeFile(t, filepath.Join(srcDir, "x.txt"), []byte("x"))
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := MoveDir(srcDir, destDir)
+	if err != nil {
+		t.Fatalf("MoveDir: %v", err)
+	}
+	want := filepath.Join(destDir, "a")
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestMoveDir_ErrorCases(t *testing.T) {
+	t.Run("src missing", func(t *testing.T) {
+		root := t.TempDir()
+		destDir := filepath.Join(root, "dest")
+		if err := os.MkdirAll(destDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		_, err := MoveDir(filepath.Join(root, "ghost"), destDir)
+		if !errors.Is(err, ErrSrcNotFound) {
+			t.Errorf("got %v, want ErrSrcNotFound", err)
+		}
+	})
+
+	t.Run("src is a file", func(t *testing.T) {
+		root := t.TempDir()
+		src := filepath.Join(root, "file.txt")
+		destDir := filepath.Join(root, "dest")
+		writeFile(t, src, []byte("a"))
+		if err := os.MkdirAll(destDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		_, err := MoveDir(src, destDir)
+		if !errors.Is(err, ErrSrcNotDir) {
+			t.Errorf("got %v, want ErrSrcNotDir", err)
+		}
+	})
+
+	t.Run("dest missing", func(t *testing.T) {
+		root := t.TempDir()
+		srcDir := filepath.Join(root, "src")
+		if err := os.MkdirAll(srcDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		_, err := MoveDir(srcDir, filepath.Join(root, "ghost"))
+		if !errors.Is(err, ErrDestNotFound) {
+			t.Errorf("got %v, want ErrDestNotFound", err)
+		}
+	})
+
+	t.Run("dest is a file", func(t *testing.T) {
+		root := t.TempDir()
+		srcDir := filepath.Join(root, "src")
+		destFile := filepath.Join(root, "regular.txt")
+		if err := os.MkdirAll(srcDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, destFile, []byte("not a dir"))
+		_, err := MoveDir(srcDir, destFile)
+		if !errors.Is(err, ErrDestNotDir) {
+			t.Errorf("got %v, want ErrDestNotDir", err)
+		}
+	})
+}
+
 func TestMoveFile_ErrorCases(t *testing.T) {
 	t.Run("src missing", func(t *testing.T) {
 		dest := t.TempDir()

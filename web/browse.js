@@ -349,9 +349,7 @@ function buildTable(entries) {
     tr.querySelector('.delete-action').addEventListener('click', () =>
       entry.is_dir ? deleteFolder(entry.path) : deleteFile(entry.path)
     );
-    if (!entry.is_dir) {
-      attachDragHandlers(tr, entry);
-    }
+    attachDragHandlers(tr, entry);
     tbody.appendChild(tr);
   });
 
@@ -361,6 +359,14 @@ function buildTable(entries) {
 
 function bindEntrySelection(container, entry) {
   const checkbox = container.querySelector('input[type="checkbox"]');
+  // Folders are never multi-selected — moving a folder is always a single-target
+  // operation. Hide the checkbox entirely so a stale selection set can't pull
+  // a folder into a bulk file move.
+  if (entry.is_dir) {
+    const cell = container.querySelector('.select-cell, .select-check');
+    if (cell) cell.style.visibility = 'hidden';
+    return;
+  }
   checkbox.checked = selectedPaths.has(entry.path);
   container.classList.toggle('selected', checkbox.checked);
   checkbox.addEventListener('click', ev => ev.stopPropagation());

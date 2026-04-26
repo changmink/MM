@@ -8,7 +8,7 @@ import {
 import { loadTree, wireTree } from './tree.js';
 import {
   attachDragHandlers, attachDropHandlers,
-  openRenameModal, wireFileOps,
+  openRenameModal, deleteFolder, wireFileOps,
 } from './fileOps.js';
 import { wireSettings } from './settings.js';
 import { wireConvert } from './convert.js';
@@ -29,7 +29,7 @@ setURLImportDeps({
 wireFileOps({ browse, loadTree });
 wireRouter(browse);
 wireToolbar(renderView);
-wireTree({ browse, attachDropHandlers, openRenameModal });
+wireTree({ browse, attachDropHandlers, attachDragHandlers, openRenameModal, deleteFolder });
 wireSettings();
 wireConvert({ browse });
 wireURLImport();

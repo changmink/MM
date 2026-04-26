@@ -95,6 +95,15 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   align-self: start;
   font-size: 0.95rem;
 }
+.sidebar-header {
+  padding: 0 4px 10px 4px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.sidebar-header .new-folder-btn {
+  width: 100%;
+}
+
 .sidebar .tree-empty {
   color: var(--text-dim);
   font-size: 0.8rem;
@@ -196,6 +205,29 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .tree-node-row.active .tree-rename { color: white; opacity: 0.9; }
 .tree-rename:focus-visible {
   outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Per-node delete button — sibling of tree-rename, same hover/focus reveal. */
+.tree-delete {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0 4px;
+  font-size: 0.85rem;
+  flex-shrink: 0;
+  display: none;
+  border-radius: 3px;
+}
+.tree-node-row:hover .tree-delete,
+.tree-node-row:focus-within .tree-delete {
+  display: inline-block;
+}
+.tree-delete:hover { color: var(--danger); }
+.tree-node-row.active .tree-delete { color: white; opacity: 0.9; }
+.tree-delete:focus-visible {
+  outline: 2px solid var(--danger);
   outline-offset: 1px;
 }
 

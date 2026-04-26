@@ -13,6 +13,11 @@ import {
   esc, splitExtension, parentDir, rewritePathAfterFolderRename,
 } from './util.js';
 
+// Tracks whether the active drag is a single folder. Folders take a separate
+// PATCH endpoint and a separate self/descendant-rejection rule, so the drop
+// handler needs this even before reading the dataTransfer payload.
+let dragSrcIsDir = false;
+
 let _browse = null;
 let _loadTree = null;
 
@@ -128,7 +133,14 @@ export async function deleteFolder(path) {
   if (!confirm(`폴더 안의 모든 파일이 삭제됩니다.\n${path}\n\n계속하시겠습니까?`)) return;
   const res = await fetch('/api/folder?path=' + encodeURIComponent(path), { method: 'DELETE' });
   if (res.ok) {
-    _browse(currentPath, false);
+    // If currentPath sat inside (or was) the deleted folder, browse() would
+    // 404 on a path that no longer exists. Fall back to the parent so the
+    // user lands somewhere valid.
+    if (currentPath === path || currentPath.startsWith(path + '/')) {
+      _browse(parentDir(path));
+    } else {
+      _browse(currentPath, false);
+    }
     _loadTree();
   } else {
     alert('폴더 삭제 실패');
@@ -148,11 +160,14 @@ function selectedMovePathsFor(entry) {
 export function attachDragHandlers(el, entry) {
   el.draggable = true;
   el.addEventListener('dragstart', e => {
-    const paths = selectedMovePathsFor(entry);
+    // Folders are always single-target. Files can carry the active selection.
+    const isDir = !!entry.is_dir;
+    const paths = isDir ? [entry.path] : selectedMovePathsFor(entry);
     setDragSrcPath(entry.path);
     setDragSrcPaths(paths);
+    dragSrcIsDir = isDir;
     e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData(DND_MIME, JSON.stringify({ src: entry.path, paths }));
+    e.dataTransfer.setData(DND_MIME, JSON.stringify({ src: entry.path, paths, isDir }));
     // Firefox won't initiate a drag without text/plain or text/uri-list set.
     e.dataTransfer.setData('text/plain', paths.join('\n'));
     el.classList.add('dragging');
@@ -160,6 +175,7 @@ export function attachDragHandlers(el, entry) {
   el.addEventListener('dragend', () => {
     setDragSrcPath(null);
     setDragSrcPaths([]);
+    dragSrcIsDir = false;
     el.classList.remove('dragging');
   });
 }
@@ -167,6 +183,14 @@ export function attachDragHandlers(el, entry) {
 function canDropMoveTo(destPath) {
   const paths = dragSrcPaths.length ? dragSrcPaths : (dragSrcPath ? [dragSrcPath] : []);
   if (!paths.length) return true;
+  // Folder drag: forbid dropping onto self or any descendant. Separator boundary
+  // ensures /a/b is not flagged as inside /a/bc. Mirrors media.MoveDir.
+  if (dragSrcIsDir) {
+    for (const p of paths) {
+      if (destPath === p) return false;
+      if (destPath.startsWith(p + '/')) return false;
+    }
+  }
   return paths.some(path => parentDir(path) !== destPath);
 }
 
@@ -201,12 +225,58 @@ export function attachDropHandlers(el, destPath) {
       return;
     }
     if (!payload || !payload.src) return;
+    if (payload.isDir) {
+      moveFolder(payload.src, destPath);
+      return;
+    }
     const paths = Array.isArray(payload.paths) && payload.paths.length
       ? payload.paths
       : [payload.src];
     moveFiles(paths, destPath);
   });
 }
+
+async function moveFolder(srcPath, destDir) {
+  // Defensive guards — same rules the server enforces, so we surface friendly
+  // messages without a round trip when the UI race lets a drop slip through.
+  if (parentDir(srcPath) === destDir) return;
+  if (destDir === srcPath || destDir.startsWith(srcPath + '/')) return;
+  try {
+    const res = await fetch('/api/folder?path=' + encodeURIComponent(srcPath), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: destDir }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      const label = FOLDER_MOVE_ERROR_LABELS[data.error] || data.error || res.statusText;
+      alert('폴더 이동 실패: ' + label);
+      return;
+    }
+    const data = await res.json().catch(() => null);
+    const newPath = data && data.path ? data.path : srcPath;
+    // If the moved folder was currentPath or an ancestor, the URL is now stale.
+    const target = rewritePathAfterFolderRename(srcPath, newPath, currentPath);
+    if (target !== currentPath) {
+      _browse(target);
+    } else {
+      _browse(currentPath, false);
+    }
+    _loadTree();
+  } catch (e) {
+    alert('폴더 이동 실패: ' + e.message);
+  }
+}
+
+const FOLDER_MOVE_ERROR_LABELS = {
+  'already exists': '대상 위치에 같은 이름의 폴더가 있습니다',
+  'invalid destination': '이동할 수 없는 위치입니다',
+  'same directory': '같은 폴더입니다',
+  'cannot move root': '루트는 이동할 수 없습니다',
+  'not a directory': '폴더가 아닙니다',
+  'not found': '원본을 찾을 수 없습니다',
+  'cross_device': '다른 볼륨으로는 이동할 수 없습니다',
+};
 
 async function moveFiles(srcPaths, destDir) {
   const paths = Array.from(new Set(srcPaths)).filter(path => parentDir(path) !== destDir);

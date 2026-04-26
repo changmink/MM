@@ -681,6 +681,189 @@ func TestRenameFolder(t *testing.T) {
 	})
 }
 
+func TestPatchFolder_Move(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, root, root, nil)
+
+	patchRaw := func(srcRel string, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("PATCH", "/api/folder?path="+srcRel, bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		rw := httptest.NewRecorder()
+		mux.ServeHTTP(rw, req)
+		return rw
+	}
+	patchMove := func(srcRel, destRel string) *httptest.ResponseRecorder {
+		return patchRaw(srcRel, fmt.Sprintf(`{"to":%q}`, destRel))
+	}
+
+	t.Run("success moves folder + children + .thumb", func(t *testing.T) {
+		os.MkdirAll(filepath.Join(root, "a", "sub", ".thumb"), 0755)
+		os.MkdirAll(filepath.Join(root, "b"), 0755)
+		os.WriteFile(filepath.Join(root, "a", "sub", "x.txt"), []byte("hi"), 0644)
+		os.WriteFile(filepath.Join(root, "a", "sub", ".thumb", "x.txt.jpg"), []byte("t"), 0644)
+
+		rw := patchMove("/a/sub", "/b")
+		if rw.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rw.Code, rw.Body.String())
+		}
+		var resp map[string]string
+		json.NewDecoder(rw.Body).Decode(&resp)
+		if resp["path"] != "/b/sub" {
+			t.Errorf("path = %q, want /b/sub", resp["path"])
+		}
+		if resp["name"] != "sub" {
+			t.Errorf("name = %q, want sub", resp["name"])
+		}
+		if _, err := os.Stat(filepath.Join(root, "a", "sub")); !os.IsNotExist(err) {
+			t.Error("source folder still present")
+		}
+		if _, err := os.Stat(filepath.Join(root, "b", "sub", "x.txt")); err != nil {
+			t.Errorf("inner file missing at dest: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(root, "b", "sub", ".thumb", "x.txt.jpg")); err != nil {
+			t.Errorf(".thumb sidecar missing at dest: %v", err)
+		}
+	})
+
+	t.Run("body with both name and to is rejected", func(t *testing.T) {
+		os.MkdirAll(filepath.Join(root, "src1"), 0755)
+		os.MkdirAll(filepath.Join(root, "dst1"), 0755)
+		rw := patchRaw("/src1", `{"name":"x","to":"/dst1"}`)
+		if rw.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", rw.Code)
+		}
+		var resp map[string]string
+		json.NewDecoder(rw.Body).Decode(&resp)
+		if resp["error"] != "specify either name or to, not both" {
+			t.Errorf("error = %q", resp["error"])
+		}
+	})
+
+	t.Run("body without name and to is rejected", func(t *testing.T) {
+		os.MkdirAll(filepath.Join(root, "src2"), 0755)
+		rw := patchRaw("/src2", `{}`)
+		if rw.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", rw.Code)
+		}
+		var resp map[string]string
+		json.NewDecoder(rw.Body).Decode(&resp)
+		if resp["error"] != "missing name or to" {
+			t.Errorf("error = %q", resp["error"])
+		}
+	})
+
+	t.Run("root cannot be moved", func(t *testing.T) {
+		os.MkdirAll(filepath.Join(root, "elsewhere"), 0755)
+		rw := patchMove("/", "/elsewhere")
+		if rw.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", rw.Code)
+		}
+		var resp map[string]string
+		json.NewDecoder(rw.Body).Decode(&resp)
+		if resp["error"] != "cannot move root" {
+			t.Errorf("error = %q", resp["error"])
+		}
+	})
+
+	t.Run("destination is a file", func(t *testing.T) {
+		os.MkdirAll(filepath.Join(root, "src3"), 0755)
+		os.WriteFile(filepath.Join(root, "regular.txt"), []byte("x"), 0644)
+		rw := patchMove("/src3", "/regular.txt")
+		if rw.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", rw.Code)
+		}
+		var resp map[string]string
+		json.NewDecoder(rw.Body).Decode(&resp)
+		if resp["error"] != "invalid destination" {
+			t.Errorf("error = %q", resp["error"])
+		}
+	})
+
+	t.Run("destination missing", func(t *testing.T) {
+		os.MkdirAll(filepath.Join(root, "src4"), 0755)
+		rw := patchMove("/src4", "/ghostdir")
+		if rw.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", rw.Code)
+		}
+		var resp map[string]string
+		json.NewDecoder(rw.Body).Decode(&resp)
+		if resp["error"] != "invalid destination" {
+			t.Errorf("error = %q", resp["error"])
+		}
+	})
+
+	t.Run("circular move into descendant", func(t *testing.T) {
+		os.MkdirAll(filepath.Join(root, "p", "child"), 0755)
+		rw := patchMove("/p", "/p/child")
+		if rw.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", rw.Code)
+		}
+		var resp map[string]string
+		json.NewDecoder(rw.Body).Decode(&resp)
+		if resp["error"] != "invalid destination" {
+			t.Errorf("error = %q", resp["error"])
+		}
+	})
+
+	t.Run("same parent directory rejected", func(t *testing.T) {
+		os.MkdirAll(filepath.Join(root, "parent", "kid"), 0755)
+		rw := patchMove("/parent/kid", "/parent")
+		if rw.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", rw.Code)
+		}
+		var resp map[string]string
+		json.NewDecoder(rw.Body).Decode(&resp)
+		if resp["error"] != "same directory" {
+			t.Errorf("error = %q", resp["error"])
+		}
+	})
+
+	t.Run("conflict at destination returns 409", func(t *testing.T) {
+		os.MkdirAll(filepath.Join(root, "src5"), 0755)
+		os.MkdirAll(filepath.Join(root, "dst5", "src5"), 0755)
+		rw := patchMove("/src5", "/dst5")
+		if rw.Code != http.StatusConflict {
+			t.Fatalf("expected 409, got %d", rw.Code)
+		}
+		var resp map[string]string
+		json.NewDecoder(rw.Body).Decode(&resp)
+		if resp["error"] != "already exists" {
+			t.Errorf("error = %q", resp["error"])
+		}
+	})
+
+	t.Run("traversal in dest rejected", func(t *testing.T) {
+		os.MkdirAll(filepath.Join(root, "src6"), 0755)
+		rw := patchMove("/src6", "../../etc")
+		if rw.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", rw.Code)
+		}
+	})
+
+	t.Run("source file (not dir) is rejected", func(t *testing.T) {
+		os.WriteFile(filepath.Join(root, "afile.txt"), []byte("x"), 0644)
+		os.MkdirAll(filepath.Join(root, "dst-for-file"), 0755)
+		rw := patchMove("/afile.txt", "/dst-for-file")
+		if rw.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", rw.Code)
+		}
+		var resp map[string]string
+		json.NewDecoder(rw.Body).Decode(&resp)
+		if resp["error"] != "not a directory" {
+			t.Errorf("error = %q", resp["error"])
+		}
+	})
+
+	t.Run("source not found returns 404", func(t *testing.T) {
+		os.MkdirAll(filepath.Join(root, "dst-for-ghost"), 0755)
+		rw := patchMove("/ghost-folder", "/dst-for-ghost")
+		if rw.Code != http.StatusNotFound {
+			t.Fatalf("expected 404, got %d", rw.Code)
+		}
+	})
+}
+
 func TestDelete(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
