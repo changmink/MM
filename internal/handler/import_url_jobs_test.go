@@ -449,6 +449,157 @@ func TestCancelJob_PerURL_Pending(t *testing.T) {
 	}
 }
 
+// TestCancelJob_PerURL_Pending_ThenBatch: a per-URL cancel for a pending
+// index publishes its error("cancelled") frame from the handler side
+// (CancelKindPending). If the user immediately follows with a batch
+// cancel, the worker's mid-flight cancel loop must NOT re-emit the same
+// frame for that index — the per-URL handler already owns it. Regression
+// guard for the round-5 CQ1 finding.
+func TestCancelJob_PerURL_Pending_ThenBatch(t *testing.T) {
+	// Origin holds index 0 so URLs 1 and 2 stay pending while we cancel
+	// index 1, then cancel the batch. Index 0 is in flight when the batch
+	// cancel arrives; index 2 is still pending and rides the mid-flight
+	// cancel loop.
+	srv, releaseFn := newHoldReleaseOrigin(t)
+	defer srv.Close()
+	defer releaseFn()
+
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	h := Register(mux, root, root, nil)
+	defer h.Close()
+
+	rec, wait := postImportStreaming(context.Background(), t, mux,
+		"/", []string{srv.URL + "/hold.jpg", srv.URL + "/b.jpg", srv.URL + "/c.jpg"})
+	regEv := waitForPhase(t, rec, "register")
+	jobID, _ := regEv["jobId"].(string)
+	waitForPhase(t, rec, "start") // index 0 is running on hold
+
+	// Per-URL cancel for index 1 (pending). Handler emits its own
+	// error("cancelled") frame under CancelKindPending.
+	cancel1 := httptest.NewRequest(http.MethodPost,
+		"/api/import-url/jobs/"+jobID+"/cancel?index=1", nil)
+	cancel1RW := httptest.NewRecorder()
+	mux.ServeHTTP(cancel1RW, cancel1)
+	if cancel1RW.Code != http.StatusNoContent {
+		t.Fatalf("per-URL cancel status = %d, want 204", cancel1RW.Code)
+	}
+
+	// Batch cancel — fires job.Cancel() so URL 0's per-URL ctx (child of
+	// job.Ctx()) cancels and the worker enters the mid-flight cancel loop.
+	cancelAll := httptest.NewRequest(http.MethodPost,
+		"/api/import-url/jobs/"+jobID+"/cancel", nil)
+	cancelAllRW := httptest.NewRecorder()
+	mux.ServeHTTP(cancelAllRW, cancelAll)
+	if cancelAllRW.Code != http.StatusNoContent {
+		t.Fatalf("batch cancel status = %d, want 204", cancelAllRW.Code)
+	}
+
+	releaseFn()
+	wait()
+
+	job, _ := h.registry.Get(jobID)
+	select {
+	case <-job.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("job never finished")
+	}
+
+	// Each index must receive exactly one error("cancelled") frame.
+	// Without the URLStatus skip in runImportJob's mid-flight cancel loop,
+	// index 1 would see 2 frames (CancelKindPending handler + worker loop).
+	body := rec.all.String()
+	events := parseSSEEvents(t, body)
+	perIndex := map[int]int{}
+	for _, e := range events {
+		if e["phase"] != "error" || e["error"] != "cancelled" {
+			continue
+		}
+		idx := int(e["index"].(float64))
+		perIndex[idx]++
+	}
+	for idx := 0; idx < 3; idx++ {
+		if perIndex[idx] != 1 {
+			t.Errorf("error(cancelled) frames for index %d = %d, want exactly 1; per-index counts = %v",
+				idx, perIndex[idx], perIndex)
+		}
+	}
+
+	if got := job.Status(); got != importjob.StatusCancelled {
+		t.Errorf("status = %q, want %q", got, importjob.StatusCancelled)
+	}
+	if snap := job.Snapshot(); snap.Summary == nil || snap.Summary.Cancelled != 3 {
+		t.Errorf("summary = %+v, want {cancelled:3}", snap.Summary)
+	}
+}
+
+// TestCancelJob_PerURL_Pending_ThenBatch_PreSemaphore: same regression as
+// above but for the pre-semaphore cancel path (batch is queued, never
+// reaches the worker fetch loop). Per-URL cancel marks index 1 cancelled
+// and emits its frame; batch cancel triggers job.Ctx().Done() before
+// runImportJob acquires importSem; the pre-semaphore cancel branch must
+// skip the already-cancelled index.
+func TestCancelJob_PerURL_Pending_ThenBatch_PreSemaphore(t *testing.T) {
+	srv := newOriginServer()
+	defer srv.Close()
+
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	h := Register(mux, root, root, nil)
+	defer h.Close()
+
+	// Hold importSem so the batch never enters the fetch loop.
+	h.importSem <- struct{}{}
+	defer func() { <-h.importSem }()
+
+	rec, wait := postImportStreaming(context.Background(), t, mux,
+		"/", []string{srv.URL + "/a.jpg", srv.URL + "/b.jpg", srv.URL + "/c.jpg"})
+	regEv := waitForPhase(t, rec, "register")
+	jobID, _ := regEv["jobId"].(string)
+	waitForPhase(t, rec, "queued")
+
+	cancel1 := httptest.NewRequest(http.MethodPost,
+		"/api/import-url/jobs/"+jobID+"/cancel?index=1", nil)
+	cancel1RW := httptest.NewRecorder()
+	mux.ServeHTTP(cancel1RW, cancel1)
+	if cancel1RW.Code != http.StatusNoContent {
+		t.Fatalf("per-URL cancel status = %d, want 204", cancel1RW.Code)
+	}
+
+	cancelAll := httptest.NewRequest(http.MethodPost,
+		"/api/import-url/jobs/"+jobID+"/cancel", nil)
+	cancelAllRW := httptest.NewRecorder()
+	mux.ServeHTTP(cancelAllRW, cancelAll)
+	if cancelAllRW.Code != http.StatusNoContent {
+		t.Fatalf("batch cancel status = %d, want 204", cancelAllRW.Code)
+	}
+
+	wait()
+	job, _ := h.registry.Get(jobID)
+	select {
+	case <-job.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("job never finished")
+	}
+
+	body := rec.all.String()
+	events := parseSSEEvents(t, body)
+	perIndex := map[int]int{}
+	for _, e := range events {
+		if e["phase"] != "error" || e["error"] != "cancelled" {
+			continue
+		}
+		idx := int(e["index"].(float64))
+		perIndex[idx]++
+	}
+	for idx := 0; idx < 3; idx++ {
+		if perIndex[idx] != 1 {
+			t.Errorf("error(cancelled) frames for index %d = %d, want exactly 1; per-index counts = %v",
+				idx, perIndex[idx], perIndex)
+		}
+	}
+}
+
 func TestCancelJob_NotFound(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
