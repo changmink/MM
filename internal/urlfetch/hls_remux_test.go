@@ -113,21 +113,22 @@ func slowHLSServer(t *testing.T, dir string, perSegment time.Duration) *httptest
 }
 
 func TestRunHLSRemux_Success(t *testing.T) {
+	// makeHLSFixture writes playlist.m3u8 + .ts segments into fixtureDir.
+	// Post-D2 ffmpeg invocation only accepts local file paths, so we feed
+	// the playlist path directly — no httptest server in the loop.
 	fixtureDir := t.TempDir()
 	playlistName := makeHLSFixture(t, fixtureDir, 1)
-
-	srv := httptest.NewServer(http.FileServer(http.Dir(fixtureDir)))
-	defer srv.Close()
+	localPlaylist := filepath.Join(fixtureDir, playlistName)
 
 	outDir := t.TempDir()
-	tmpPath := filepath.Join(outDir, "out.mp4")
+	outPath := filepath.Join(outDir, "out.mp4")
 
-	err := runHLSRemux(context.Background(), srv.URL+"/"+playlistName, tmpPath, nil, testMaxBytes)
+	err := runHLSRemux(context.Background(), localPlaylist, outPath, nil, testMaxBytes)
 	if err != nil {
 		t.Fatalf("runHLSRemux: %v", err)
 	}
 
-	data, err := os.ReadFile(tmpPath)
+	data, err := os.ReadFile(outPath)
 	if err != nil {
 		t.Fatalf("read output: %v", err)
 	}
@@ -140,61 +141,34 @@ func TestRunHLSRemux_Success(t *testing.T) {
 	}
 }
 
-func TestRunHLSRemux_ContextCancel(t *testing.T) {
-	requireFFmpeg(t)
-	// Serve a playlist that points at a segment URL that blocks until the
-	// test ends, so ffmpeg stalls on the HTTP read. A `segmentHit` channel
-	// signals when ffmpeg has actually reached the segment GET — cancelling
-	// ctx before that point would race with the normal happy-path exit on
-	// fast runners (runHLSRemux can finish before we cancel).
-	blockCh := make(chan struct{})
-	segmentHit := make(chan struct{}, 1)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/playlist.m3u8", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-		w.Write([]byte("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nslow.ts\n#EXT-X-ENDLIST\n"))
-	})
-	mux.HandleFunc("/slow.ts", func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case segmentHit <- struct{}{}:
-		default:
-		}
-		select {
-		case <-blockCh:
-		case <-r.Context().Done():
-		}
-	})
-	srv := httptest.NewServer(mux)
-	// Order matters: close blockCh FIRST so any stalled handler returns,
-	// THEN Close the server. httptest.Server.Close() waits for active
-	// connections, so a handler still reading blockCh would deadlock it.
-	defer func() {
-		close(blockCh)
-		srv.Close()
-	}()
+// TestRunHLSRemux_CtxCancelPropagates: previously TestRunHLSRemux_ContextCancel
+// stalled ffmpeg by serving a slow segment over HTTP. Post-D2 ffmpeg only reads
+// local files (no network), so we cannot stall it on I/O the same way. Test
+// the wiring directly instead: a stub runFfmpeg that blocks until ctx fires
+// confirms the same property — that an external ctx cancel propagates to the
+// process. ffmpeg is not required (this runs without the binary).
+func TestRunHLSRemux_CtxCancelPropagates(t *testing.T) {
+	orig := runFfmpeg
+	runFfmpeg = func(ctx context.Context, args []string, stderr io.Writer) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	t.Cleanup(func() { runFfmpeg = orig })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	outDir := t.TempDir()
-	tmpPath := filepath.Join(outDir, "out.mp4")
+	outPath := filepath.Join(outDir, "out.mp4")
 
 	var wg sync.WaitGroup
 	var err error
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err = runHLSRemux(ctx, srv.URL+"/playlist.m3u8", tmpPath, nil, testMaxBytes)
+		err = runHLSRemux(ctx, "/local/playlist.m3u8", outPath, nil, testMaxBytes)
 	}()
 
-	// Block until ffmpeg's request for the segment actually lands, so the
-	// cancel reliably interrupts a stalled read rather than a not-yet-started
-	// fetch.
-	select {
-	case <-segmentHit:
-	case <-time.After(5 * time.Second):
-		cancel()
-		wg.Wait()
-		t.Fatal("ffmpeg never fetched the segment — test setup broken or ffmpeg slow-start")
-	}
+	// Give the goroutine a moment to invoke runFfmpeg before we cancel.
+	time.Sleep(50 * time.Millisecond)
 	cancel()
 
 	done := make(chan struct{})
@@ -205,11 +179,8 @@ func TestRunHLSRemux_ContextCancel(t *testing.T) {
 		t.Fatal("runHLSRemux did not return after ctx cancel")
 	}
 
-	if err == nil {
-		t.Fatal("expected error after ctx cancel")
-	}
-	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("got %v, want context.Canceled", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want errors.Is(err, context.Canceled)", err)
 	}
 }
 
@@ -324,15 +295,24 @@ func TestWatchOutputFile_EmitsProgress(t *testing.T) {
 
 func TestRunHLSRemux_ExitError(t *testing.T) {
 	requireFFmpeg(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.NotFound(w, r)
-	}))
-	defer srv.Close()
+	// Post-D2 runHLSRemux only reads local files. Force ffmpeg to fail by
+	// pointing the playlist at a segment that doesn't exist on disk.
+	fixtureDir := t.TempDir()
+	badPlaylist := filepath.Join(fixtureDir, "bad.m3u8")
+	err := os.WriteFile(badPlaylist, []byte("#EXTM3U\n"+
+		"#EXT-X-VERSION:3\n"+
+		"#EXT-X-TARGETDURATION:6\n"+
+		"#EXTINF:6.0,\n"+
+		"nonexistent-segment.ts\n"+
+		"#EXT-X-ENDLIST\n"), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	outDir := t.TempDir()
-	tmpPath := filepath.Join(outDir, "out.mp4")
+	outPath := filepath.Join(outDir, "out.mp4")
 
-	err := runHLSRemux(context.Background(), srv.URL+"/does-not-exist.m3u8", tmpPath, nil, testMaxBytes)
+	err = runHLSRemux(context.Background(), badPlaylist, outPath, nil, testMaxBytes)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -377,6 +357,57 @@ func TestClassifyHLSRemuxError(t *testing.T) {
 	}
 }
 
+// TestRunHLSRemux_ArgvLocalOnly: argv invariant for the runHLSRemux level
+// (spec AC-10 / AC-11 partial). Captures the ffmpeg argv and asserts:
+//   - -protocol_whitelist is exactly file,crypto (no http/https/tcp/tls/etc)
+//   - -i input has no http://, https:// prefix
+// E3 adds the fetchHLS-level integration test that exercises the full
+// materialize → runHLSRemux flow.
+func TestRunHLSRemux_ArgvLocalOnly(t *testing.T) {
+	captured := captureFfmpeg(t)
+
+	outPath := filepath.Join(t.TempDir(), "out.mp4")
+	err := runHLSRemux(context.Background(), "/local/playlist.m3u8", outPath, nil, testMaxBytes)
+	if err != nil {
+		t.Fatalf("runHLSRemux: %v", err)
+	}
+	if len(*captured) != 1 {
+		t.Fatalf("captured calls = %d, want 1", len(*captured))
+	}
+	args := (*captured)[0]
+
+	// Find and validate -protocol_whitelist value.
+	whitelistIdx := -1
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "-protocol_whitelist" {
+			whitelistIdx = i + 1
+			break
+		}
+	}
+	if whitelistIdx == -1 {
+		t.Fatalf("-protocol_whitelist not in argv: %v", args)
+	}
+	if args[whitelistIdx] != "file,crypto" {
+		t.Errorf("-protocol_whitelist = %q, want %q", args[whitelistIdx], "file,crypto")
+	}
+	for _, forbidden := range []string{"http", "tcp", "tls", "udp", "rtp", "pipe", "async"} {
+		if strings.Contains(args[whitelistIdx], forbidden) {
+			t.Errorf("-protocol_whitelist contains forbidden token %q: %q",
+				forbidden, args[whitelistIdx])
+		}
+	}
+
+	// Verify -i input is local (no remote URL).
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "-i" {
+			input := args[i+1]
+			if strings.HasPrefix(input, "http://") || strings.HasPrefix(input, "https://") {
+				t.Errorf("-i input is a remote URL: %q", input)
+			}
+		}
+	}
+}
+
 // TestRunFfmpegSwap_StubBypassesBinary locks the captureFfmpeg contract used
 // by AC-10 / AC-11 argv invariant tests: with the stub installed, runHLSRemux
 // fully replaces the production path — no real ffmpeg executes, argv is
@@ -402,13 +433,16 @@ func TestRunFfmpegSwap_StubBypassesBinary(t *testing.T) {
 	if stat.Size() < 8 {
 		t.Errorf("stub MP4 too small: %d bytes", stat.Size())
 	}
-	// Sanity: the variant URL appeared as the -i argument (still valid here
-	// because D2 hasn't switched the production argv yet).
+	// Sanity: runHLSRemux forwards its first argument verbatim as the -i
+	// input. Post-D2 production callers must already have a local playlist
+	// path here — TestRunHLSRemux_ArgvLocalOnly enforces that no remote URL
+	// reaches ffmpeg in real usage. This test only verifies the swap
+	// mechanism, hence the dummy URL.
 	args := (*captured)[0]
 	for i, a := range args {
 		if a == "-i" && i+1 < len(args) {
 			if args[i+1] != "https://example.com/playlist.m3u8" {
-				t.Errorf("-i arg = %q, want the variant URL", args[i+1])
+				t.Errorf("-i arg = %q, want the dummy first arg passed in", args[i+1])
 			}
 		}
 	}

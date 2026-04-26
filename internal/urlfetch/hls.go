@@ -346,13 +346,21 @@ func defaultRunFfmpeg(ctx context.Context, args []string, stderr io.Writer) erro
 	return cmd.Wait()
 }
 
-// runHLSRemux spawns ffmpeg to pull variantURL via HLS and remux its segments
-// into a single MP4 at tmpPath. Output is capped at maxOutputBytes: a watcher
-// polls the tmp file size every hlsWatchInterval and cancels the ffmpeg ctx
-// if the cap is exceeded. Context cancellation also kills ffmpeg via the
-// child ctx that runFfmpeg honors. If cb.Progress is non-nil, the watcher
-// reports the tmp file's current size using the same throttling rules as
-// progressReader (byte OR time threshold).
+// runHLSRemux spawns ffmpeg to remux a local HLS playlist (with all segment
+// and key files already materialized into the same directory by
+// materializeHLS) into a single MP4 at outputPath. Output is capped at
+// maxOutputBytes: a watcher polls the output file size every hlsWatchInterval
+// and cancels the ffmpeg ctx if the cap is exceeded. Context cancellation
+// also kills ffmpeg via the child ctx that runFfmpeg honors. If cb.Progress
+// is non-nil, the watcher reports the output file's current size using the
+// same throttling rules as progressReader (byte OR time threshold).
+//
+// Security: ffmpeg is launched with -protocol_whitelist file,crypto and
+// -allowed_extensions ALL — local file reads only, no network access. This
+// is the core invariant that closes the HLS DNS rebinding window: ffmpeg
+// can't perform its own hostname resolution because the input is a fully
+// local playlist and its referenced segments / keys are local files. argv
+// invariant tests (AC-10 / AC-11) lock this contract.
 //
 // Returns one of: nil on exit 0; errHLSTooLarge if the cap was breached;
 // ctx.Err() on external cancel or deadline; *ffmpegExitError on non-zero exit
@@ -365,23 +373,27 @@ func defaultRunFfmpeg(ctx context.Context, args []string, stderr io.Writer) erro
 // will not sample any intermediate sizes. For real HLS VOD (minutes of
 // video) the buffer does flush periodically and the watcher behaves as
 // documented.
-func runHLSRemux(ctx context.Context, variantURL, tmpPath string, cb *Callbacks, maxOutputBytes int64) error {
-	// -protocol_whitelist blocks file:, rtp:, udp:, data: and other schemes
-	// ffmpeg would otherwise follow from inside the playlist — essential
-	// defense against SSRF/LFI via a hostile master or media playlist.
-	// -rw_timeout bounds per-I/O read/write wait (microseconds) so a
-	// slow-loris origin cannot burn the whole per-URL timeout budget by
-	// feeding the segment connection at one byte/sec.
+func runHLSRemux(ctx context.Context, localPlaylistPath, outputPath string, cb *Callbacks, maxOutputBytes int64) error {
+	// -protocol_whitelist file,crypto: ffmpeg may only open local files
+	// (segments / keys / init segments materializeHLS staged) and use its
+	// AES decryption layer for #EXT-X-KEY. All network protocols are
+	// removed — there is no way for ffmpeg to perform a DNS lookup or
+	// network fetch from inside this invocation.
+	// -allowed_extensions ALL: segments and init files keep their original
+	// extension (.m4s, .vtt, .aac, …) under materializeHLS's whitelist
+	// scheme. ffmpeg's default extension allowlist is too narrow for some
+	// containers, so we widen it — safe because every input path is a
+	// local file we just wrote.
 	args := []string{
 		"-hide_banner", "-loglevel", "error",
-		"-protocol_whitelist", "http,https,tls,tcp,crypto",
-		"-rw_timeout", "30000000",
-		"-i", variantURL,
+		"-protocol_whitelist", "file,crypto",
+		"-allowed_extensions", "ALL",
+		"-i", localPlaylistPath,
 		"-c", "copy",
 		"-bsf:a", "aac_adtstoasc",
 		"-f", "mp4",
 		"-movflags", "+faststart",
-		"-y", tmpPath,
+		"-y", outputPath,
 	}
 
 	// ffmpegCtx is a child of ctx so external cancel/timeout still propagates
@@ -402,7 +414,7 @@ func runHLSRemux(ctx context.Context, variantURL, tmpPath string, cb *Callbacks,
 	watchDone := make(chan struct{})
 	go func() {
 		defer close(watchDone)
-		watchOutputFile(watchCtx, tmpPath, hlsWatchInterval, maxOutputBytes, cb, func() {
+		watchOutputFile(watchCtx, outputPath, hlsWatchInterval, maxOutputBytes, cb, func() {
 			sizeExceeded.Store(true)
 			cancelFfmpeg()
 		})
