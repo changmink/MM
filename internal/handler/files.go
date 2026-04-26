@@ -414,10 +414,113 @@ func (h *Handler) handleFolder(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		h.deleteFolder(w, r)
 	case http.MethodPatch:
-		h.renameFolder(w, r)
+		h.patchFolder(w, r)
 	default:
 		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
 	}
+}
+
+// patchFolder dispatches PATCH /api/folder by inspecting the body shape:
+//
+//	{"name": "..."}  → rename in place
+//	{"to":   "..."}  → move into a different directory (base name preserved)
+//
+// Mirrors patchFile so the API surface for files and folders stays symmetric.
+func (h *Handler) patchFolder(w http.ResponseWriter, r *http.Request) {
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "read body failed", err)
+		return
+	}
+	var probe struct {
+		Name string `json:"name"`
+		To   string `json:"to"`
+	}
+	if err := json.Unmarshal(bodyBytes, &probe); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid body", err)
+		return
+	}
+	if probe.Name != "" && probe.To != "" {
+		writeError(w, r, http.StatusBadRequest, "specify either name or to, not both", nil)
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	switch {
+	case probe.To != "":
+		h.moveFolder(w, r)
+	case probe.Name != "":
+		h.renameFolder(w, r)
+	default:
+		writeError(w, r, http.StatusBadRequest, "missing name or to", nil)
+	}
+}
+
+func (h *Handler) moveFolder(w http.ResponseWriter, r *http.Request) {
+	rel := r.URL.Query().Get("path")
+	srcAbs, err := media.SafePath(h.dataDir, rel)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid path", err)
+		return
+	}
+
+	if srcAbs == filepath.Clean(h.dataDir) {
+		writeError(w, r, http.StatusBadRequest, "cannot move root", nil)
+		return
+	}
+
+	var body struct {
+		To string `json:"to"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid body", err)
+		return
+	}
+
+	destAbs, err := media.SafePath(h.dataDir, body.To)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid path", err)
+		return
+	}
+
+	// Reject moving into the same parent — same rule as moveFile.
+	if filepath.Clean(filepath.Dir(srcAbs)) == filepath.Clean(destAbs) {
+		writeError(w, r, http.StatusBadRequest, "same directory", nil)
+		return
+	}
+
+	finalAbs, err := media.MoveDir(srcAbs, destAbs)
+	if err != nil {
+		switch {
+		case errors.Is(err, media.ErrSrcNotFound):
+			writeError(w, r, http.StatusNotFound, "not found", nil)
+		case errors.Is(err, media.ErrSrcNotDir):
+			writeError(w, r, http.StatusBadRequest, "not a directory", nil)
+		case errors.Is(err, media.ErrDestNotFound),
+			errors.Is(err, media.ErrDestNotDir),
+			errors.Is(err, media.ErrCircular):
+			writeError(w, r, http.StatusBadRequest, "invalid destination", nil)
+		case errors.Is(err, media.ErrDestExists):
+			writeError(w, r, http.StatusConflict, "already exists", nil)
+		case errors.Is(err, media.ErrCrossDevice):
+			writeError(w, r, http.StatusInternalServerError, "cross_device", err)
+		default:
+			writeError(w, r, http.StatusInternalServerError, "move failed", err)
+		}
+		return
+	}
+
+	dstRel, err := filepath.Rel(h.dataDir, finalAbs)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "path failed", err)
+		return
+	}
+	relResult := "/" + filepath.ToSlash(dstRel)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"path": relResult,
+		"name": filepath.Base(finalAbs),
+	})
 }
 
 func (h *Handler) renameFolder(w http.ResponseWriter, r *http.Request) {

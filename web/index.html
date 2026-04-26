@@ -13,13 +13,15 @@
     <h1>Media Server</h1>
     <nav id="breadcrumb"></nav>
     <span id="browse-summary" class="browse-summary"></span>
-    <button id="new-folder-btn" class="new-folder-btn">+ 새 폴더</button>
     <button id="url-badge" class="url-badge hidden" type="button" aria-label="진행 중인 URL 가져오기"></button>
     <button id="settings-btn" class="settings-btn" type="button" aria-label="설정">⚙</button>
   </header>
 
   <div class="app-body">
     <aside id="sidebar" class="sidebar" aria-label="폴더 트리">
+      <div class="sidebar-header">
+        <button id="new-folder-btn" class="new-folder-btn" type="button">+ 새 폴더</button>
+      </div>
       <div id="tree-root" class="tree-empty">로딩 중...</div>
     </aside>
 
@@ -171,6 +173,6 @@
     </div>
   </div>
 
-  <script type="module" src="/main.js?v=29"></script>
+  <script type="module" src="/main.js?v=32"></script>
 </body>
 </html>

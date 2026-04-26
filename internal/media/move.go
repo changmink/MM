@@ -14,8 +14,12 @@ import (
 var (
 	ErrSrcNotFound  = errors.New("source not found")
 	ErrSrcIsDir     = errors.New("cannot move directory")
+	ErrSrcNotDir    = errors.New("source is not a directory")
 	ErrDestNotDir   = errors.New("destination is not a directory")
 	ErrDestNotFound = errors.New("destination not found")
+	ErrDestExists   = errors.New("destination already exists")
+	ErrCircular     = errors.New("destination is inside source")
+	ErrCrossDevice  = errors.New("cross-device folder move not supported")
 )
 
 // MoveFile moves srcAbs into destDir and returns the resulting absolute path.
@@ -127,6 +131,70 @@ func copyAndRemove(src, dst string) error {
 		return err
 	}
 	return nil
+}
+
+// MoveDir moves srcAbs (a directory) into destDir, returning the new absolute
+// path destDir/<basename(srcAbs)>.
+//
+// Unlike MoveFile, name conflicts return ErrDestExists rather than auto-
+// suffixing — folders are renamed only by explicit user action and a silent
+// _N suffix is more confusing than helpful here.
+//
+// destDir == srcAbs or any descendant of srcAbs returns ErrCircular. The
+// descendant check uses a path-separator boundary so /a/b is not treated as
+// inside /a/bc.
+//
+// Cross-volume moves (EXDEV) return ErrCrossDevice — recursive copy fallback
+// is intentionally out of scope for the single-volume deployment model
+// (SPEC §10). The folder's contents (including .thumb/) follow the os.Rename
+// in a single atomic step, so no sidecar bookkeeping is needed.
+func MoveDir(srcAbs, destDir string) (string, error) {
+	srcInfo, err := os.Stat(srcAbs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", ErrSrcNotFound
+		}
+		return "", err
+	}
+	if !srcInfo.IsDir() {
+		return "", ErrSrcNotDir
+	}
+
+	destInfo, err := os.Stat(destDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", ErrDestNotFound
+		}
+		return "", err
+	}
+	if !destInfo.IsDir() {
+		return "", ErrDestNotDir
+	}
+
+	srcClean := filepath.Clean(srcAbs)
+	destClean := filepath.Clean(destDir)
+	if destClean == srcClean {
+		return "", ErrCircular
+	}
+	// Separator boundary prevents /tmp/ab being read as a descendant of /tmp/a.
+	if strings.HasPrefix(destClean, srcClean+string(filepath.Separator)) {
+		return "", ErrCircular
+	}
+
+	dstPath := filepath.Join(destClean, filepath.Base(srcClean))
+	if _, err := os.Stat(dstPath); err == nil {
+		return "", ErrDestExists
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+
+	if err := os.Rename(srcAbs, dstPath); err != nil {
+		if errors.Is(err, syscall.EXDEV) {
+			return "", ErrCrossDevice
+		}
+		return "", err
+	}
+	return dstPath, nil
 }
 
 // moveSidecars relocates .thumb/<name>.jpg and .thumb/<name>.jpg.dur to match

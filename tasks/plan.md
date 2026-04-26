@@ -3167,3 +3167,248 @@ func (r *Registry) CancelAll()
 - **위험: graceful shutdown 시 ffmpeg HLS 자식 프로세스 좀비** — registry.CancelAll() → job.ctx done → urlfetch/hls의 ctx 감지 → ffmpeg.Process.Kill() 또는 SIGTERM. 기존 `runHLSRemux`의 ctx cancel 경로 검증 필요 (재사용 가능해야 함).
 - **위험: 클라이언트가 `register`/`snapshot`/`removed` phase 모르는 구버전** — J3만 머지 시 `register`는 default case 없으므로 무시됨. J4 머지 후엔 `snapshot`/`removed`도 동일. switch에 명시 default(no-op) 추가해 forward-compatibility 확보.
 - **롤백:** J1~J6 커밋 순차 revert로 Phase 19 상태 복귀. J1~J2는 격리되어 있어 부분 revert 가능. J3는 emit 경로 재구성이라 클라이언트 호환만 유지되면 단독 revert 안전.
+
+---
+
+## Phase 24 — 폴더 이동 + 사이드바 폴더 작업 정리 + 0.0.1 릴리즈 (`feature/folder-move-and-release-v0.0.1`) — spec [`SPEC.md §2.1.2 / §2.1.3 / §10`](../SPEC.md)
+
+**목표:** `media.MoveFile`이 폴더를 거부하던 갭을 닫는다. `PATCH /api/folder` body 분기(`{name}`/`{to}`)로 폴더 이동을 추가하고, 사이드바 트리 노드에 🗑 버튼·DnD를 활성화하며, 메인 툴바 "새 폴더" 버튼을 사이드바 헤더로 이전한다. README에 0.0.1 릴리즈 노트.
+
+### 의존성 그래프
+
+```
+F1 백엔드 코어 (media.MoveDir + 단위 테스트)
+   │
+   └─► F2 핸들러 분기 (handleFolder PATCH body 분기 + 통합 테스트)
+          │
+          └─► [체크포인트 ①: curl로 백엔드 단독 검증]
+                 │
+                 ├─► F3 사이드바 헤더 정리 (새 폴더 버튼 이전 + 트리 🗑)
+                 │     └─ 백엔드 의존: 기존 POST/DELETE /api/folder만 사용 (F1/F2 없이도 동작)
+                 │
+                 └─► F4 폴더 DnD (트리 dragstart + 메인 표 폴더 dragstart + drop 라우팅)
+                        ↑ F2의 PATCH /api/folder {to} 의존
+                        │
+                        └─► [체크포인트 ②: 브라우저 E2E 수동 (10케이스)]
+                               │
+                               └─► F5 README + 0.0.1 릴리즈 정리
+                                      │
+                                      └─► [체크포인트 ③: SPEC §10 모든 항목 체크]
+```
+
+**병렬화:** F3와 F4는 같은 모듈(`web/`)을 만져 충돌 가능. 동일 PR/브랜치에서 F3 → F4 순차 진행 권장. F1·F2는 독립 커밋으로 분리 가능.
+
+---
+
+### F1 — `media.MoveDir` 신설 + 단위 테스트
+
+**파일:** `internal/media/move.go`, `internal/media/move_test.go`
+
+**신규 export:**
+- `func MoveDir(srcAbs, destDir string) (string, error)`
+- `var ErrSrcNotDir = errors.New("source is not a directory")`
+- `var ErrDestExists = errors.New("destination already exists")`
+- `var ErrCircular = errors.New("destination is inside source")`
+- `var ErrCrossDevice = errors.New("cross-device folder move not supported")`
+
+**구현 핵심:**
+1. `os.Stat(srcAbs)` → 미존재면 `ErrSrcNotFound`(기존 재사용), 디렉토리 아니면 `ErrSrcNotDir`
+2. `os.Stat(destDir)` → 미존재면 `ErrDestNotFound`(기존), 디렉토리 아니면 `ErrDestNotDir`(기존)
+3. 자기 자신·자손 검사: `srcClean := filepath.Clean(srcAbs); destClean := filepath.Clean(destDir)`
+   - `destClean == srcClean` → `ErrCircular`
+   - `strings.HasPrefix(destClean, srcClean+string(filepath.Separator))` → `ErrCircular`
+   - prefix 가짜양성 방지를 위해 separator 경계 명시
+4. 결과 경로 `dstPath := filepath.Join(destDir, filepath.Base(srcAbs))`
+5. `os.Stat(dstPath)`가 nil 에러(존재) → `ErrDestExists` (자동 suffix 없음 — `MoveFile`과 다른 정책)
+6. `os.Rename(srcAbs, dstPath)` — 성공이면 `dstPath` 반환
+7. EXDEV(`errors.Is(err, syscall.EXDEV)`)면 `ErrCrossDevice` (재귀 copy 폴백 없음)
+8. 사이드카 별도 처리 없음 — 폴더 rename과 동일 (자식 모두 함께 이동)
+
+**단위 테스트 (`move_test.go` 추가, 6개):**
+- `TestMoveDir_Success` — `t.TempDir()`에 src/dst 만들고 src/foo.txt + src/.thumb/foo.txt.jpg 생성, MoveDir → dst/<basename>/foo.txt + dst/<basename>/.thumb/foo.txt.jpg 확인
+- `TestMoveDir_DestExists` — dst에 동일 base name 폴더(또는 파일) 사전 생성 → `ErrDestExists`
+- `TestMoveDir_Circular_Self` — destDir == srcAbs → `ErrCircular`
+- `TestMoveDir_Circular_Descendant` — destDir이 srcAbs의 자손 → `ErrCircular`
+- `TestMoveDir_PrefixFalsePositive` — `/tmp/a` → `/tmp/ab` 정상 (자손 아님)
+- `TestMoveDir_NotADir` / `TestMoveDir_DestNotFound` — sentinel 매핑 정확
+
+**완료 기준:**
+- 위 6 케이스 모두 pass
+- `go vet ./internal/media` / `go test ./internal/media` 통과
+
+**검증:** `go test -run TestMoveDir ./internal/media -v`
+
+---
+
+### F2 — `handleFolder` PATCH body 분기 + 통합 테스트 + 체크포인트 ①
+
+**파일:** `internal/handler/files.go`, `internal/handler/files_test.go`
+
+**변경 핵심:**
+- `handleFolder` PATCH 케이스를 `patchFolder` dispatcher로 교체 — `patchFile`(`files.go:133`) 패턴 재사용:
+  - `io.ReadAll(r.Body)` → probe `{name, to}` → 둘 다이거나 둘 다 없으면 400
+  - `r.Body = io.NopCloser(bytes.NewReader(bodyBytes))`로 복원 후 `moveFolder` 또는 `renameFolder` 디스패치
+- `moveFolder` 신설:
+  - `media.SafePath(h.dataDir, rel)` → srcAbs
+  - 루트 가드: `srcAbs == filepath.Clean(h.dataDir)` → `400 cannot move root`
+  - body decode → `media.SafePath(h.dataDir, body.To)` → destAbs
+  - 동일 부모 가드: `filepath.Dir(srcAbs) == filepath.Clean(destAbs)` → `400 same directory`
+  - `media.MoveDir(srcAbs, destAbs)` → 에러 매핑:
+    - `ErrSrcNotFound` → 404 `not found`
+    - `ErrSrcNotDir` → 400 `not a directory`
+    - `ErrDestNotFound` / `ErrDestNotDir` / `ErrCircular` → 400 `invalid destination`
+    - `ErrDestExists` → 409 `already exists`
+    - `ErrCrossDevice` → 500 `cross_device`
+    - 기타 → 500 `move failed`
+  - 응답: `{"path": "/<dst rel>", "name": "<basename>"}`
+
+**통합 테스트 (`files_test.go` 추가, ~10개):**
+- `TestPatchFolder_Move_Success` — `/a/sub` → destDir `/b` → `/b/sub`로 이동, 하위 파일·`.thumb/` 모두 따라감 확인
+- `TestPatchFolder_Move_BothFields` — body `{name, to}` 동시 → 400 `specify either name or to, not both`
+- `TestPatchFolder_Move_MissingFields` — body `{}` → 400 `missing name or to`
+- `TestPatchFolder_Move_RootRejected` — path=`/` → 400 `cannot move root`
+- `TestPatchFolder_Move_DestNotDir` — to가 파일을 가리킴 → 400 `invalid destination`
+- `TestPatchFolder_Move_DestNotFound` — to가 미존재 → 400 `invalid destination`
+- `TestPatchFolder_Move_Circular` — to가 src의 자손 → 400 `invalid destination`
+- `TestPatchFolder_Move_SameDir` — to가 src의 부모와 동일 → 400 `same directory`
+- `TestPatchFolder_Move_Conflict` — destDir에 동일 base name 폴더 사전 존재 → 409 `already exists`
+- `TestPatchFolder_Move_Traversal` — to에 `..` → 400 `invalid path`
+- (기존 `TestRenameFolder*` 회귀 통과 확인)
+
+**완료 기준:**
+- 위 케이스 모두 pass
+- 기존 `TestRenameFolder*` / `TestDeleteFolder*` 회귀 0
+- `go test ./internal/handler -run TestPatchFolder -v`
+
+**체크포인트 ① (백엔드 curl 단독 검증):**
+1. `go run ./cmd/server` (별도 터미널, `DATA_DIR=./tmp-data`)
+2. `mkdir -p ./tmp-data/a/sub ./tmp-data/b && echo hi > ./tmp-data/a/sub/x.txt`
+3. `curl -X PATCH 'http://localhost:8080/api/folder?path=/a/sub' -d '{"to":"/b"}' -H 'Content-Type: application/json'` → 200 + `{"path":"/b/sub","name":"sub"}`
+4. `ls ./tmp-data/b/sub/x.txt` 존재 확인
+5. 충돌 케이스: src 다시 만들고 같은 요청 → 409 `already exists`
+6. 자손 케이스: `curl ...?path=/b/sub -d '{"to":"/b/sub"}'` → 400 `invalid destination`
+
+---
+
+### F3 — 사이드바 헤더 정리 (새 폴더 버튼 이전 + 트리 노드 🗑)
+
+**파일:** `web/index.html`, `web/style.css`, `web/tree.js`, `web/main.js`
+
+**변경 포인트:**
+- `index.html`
+  - `<header>`에서 `<button id="new-folder-btn">+ 새 폴더</button>` (line 16) **삭제**
+  - `<aside id="sidebar">` 내부 트리 위에 헤더 영역 추가:
+    - `<div class="sidebar-header"><button id="new-folder-btn" class="new-folder-btn" type="button">+ 새 폴더</button></div>`
+  - `<script type="module" src="/main.js?v=29">` → `v=30`
+- `style.css`
+  - `.sidebar-header` 패딩·구분선·sticky-with-tree 동작과의 조화 확인
+  - 기존 `header > .new-folder-btn` 위치/마진 규칙 정리
+- `tree.js`
+  - `wireTree(deps)` 시그니처에 `deleteFolder` 추가 (`_deleteFolder` 모듈 변수)
+  - `buildTreeNode`에서 `renameBtn` 옆에 `deleteBtn` (✎ 옆에 🗑) 추가
+  - `deleteBtn` click → `e.stopPropagation()` + `_deleteFolder(node.path)`
+- `main.js`
+  - `wireTree({ browse, attachDropHandlers, openRenameModal, deleteFolder })` 주입
+  - `import { ..., deleteFolder } from './fileOps.js'` (이미 export 됨)
+
+**완료 기준:**
+- 사이드바 헤더에 "+ 새 폴더" 버튼 표시. 클릭 시 기존 모달, currentPath 기준 생성.
+- 메인 툴바에 새 폴더 버튼 없음.
+- 사이드바 트리 노드에 ✎ 옆에 🗑 표시. 클릭 시 `confirm()` → DELETE → 트리·browse 재조회.
+- 모바일(<600px) 드로어: 헤더가 드로어 안으로 들어와 자연 동작.
+- 트리 sticky-until-bottom 동작 회귀 없음 (`web_sticky_e2e_test.go` 기준).
+
+**검증:**
+- 수동: 데스크탑/모바일 양쪽에서 폴더 생성 + 사이드바 트리 🗑 + 메인 표 폴더 행 🗑 회귀 모두 동작.
+- 자동: `go test ./...` (chromedp E2E가 sticky 회귀 검출).
+
+---
+
+### F4 — 폴더 DnD (트리 dragstart + 메인 표 폴더 행 dragstart + drop 라우팅 + 자기 자손 거부)
+
+**파일:** `web/tree.js`, `web/browse.js`, `web/fileOps.js`, `web/state.js`, `web/index.html` (script 버전 bump), `web/style.css`
+
+**변경 포인트:**
+- `state.js`
+  - 필요 시 `dragSrcIsDir` flag + setter 추가 (또는 payload `isDir` 필드만으로 처리해도 무방)
+- `tree.js` (`buildTreeNode`)
+  - `row.draggable = true` + `dragstart` / `dragend` 핸들러 부착
+  - `dataTransfer.setData(DND_MIME, JSON.stringify({src: node.path, paths: [node.path], isDir: true}))`
+  - `text/plain` fallback (Firefox dragstart 요구사항)
+- `browse.js` (`buildTable`)
+  - `if (!entry.is_dir) attachDragHandlers(tr, entry);` → 조건 제거하여 폴더 행도 draggable
+- `fileOps.js`
+  - `attachDragHandlers(el, entry)` 내부에서 `entry.is_dir`를 보고 payload에 `isDir: true` 포함
+  - `canDropMoveTo(destPath)` 자기 자손 거부 추가 — `destPath === p` 또는 `destPath.startsWith(p + '/')`이면 false
+  - drop 핸들러: `payload.isDir`이면 `moveFolder(payload.src, destPath)`, 아니면 기존 `moveFiles(paths, destPath)`
+  - `moveFolder(srcPath, destDir)` 신설:
+    - `PATCH /api/folder?path=...` body `{to: destDir}`
+    - 실패 시 `alert('폴더 이동 실패: ' + err.error)`
+    - 성공 시 `rewritePathAfterFolderRename(srcPath, newPath, currentPath)`로 navigate 결정 + `_loadTree()`
+- `index.html` / `style.css`
+  - 드래그 중 트리 노드 `.tree-node-row.dragging` 시각 피드백
+  - drop target은 기존 `.drop-target` 클래스 그대로 재사용
+  - `<script ... v=30>` → `v=31`
+
+**완료 기준:**
+- 사이드바 트리 노드 A → 트리 노드 B drop → A가 B 안으로 이동. 트리·browse 재조회.
+- 트리 노드 → breadcrumb 다른 경로 drop → 동작.
+- 메인 리스트 표 폴더 행 → 트리 노드 drop → 동작.
+- 자기/자손 destDir로 drag → `dropEffect: 'none'` + drop 거부.
+- currentPath가 이동 대상 폴더 자신/자손이면 새 경로로 자동 navigate.
+- 기존 파일 DnD 회귀 0.
+- 폴더는 selectedPaths에 들어가지 않음 (`bindEntrySelection` 가드 확인 — 필요 시 `entry.is_dir` 분기 추가).
+
+**검증:** 수동 (체크포인트 ② 10케이스).
+
+**체크포인트 ② (브라우저 E2E 수동, 10케이스):**
+1. `docker compose -p file_server up -d --build` 후 `http://localhost:8080`
+2. 사이드바 트리 노드 A → 트리 노드 B drop → A가 B 안으로 이동. 트리·browse 갱신.
+3. 트리 노드 → breadcrumb의 `/movies` drop → 동작.
+4. 메인 리스트 표 폴더 행 → 트리 노드 drop → 동작.
+5. 트리 노드를 자기 자신 위로 drag → `dropEffect: 'none'`, drop 거부.
+6. 트리 노드를 자기 자손 위로 drag → 동일 거부.
+7. 동일 부모 destDir로 drag → 거부.
+8. 충돌(destDir에 동일 이름 폴더 존재) → alert "이미 같은 이름이 있습니다" 류.
+9. currentPath가 `/a/sub`인 상태에서 `/a/sub` → `/b` 이동 → URL이 `/b/sub`로 자동 갱신 + browse 재조회.
+10. 회귀: 단일 파일 DnD, 다중 파일 DnD, 사이드바 ✎ rename, 사이드바 🗑 delete, 새 폴더 생성, URL import, 변환 — 모두 정상.
+
+---
+
+### F5 — README 갱신 + 0.0.1 릴리즈 정리
+
+**파일:** `README.md`
+
+**변경 포인트:**
+- features 목록에 폴더 작업 4종(생성·이름변경·삭제·이동) 명시. 사이드바 트리 운영 동선 한 줄.
+- 0.0.1 릴리즈 노트 섹션 추가 — Phase 24 변경 요약 + breaking change 없음 명시.
+- 기존 "폴더 생성/삭제" 설명이 메인 툴바 기준이면 사이드바 헤더로 갱신.
+
+**완료 기준:**
+- README features 목록이 SPEC §2.1 체크리스트와 일치.
+- 0.0.1 릴리즈 노트 → Phase 24의 4가지 변경 모두 언급.
+- 기존 사용 방법 설명이 새 UI와 일치(스크린샷은 별도 작업으로 분리).
+
+**체크포인트 ③ (SPEC §10 모든 항목 체크):**
+- [ ] 폴더 이동 백엔드 (F1+F2)
+- [ ] 폴더 이동 UI (F4)
+- [ ] 사이드바 트리 노드 🗑 삭제 버튼 (F3)
+- [ ] 새 폴더 버튼 위치 이동 (F3)
+- [ ] README 갱신 (F5)
+
+---
+
+### Out of scope (Phase 24)
+- 사이드바 트리 노드별 + 버튼으로 임의 위치 폴더 생성
+- 컨텍스트 메뉴 (우클릭) UI
+- 다중 폴더 선택 이동
+- cross-volume 폴더 이동 (EXDEV 재귀 copy 폴백)
+- `/api/version` 엔드포인트, GitHub release 자동화
+- README 스크린샷 갱신
+
+### 위험 / 롤백
+- **위험: drop 핸들러 자기 자손 검사가 prefix만 보면 `/a` → `/abc` 가짜양성** — `destPath.startsWith(p + '/')`로 separator 명시(서버 `MoveDir`과 동일 규칙). 수동 시나리오 6번에서 확인.
+- **위험: 폴더 multi-select이 우연히 활성화되면 폴더 다중 이동 발생** — `bindEntrySelection`의 `is_dir` 분기 확인. 없으면 폴더는 selectedPaths에 들어가지 않도록 가드.
+- **위험: 새 폴더 버튼 이전으로 모바일 드로어 닫힌 상태에선 새 폴더 생성 불가** — 사용자가 햄버거를 먼저 열어야 함. 의도된 동선이라 acceptable. README 한 줄 명시.
+- **위험: `rewritePathAfterFolderRename` 재사용 시 의미 차이** — 폴더 rename은 `/a/old → /a/new`, 폴더 move는 `/a/sub → /b/sub`. 헬퍼가 srcOldPath/destNewPath의 prefix 치환만 하면 둘 다 안전. `web/util.js` 구현 확인 후 재사용 검증.
+- **롤백:** Phase 24 머지 단위로 revert → Phase 23 상태 복귀. SPEC.md §2.1.2/§2.1.3/§10도 동시 revert.

@@ -6,7 +6,7 @@
 - **Go 단일 바이너리 + ffmpeg** — Docker 컨테이너 하나로 배포
 - **데이터는 Docker named volume**에 영속 저장 (`/data`)
 
-자세한 설계는 [SPEC.md](SPEC.md) 참조.
+현재 버전: **0.0.1** — 폴더 CRUD(생성·이름변경·삭제·이동)가 모두 닫힌 첫 공식 릴리즈. 자세한 설계는 [SPEC.md](SPEC.md) 참조.
 
 ---
 
@@ -16,7 +16,10 @@
 - 업로드 (multipart, 드래그 앤 드롭)
 - 폴더 트리 탐색 (사이드바) + 현재 폴더 리스트/그리드
 - 파일·폴더 rename (확장자 고정), 삭제 (폴더는 재귀)
-- 폴더 생성 모달
+- 폴더 생성 모달 — **사이드바 헤더의 "+ 새 폴더"** 진입 (현재 browse 경로 기준 생성)
+- **폴더 작업 동선은 사이드바 트리** — 트리 노드 hover 시 ✎ rename / 🗑 삭제 노출
+- **폴더 이동(DnD)** — 트리 노드 또는 메인 리스트 폴더 행을 다른 트리 노드/breadcrumb 위로 끌어 놓기. 자기 자신/자손/동일 부모로의 이동은 거부, 충돌 시 409
+- 다중 파일 선택 후 사이드바 폴더로 일괄 이동 (폴더는 단건 이동만)
 
 ### 이미지 / 동영상 / 음악
 - 이미지 섬네일 자동 생성 (200×200 JPEG, `.thumb/` 사이드카)
@@ -79,7 +82,7 @@ go run ./cmd/server
 | GET | `/api/thumb?path=` | 섬네일 (이미지/동영상) |
 | POST | `/api/upload?path=` | 멀티파트 업로드 |
 | POST | `/api/folder?path=` | 폴더 생성 |
-| PATCH | `/api/folder?path=` | 폴더 rename |
+| PATCH | `/api/folder?path=` | 폴더 rename(`{name}`) 또는 이동(`{to}`) |
 | DELETE | `/api/folder?path=` | 폴더 재귀 삭제 |
 | PATCH | `/api/file?path=` | 파일 rename |
 | DELETE | `/api/file?path=` | 파일 삭제 |
@@ -131,3 +134,13 @@ go test ./...
 - **Transcoding/Probe**: ffmpeg, ffprobe (alpine apk)
 - **Frontend**: Vanilla HTML/CSS/JS (의존성 없음)
 - **Container**: Docker multi-stage build (alpine:3.19 런타임)
+
+---
+
+## 릴리즈 노트
+
+### 0.0.1 — 폴더 CRUD 완성판
+- **폴더 이동 백엔드**: `media.MoveDir` + `PATCH /api/folder` body 분기(`{name}` rename | `{to}` move). 자기 자신·자손 거부, 충돌 시 409 (자동 suffix 없음 — rename과 일관). EXDEV는 500 (단일 볼륨 전제).
+- **사이드바 트리 폴더 운영**: 노드 hover 시 ✎ rename · 🗑 삭제 노출. "+ 새 폴더" 버튼이 메인 헤더에서 사이드바 헤더로 이전 (모바일 드로어에서는 햄버거 → 드로어 열기 후 사용).
+- **폴더 DnD**: 사이드바 트리 노드 또는 메인 리스트 폴더 행을 다른 트리 노드/breadcrumb 위로 끌어 놓아 이동. 자기 자신/자손으로 드래그하면 drop 거부.
+- **Breaking changes**: 없음. 기존 API/UI 동작 그대로, 새 폴더 이동 경로만 추가.

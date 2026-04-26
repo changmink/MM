@@ -18,8 +18,9 @@
 - [ ] 파일 삭제
 - [ ] 파일/폴더 이름 변경 (파일은 확장자 고정; 이미지/동영상은 썸네일·duration 사이드카 함께 rename)
 - [ ] UI에서 현재 visible 파일을 여러 개 또는 전체 선택해 사이드바 폴더/breadcrumb 경로로 일괄 이동
-- [ ] 폴더 생성 (현재 탐색 경로 기준, 이름 입력 모달)
-- [ ] 폴더 삭제 (재귀 삭제 — 하위 파일/폴더 + `.thumb/` 디렉토리 포함)
+- [ ] 폴더 생성 (현재 탐색 경로 기준, 이름 입력 모달 — 사이드바에서 진입)
+- [ ] 폴더 삭제 (재귀 삭제 — 하위 파일/폴더 + `.thumb/` 디렉토리 포함; 메인 리스트 + 사이드바 트리 모두에서 진입)
+- [ ] 폴더 이동 (사이드바 트리 노드 또는 메인 리스트 폴더 행 → 다른 트리 노드/breadcrumb DnD; 자기 자손으로 이동 거부, 충돌 시 409)
 
 ### 2.1.1 이름 변경 (Rename) 상세
 - **대상:** 파일 및 폴더 (데이터 루트 디렉토리 자체는 제외)
@@ -41,6 +42,40 @@
 - **폴더 rename:** 폴더 내부의 `.thumb/` 디렉토리는 부모 폴더 rename과 함께 자동으로 따라감 (OS `rename` 한 번). 추가 처리 불필요.
 - **UI 트리거:** 각 entry 카드에 rename 버튼 (연필 아이콘), 기존 delete 버튼과 동일한 레이아웃에 추가
 - **UI 피드백:** 성공 시 `loadBrowse()`로 현재 경로 재조회. 409/400 에러는 모달 내부 메시지로 표시하고 모달 유지.
+
+### 2.1.2 폴더 이동 (Move) 상세
+
+기존 파일 이동(`PATCH /api/file {"to": "..."}`, §5)은 `media.MoveFile`이 디렉토리를 명시적으로 거부(`ErrSrcIsDir`)하여 폴더에 대해서는 사용할 수 없다. 본 기능은 폴더에도 동일한 PATCH 의미론을 부여한다 — `PATCH /api/folder`에 `{"to": "..."}` body를 받으면 폴더 자체를 destDir 안으로 이동.
+
+- **API 형태:** `PATCH /api/folder?path=<src>` body가 `{"name":"..."}`이면 기존 rename, `{"to":"..."}`이면 이동. `PATCH /api/file`이 `patchFile`에서 body를 한 번 읽고 분기하는 것과 동일 패턴(`files.go:133` 참고).
+- **이동 의미:** `srcAbs`(폴더)의 base name이 그대로 유지된 채 `destDir` 아래로 옮긴다. 결과 경로는 `destDir/<srcBaseName>`. 이름 변경은 동시에 수행하지 않음(이동과 rename은 별도 호출).
+- **충돌 처리:** `destDir/<srcBaseName>`이 이미 존재(파일이든 폴더든)하면 `409 {"error": "already exists"}`. **자동 `_N` suffix 부여 없음** — 폴더는 파일과 달리 자동 suffix가 사용자 의도와 어긋나기 쉬워 명시적 거부가 안전. rename 정책과 일관.
+- **자기 자손 이동 방지:** `destDir`이 `srcAbs`와 동일하거나 `srcAbs`의 자손이면 `400 {"error": "invalid destination"}`. 비교는 `filepath.Clean` 후 prefix 검사 + 경계가 path separator로 끝나는지 확인 (예: `/a/b`는 `/a/bc`의 prefix가 아님).
+- **동일 부모 거부:** `filepath.Dir(srcAbs) == destDir`이면 `400 {"error": "same directory"}` — 기존 파일 이동(`files.go:227`)과 동일. 의미 없는 이동을 노이즈로 만들지 않음.
+- **루트 이동 방지:** `srcAbs == h.dataDir`이면 `400 {"error": "cannot move root"}`. rename 가드와 동일.
+- **원자성:** 단일 `os.Rename` 호출(폴더 전체 + 내부 `.thumb/` + 하위 모든 파일이 함께 이동). 사이드카 별도 처리 불필요(폴더 rename과 동일 원리, §2.1.1).
+- **Cross-volume 처리:** `os.Rename`이 `EXDEV` 반환 시 **재귀 copy+remove 폴백 없이** `500 {"error": "cross_device"}` 반환. 단일 데이터 볼륨이 전제이며(SPEC §1, Docker volume 단일 마운트), 폴더 재귀 복사는 race·디스크 공간·중간 실패 처리 비용이 크므로 의도적 out-of-scope. 파일 이동은 EXDEV 시 copy+remove 폴백을 유지(`media/move.go:93`) — 단일 파일 단위라 안전.
+- **사이드 효과:** 이동된 폴더 안의 파일 경로가 모두 바뀌므로, **현재 browse 경로(`currentPath`)가 이동된 폴더 자신 또는 그 자손**이라면 클라이언트가 새 경로로 navigate 해야 한다 — `rewritePathAfterFolderRename`(폴더 rename에서 사용 중)을 재사용해 `srcOldPath` → `destDir + "/" + baseName`으로 다시 계산.
+- **응답:** `200 OK`, `{"path": "/movies/sub", "name": "sub"}` — 새 위치의 절대 상대 경로 + base name(불변).
+- **UI 트리거:**
+  - 사이드바 트리 노드를 다른 사이드바 트리 노드 위로 드래그
+  - 사이드바 트리 노드를 breadcrumb의 다른 경로 위로 드래그
+  - 메인 리스트 표(`buildTable`)의 폴더 행을 사이드바 트리 노드 또는 breadcrumb 위로 드래그
+- **DnD payload 일반화:** 기존 `dataTransfer`의 `DND_MIME` payload(`{src, paths}`)는 파일 전용이었다. 폴더는 항상 단건 이동이므로 `paths` 배열에 폴더 경로를 그대로 1개 담아 같은 채널을 재사용 — drop 핸들러는 `is_dir` 구분 없이 `PATCH /api/file` 또는 `PATCH /api/folder`로 라우팅한다(클라이언트가 카드/노드 메타에서 `is_dir`를 알고 있음).
+- **다중 선택과의 관계:** 폴더는 selected set(`selectedPaths`)에서 제외(`bindEntrySelection`이 `is_dir`이면 체크박스 자체를 표시하지 않음 — 기존 정책 유지). 따라서 폴더 이동은 항상 단건. 멀티 폴더 이동은 out-of-scope.
+
+### 2.1.3 폴더 작업 UI 진입점 정리
+
+기존 폴더 작업 UI가 메인 리스트 표에만 노출되어 있고(이미지/동영상 그리드에는 폴더가 분류되지 않음), 사이드바 트리에는 rename만 있어 폴더 단위 운영이 끊겨 있다. 0.0.1 릴리즈에 맞춰 진입점을 정리한다.
+
+- [ ] **새 폴더 버튼 위치 이동**: 메인 툴바(현재 `#new-folder-btn`이 업로드 영역 근처)에서 제거하고 **사이드바 헤더 영역**(트리 root 위)으로 이동. 동작은 그대로 — 클릭 시 모달, currentPath 기준 생성, 성공 시 `_browse(currentPath, false)` + `_loadTree()`.
+  - 사용자 멘탈 모델: "폴더 작업은 사이드바에서" 일관 — rename·delete·move·create가 모두 트리 영역 동선에 모임.
+  - 모바일(<600px) 드로어에서도 동일 위치(사이드바 헤더). 드로어가 닫혀 있을 때는 자연스럽게 가려짐.
+- [ ] **사이드바 트리 노드에 🗑 버튼 추가**: 기존 ✎ 버튼 옆에. 클릭 시 기존 `deleteFolder(path)` 호출 — 동작 변화 없음(`confirm()` 다이얼로그 + `DELETE /api/folder` + 트리·browse 재조회).
+  - 루트는 삭제 불가(서버가 `cannot delete root` 400). UI는 트리 root 자체를 노드로 렌더하지 않으므로 추가 가드 불필요.
+- [ ] **사이드바 트리 노드 DnD 활성화**: 노드 row(`.tree-node-row`)에 `draggable=true` + `dragstart`에서 `DND_MIME` payload 전송(`{src: node.path, paths: [node.path], is_dir: true}`). 기존 `attachDropHandlers`는 사이드바 트리 노드와 breadcrumb에 이미 부착되어 있으므로(`tree.js:112`), drop 처리 분기만 추가.
+- [ ] **메인 리스트 폴더 행 DnD 활성화**: `buildTable`의 폴더 행(`!entry.is_dir`로 막혀 있던 `attachDragHandlers` 호출, `browse.js:352`)에서 `is_dir` 분기를 풀어 폴더에도 dragstart를 부착.
+- [ ] **drop 핸들러 라우팅**: `moveFiles`/`fileOps.js`의 PATCH 호출을 `is_dir` 여부로 분기 — `/api/folder` vs `/api/file`. 폴더 이동 실패 응답 코드는 파일과 공통 처리(`already exists`/`invalid destination`/`same directory`/`cannot move root`/`cross_device` 모두 한 줄 alert).
 
 ### 2.2 이미지
 - **지원 포맷:** JPG, PNG, WEBP, GIF
@@ -144,8 +179,9 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
 - [ ] 음악 플레이어 (HTML5 `<audio>` 태그, 재생목록)
 - [ ] 파일 업로드 UI (드래그 앤 드롭 + 버튼)
 - [ ] 반응형 레이아웃 (모바일 브라우저 지원)
-- [ ] 폴더 생성 모달 (이름 입력 → 현재 경로에 생성)
-- [ ] 폴더 삭제 확인 모달 (재귀 삭제 경고 문구 포함)
+- [ ] 폴더 생성 모달 (이름 입력 → 현재 경로에 생성; 진입 버튼은 **사이드바 헤더**에 위치 §2.1.3)
+- [ ] 폴더 삭제 확인 모달 (재귀 삭제 경고 문구 포함; 메인 리스트 표 + **사이드바 트리 노드 🗑** 두 곳에서 진입 §2.1.3)
+- [ ] 폴더 이동 DnD (사이드바 트리 ↔ 사이드바 트리 / 메인 리스트 폴더 행 → 사이드바 트리 또는 breadcrumb §2.1.2)
 - [ ] **URL에서 가져오기 모달**: 업로드 버튼 옆 버튼 → textarea(줄바꿈 구분 URL) → "가져오기" → 각 URL별 실시간 프로그래스 바 표시 (다운로드 중 % / 완료 / 실패 상태) → 전체 완료 시 성공·실패 카운트 요약. **모달 닫기는 뷰 숨김일 뿐, 다운로드는 현재 탭이 살아있는 동안 계속 진행**(§2.6). 닫힌 동안 헤더 우측 미니 배지(`URL ↓ 완료/전체` + 실패 시 `⚠`)로 진행 집계를 노출하고, 클릭하면 모달이 다시 열린다. 진행 중인 배치가 있는 상태에서 재오픈하면 confirm 라벨이 **"새 배치 추가"** 로 바뀌어 기존 row 아래에 새 배치를 append할 수 있다 — 서버는 §2.6의 배치 직렬화 규칙으로 처리한다.
 - [ ] **파일 용량 표시** (§2.5.1)
 - [ ] **정렬·필터 툴바** (§2.5.2)
@@ -471,7 +507,7 @@ file_server/
 | DELETE | `/api/file?path=` | 파일 삭제 |
 | PATCH | `/api/file?path=` | 파일 이름 변경 (확장자 고정) |
 | POST | `/api/folder?path=` | 폴더 생성 |
-| PATCH | `/api/folder?path=` | 폴더 이름 변경 |
+| PATCH | `/api/folder?path=` | 폴더 이름 변경 또는 이동 (body로 분기) |
 | DELETE | `/api/folder?path=` | 폴더 재귀 삭제 (하위 내용 + `.thumb/` 포함) |
 | POST | `/api/import-url?path=` | URL 목록에서 미디어 다운로드 → 저장 (SSE 진행 스트림) |
 | POST | `/api/convert` | TS 파일 목록을 MP4로 영구 변환 (SSE 진행 스트림) |
@@ -578,7 +614,13 @@ file_server/
 - traversal: `400 {"error": "invalid path"}`
 
 #### PATCH /api/folder
-- Body: `{"name": "new-folder-name"}`
+Body 형태로 두 동작 분기 (`PATCH /api/file`과 동일 패턴):
+- `{"name": "..."}` → **이름 변경** (동일 부모 디렉토리 내)
+- `{"to":   "..."}` → **이동** (다른 디렉토리로, base name 유지)
+
+두 필드를 동시에 보내면 `400 {"error": "specify either name or to, not both"}`. 둘 다 없으면 `400 {"error": "missing name or to"}`.
+
+##### 이름 변경 (`{"name": "..."}`)
 - 성공: `200 OK`
   ```json
   {
@@ -592,6 +634,25 @@ file_server/
 - 유효하지 않은 이름: `400 {"error": "invalid name"}`
 - 새 이름 = 기존 이름: `400 {"error": "name unchanged"}`
 - 충돌: `409 {"error": "already exists"}`
+- traversal: `400 {"error": "invalid path"}`
+
+##### 이동 (`{"to": "..."}`)
+- 성공: `200 OK`
+  ```json
+  {
+    "path": "/photos/2024/sub",
+    "name": "sub"
+  }
+  ```
+  (`name`은 원본의 base name 그대로, 이동만 수행)
+- 미존재 (src): `404 {"error": "not found"}`
+- src가 파일을 가리킴: `400 {"error": "not a directory"}`
+- 루트 이동 시도: `400 {"error": "cannot move root"}`
+- 대상 디렉토리 없음 또는 디렉토리 아님: `400 {"error": "invalid destination"}`
+- 자기 자손으로 이동 시도 (`/a` → `/a/b`): `400 {"error": "invalid destination"}`
+- 동일 부모 (이동 의미 없음): `400 {"error": "same directory"}`
+- 동일 base name이 destDir에 이미 존재: `409 {"error": "already exists"}`
+- cross-volume(`EXDEV`): `500 {"error": "cross_device"}` — 폴더 재귀 copy 폴백 없음
 - traversal: `400 {"error": "invalid path"}`
 
 #### GET /api/stream
@@ -948,8 +1009,35 @@ volumes:
   - 확장자 포함 입력(`new.mp4`)이 원본 확장자(`.mkv`)를 덮어쓰지 않음 확인
   - 409 Conflict: 동일 디렉토리 내 기존 파일명으로 rename 시도
   - 400 name unchanged: 새 이름이 기존 이름과 동일할 때
-  - `PATCH /api/folder` 성공 시 하위 내용(`.thumb/` 포함)이 새 경로에 그대로 존재 확인
+  - `PATCH /api/folder` (rename) 성공 시 하위 내용(`.thumb/` 포함)이 새 경로에 그대로 존재 확인
   - Path traversal 방지 (`name`에 `/`·`\\` 포함 시 400)
+- 단위 테스트 (`media.MoveDir` — 신규):
+  - 정상 이동: `srcDir`이 `destDir/<basename>`으로 옮겨지고 하위 파일·`.thumb/`가 모두 따라감
+  - 충돌: `destDir`에 동일 base name이 이미 존재(파일이든 폴더든) → `ErrDestExists`
+  - 자기 자신 이동: `destDir == srcDir` → `ErrCircular`
+  - 자기 자손 이동: `destDir`이 `srcDir`의 자손 → `ErrCircular`
+  - prefix 가짜양성 방지: `/a/bc`로 이동 시 `/a/b`의 자손으로 오판하지 않음
+  - cross-volume 시뮬레이션(EXDEV 모킹) → `ErrCrossDevice` (재귀 copy 폴백 없음 확인)
+- 통합 테스트 (`PATCH /api/folder` 이동 분기):
+  - 정상 이동 → 200 + `{path, name}`. 새 위치에 파일/.thumb/하위폴더 모두 존재 확인
+  - body가 `{name, to}` 동시 → 400 `specify either name or to, not both`
+  - body가 `{}` → 400 `missing name or to`
+  - 루트 이동 시도 (path=`/` 또는 빈 문자열) → 400 `cannot move root`
+  - destDir 미존재/파일 가리킴 → 400 `invalid destination`
+  - 자기 자손 destDir → 400 `invalid destination`
+  - 동일 부모 destDir → 400 `same directory`
+  - 충돌 → 409 `already exists`
+  - traversal (`to`에 `..` 등) → 400 `invalid path`
+- 통합 테스트 (`DELETE /api/folder` UI 진입점, 이미 백엔드 통과):
+  - 사이드바 트리 노드의 🗑 클릭 → `confirm()` accept → `DELETE /api/folder` → 트리·browse 재조회 (수동/E2E)
+- 수동 테스트 (DnD 폴더 이동):
+  - 사이드바 트리 노드 A → 사이드바 트리 노드 B 위로 드래그 → 이동 후 B 아래 A 표시, A의 currentPath이면 자동 navigate
+  - 사이드바 트리 노드 → breadcrumb 다른 경로 위로 드래그 → 동일 동작
+  - 메인 리스트 표의 폴더 행 → 사이드바 트리 노드 위로 드래그 → 동작 확인
+  - 자기 자손 destDir로 드래그 시 drop 거부 시각 피드백 (`dropEffect: 'none'`)
+- 수동 테스트 (새 폴더 버튼 위치):
+  - 사이드바 헤더의 "새 폴더" 클릭 → currentPath 기준 생성 모달 → 성공 시 트리 + 메인 리스트 동시 갱신
+  - 메인 툴바에서 기존 "새 폴더" 버튼이 사라졌는지 확인
 - 통합 테스트 (URL import): `httptest.Server`로 모의 origin 띄워서 검증 (SSE 응답 파싱)
   - 정상 이미지 다운로드 → `start` → `done` 이벤트, 파일 저장 확인
   - 정상 MP4 동영상 다운로드 → `type: "video"` 반환 + `.thumb/` 생성
@@ -1015,8 +1103,9 @@ volumes:
 - 업로드 파일은 `/data` 볼륨 내부에만 저장 (path traversal 방지)
 - 섬네일은 비동기로 생성 (업로드 응답 차단 안 함)
 - Rename 시 `media.SafePath`로 원본·대상 경로 모두 검증 (path traversal 방지)
-- Rename은 동일 부모 디렉토리 내에서만 허용 (경로 이동 금지)
+- Rename은 동일 부모 디렉토리 내에서만 허용 (경로 이동 금지 — 이동은 별도 PATCH body)
 - File rename은 `os.Link` + `os.Remove`로 atomic EEXIST 보장 (TOCTOU 방지)
+- 폴더 이동 (§2.1.2): 원본·대상 모두 `media.SafePath`로 검증, 자기 자신 또는 자손으로의 이동을 `filepath.Clean` + path-separator 경계 검사로 거부, 동일 부모는 거부, 대상 충돌은 자동 suffix 없이 409 반환, 단일 `os.Rename`으로 폴더 + `.thumb/` + 하위 모두 원자 이동, EXDEV는 재귀 copy 폴백 없이 500
 - URL import: HTTPS TLS 인증서 검증, 요청 시작 시점에 설정 스냅샷(§2.7)을 찍어 사용, `Content-Length` 있으면 사전 검증 + 런타임 누적 카운터로 이중 방어(설정값 `url_import_max_bytes` 초과 시 중단), Content-Type 허용 목록(image/video/audio) 검증, 임시 파일 → atomic rename, 파일명 sanitize, SSE `Cache-Control: no-cache` 및 즉시 Flush
 - HLS import: ffmpeg는 항상 검증된 local 파일만 입력으로 받는다 — master/variant playlist 본문, segment, key, init segment를 모두 Go 보호 클라이언트(`publicOnlyDialContext`)가 사전 다운로드한 뒤 임시 디렉터리(`<destDir>/.urlimport-hls-<random>/`)에 두고 URI를 local 상대 경로로 재작성한 playlist를 ffmpeg에 전달, ffmpeg `-protocol_whitelist "file,crypto"` 강제(네트워크 protocol 모두 차단 — DNS rebinding 우회 차단의 핵심), `-allowed_extensions ALL`은 local 파일 입력에만 영향, master playlist의 variant URL 스킴도 `http`/`https`만 허용(이중 검증), variant가 master 자기자신으로 resolve되면 media playlist로 fallback(loop 방지), media playlist segment 개수 cap 10,000(`hls_too_many_segments`), key 64 KiB / init 16 MiB per-resource cap, 누적 cap은 `url_import_max_bytes`(§2.7) 단일 카운터를 segment 다운로드와 ffmpeg 출력이 공유, ffmpeg 프로세스는 ctx cancel로 종료(외부 cancel·timeout·size cap 모두 동일 경로), 임시 디렉터리는 `defer os.RemoveAll`로 모든 경로(성공/실패/취소/패닉)에서 cleanup, 출력 MP4는 기존 `renameUnique` 경로로 atomic rename, 실패 시 stderr는 서버 로그에만 기록(SSE 클라이언트로는 안전한 code만 노출)
 - Settings: PATCH 시 두 필드 모두 경계 검증 후 atomic write (temp + rename), 저장 실패 시 메모리 캐시는 변경하지 않음 (디스크-메모리 drift 방지), 진행 중인 URL 요청은 시작 시점 스냅샷 값을 끝까지 유지 (race-free)
@@ -1028,6 +1117,10 @@ volumes:
 - 외부 CDN이나 클라우드 스토리지 연동
 - Rename 시 확장자 변경 허용 (MIME/타입 감지 일관성 유지)
 - Rename 시 자동 suffix 부여 (`_1`, `_2` 등) — 충돌은 항상 409로 거부
+- 폴더 이동 시 자동 suffix 부여 — 충돌은 항상 409로 거부 (rename과 일관)
+- 폴더 이동 시 cross-volume 재귀 copy 폴백 — EXDEV는 500으로 즉시 거부 (단일 데이터 볼륨 전제)
+- 폴더 이동 시 동시에 이름 변경 — `{"to"}`와 `{"name"}` body 동시 지정은 400 (한 호출에 하나의 의도)
+- 다중 폴더 이동 — 폴더는 multi-select 대상이 아니며, DnD payload는 항상 단건 폴더만 운반
 - URL import: `Authorization`/쿠키 등 인증 헤더 자동 첨부, `http`/`https` 외 스킴 허용, 설정값 `url_import_max_bytes` 초과 다운로드, 허용 목록 밖 Content-Type 저장, 동시 다운로드(batch는 순차 처리)
 - Settings: 인증/권한 검사(single-tenant 전제), 경계 밖 값 저장, 진행 중인 요청에 새 값 반영(스냅샷 정책), 설정을 핸들러별로 분기(URL import와 HLS는 반드시 동일 값 공유)
 - HLS import: 재인코딩(`-c copy`로 리먹싱만, CPU 폭주 방지), DASH(`.mpd`) 지원, 원본 `.m3u8` + `.ts` 세그먼트를 그대로 저장, DRM/암호화 세그먼트 우회 시도, live stream 특별 처리(엔드리스 스트림은 공통 timeout/size 상한으로만 차단)
@@ -1035,7 +1128,30 @@ volumes:
 
 **Known limitations**
 - Folder rename은 `os.Stat` + `os.Rename` 순서로, 두 콜 사이에 동일 이름 폴더가 생성되면 race 발생 가능. 단일 사용자 배포 대상이므로 acceptable.
+- Folder move도 같은 stat-then-rename 패턴이며 동일 race 가정 — 단일 사용자 배포 대상이므로 acceptable.
+- 폴더 이동은 단일 볼륨 가정 (Docker named volume 1개). cross-volume 마운트(예: `/data/external` 별도 mount)에서는 EXDEV가 발생하며 0.0.1에서는 거부한다. 필요하면 후속 버전에서 재귀 copy+remove 폴백 도입.
 - HLS live stream은 설정값 `url_import_timeout_seconds`(§2.7, 기본 30분) 또는 `url_import_max_bytes`(기본 10 GiB) 시점에 강제 종료 — 긴 live 컨텐츠는 끝까지 기록되지 않는다. 명시적 live 감지·분기는 없음. 필요하면 UI에서 값을 키워 재시도 가능.
 - HLS 다운로드는 `start` 이벤트에 `total`이 없어 클라이언트 프로그래스 바는 indeterminate(수치 없이 애니메이션) 표시가 필요. 기존 UI가 `total` 없음을 허용하는지 §2.5 모달 구현 시 확인.
 - HLS 임시 파일 TOCTOU: ffmpeg가 출력 MP4를 임시 디렉터리(`<destDir>/.urlimport-hls-<random>/output.mp4`) 안에 작성하므로 임시 파일 자체에 대한 별도 TOCTOU 창은 없다. atomic rename은 임시 디렉터리 → destDir로 단방향이고, 임시 디렉터리의 random suffix가 충돌 가능성을 사실상 0에 수렴시킨다.
 - HLS 사전 다운로드 비용: 모든 segment/key/init을 ffmpeg 호출 전에 Go가 먼저 받아오므로 매우 큰 VOD(수만 segment)에선 첫 progress 이벤트까지의 지연이 길어진다. UX 측면에서 progress bar는 indeterminate 상태로 시작하여 점진적 단조 증가로 전환된다. 정상 사용 범위에선 무시할 만한 차이.
+
+---
+
+## 10. 0.0.1 릴리즈 범위
+
+첫 공식 릴리즈. 폴더 운영(생성·이름 변경·삭제·이동)이 모두 갖춰져 single-user 미디어 서버로서 기본 기능이 닫힌다.
+
+**포함:**
+- [ ] 폴더 이동 백엔드 (§2.1.2 — `media.MoveDir` 신설, `PATCH /api/folder` body 분기)
+- [ ] 폴더 이동 UI (§2.1.2, §2.1.3 — 사이드바 트리 ↔ 트리 / 메인 표 폴더 행 → 트리·breadcrumb DnD)
+- [ ] 사이드바 트리 노드 🗑 삭제 버튼 (§2.1.3)
+- [ ] 새 폴더 버튼 위치 이동 (메인 툴바 → 사이드바 헤더, §2.1.3)
+- [ ] README 갱신 — 본 SPEC §2.1.2 / §2.1.3을 README features 목록에 반영, 0.0.1 릴리즈 노트 추가, 기존 폴더 작업 설명 업데이트
+
+**범위 외 (후속 버전):**
+- 사이드바 트리 노드별 + 버튼으로 임의 위치 폴더 생성
+- 컨텍스트 메뉴 (우클릭) UI
+- 다중 폴더 선택 이동
+- cross-volume 폴더 이동 (EXDEV 재귀 copy 폴백)
+- `/api/version` 엔드포인트, GitHub release 자동화
+- WebDAV / 멀티 사용자 / 인증

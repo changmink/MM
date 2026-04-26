@@ -8,7 +8,9 @@ import { currentPath, TREE_INIT_DEPTH } from './state.js';
 
 let _browse = null;
 let _attachDropHandlers = null;
+let _attachDragHandlers = null;
 let _openRenameModal = null;
+let _deleteFolder = null;
 
 export async function loadTree() {
   $.treeRoot.setAttribute('aria-busy', 'true');
@@ -105,11 +107,24 @@ function buildTreeNode(node, depth) {
     _openRenameModal({ name: node.name, path: node.path, is_dir: true });
   });
 
+  const deleteBtn = document.createElement('button');
+  deleteBtn.className = 'tree-delete';
+  deleteBtn.type = 'button';
+  deleteBtn.title = '폴더 삭제';
+  deleteBtn.setAttribute('aria-label', `${node.name} 삭제`);
+  deleteBtn.textContent = '🗑';
+  deleteBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    _deleteFolder(node.path);
+  });
+
   row.appendChild(chevron);
   row.appendChild(label);
   row.appendChild(renameBtn);
+  row.appendChild(deleteBtn);
   wrap.appendChild(row);
   _attachDropHandlers(row, node.path);
+  _attachDragHandlers(row, { path: node.path, name: node.name, is_dir: true });
 
   const kids = document.createElement('div');
   kids.className = 'tree-children';
@@ -195,7 +210,9 @@ export function setSidebarOpen(open) {
 export function wireTree(deps) {
   _browse = deps.browse;
   _attachDropHandlers = deps.attachDropHandlers;
+  _attachDragHandlers = deps.attachDragHandlers;
   _openRenameModal = deps.openRenameModal;
+  _deleteFolder = deps.deleteFolder;
 
   $.sidebarToggle.addEventListener('click', () => {
     setSidebarOpen(!document.body.classList.contains('sidebar-open'));
