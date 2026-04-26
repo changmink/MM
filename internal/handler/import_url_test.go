@@ -613,6 +613,11 @@ func (r *streamingRecorder) Flush() {
 // waitForPhase blocks until a frame carrying the given phase arrives (or the
 // deadline expires). Any earlier phases are discarded by the caller's
 // intent — tests pass whatever they haven't yet explicitly consumed.
+//
+// The recorder's frames channel has cap 64; a longer-running test could
+// silently drop a frame past that ceiling. On timeout we re-scan the full
+// body so the failure message tells the test author whether the phase
+// genuinely never fired or just exceeded the channel buffer.
 func waitForPhase(t *testing.T, rec *streamingRecorder, want string) map[string]any {
 	t.Helper()
 	deadline := time.After(5 * time.Second)
@@ -625,8 +630,21 @@ func waitForPhase(t *testing.T, rec *streamingRecorder, want string) map[string]
 				}
 			}
 		case <-deadline:
-			t.Fatalf("timed out waiting for phase %q; body so far: %s",
-				want, rec.all.String())
+			body := rec.all.String()
+			missedInBuffer := false
+			for _, ev := range parseSSEEvents(t, body) {
+				if ev["phase"] == want {
+					missedInBuffer = true
+					break
+				}
+			}
+			if missedInBuffer {
+				t.Fatalf("timed out waiting for phase %q on frames channel, "+
+					"but the phase IS present in the recorded body — increase "+
+					"streamingRecorder frames buffer or drain faster. body: %s",
+					want, body)
+			}
+			t.Fatalf("timed out waiting for phase %q; body so far: %s", want, body)
 		}
 	}
 }
@@ -658,6 +676,81 @@ func postImportStreaming(ctx context.Context, t *testing.T, mux *http.ServeMux,
 		}
 	}
 	return rec, wait
+}
+
+// TestImportURL_AllFailed_StatusIsFailed locks the SPEC §2.6 status
+// precedence at the HTTP boundary: a batch where every URL fails (no
+// success, no cancellation) must terminate as StatusFailed. The mixed-
+// success path is covered by TestImportURL_SSE_Mixed_PartialSuccess; this
+// closes the symmetrical gap.
+func TestImportURL_AllFailed_StatusIsFailed(t *testing.T) {
+	srv := newOriginServer()
+	defer srv.Close()
+
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	h := Register(mux, root, root, nil)
+	defer h.Close()
+
+	rw := postImport(t, mux, "/", []string{
+		srv.URL + "/missing",
+		srv.URL + "/page.html", // unsupported_content_type
+	})
+	events := parseSSEEvents(t, rw.Body.String())
+	if len(events) == 0 {
+		t.Fatalf("no events; body = %s", rw.Body.String())
+	}
+	jobID, _ := events[0]["jobId"].(string)
+	if jobID == "" {
+		t.Fatal("register event missing jobId")
+	}
+
+	job, ok := h.registry.Get(jobID)
+	if !ok {
+		t.Fatalf("job %q not in registry", jobID)
+	}
+	select {
+	case <-job.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("job did not finish within 2s")
+	}
+	if got := job.Status(); got != importjob.StatusFailed {
+		t.Errorf("status = %q, want %q (every URL failed → failed)",
+			got, importjob.StatusFailed)
+	}
+}
+
+// TestImportURL_TooManyJobs_Returns429 verifies the HTTP-level handling of
+// importjob.ErrTooManyJobs. Registry-level rejection is covered by the
+// importjob unit tests; this guards the spec §2.6 "활성 잡 cap" → 429
+// translation in handleImportURL.
+func TestImportURL_TooManyJobs_Returns429(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	h := Register(mux, root, root, nil)
+	defer func() {
+		// Drain any pre-filled placeholders so Close does not block.
+		active, _ := h.registry.List()
+		for _, j := range active {
+			j.SetStatus(importjob.StatusCancelled)
+		}
+		h.Close()
+	}()
+
+	// Shrink the cap so we don't have to create 100 jobs to exercise the
+	// rejection path.
+	importjob.SetMaxQueuedForTesting(h.registry, 1)
+	if _, err := h.registry.Create("/", []string{"https://x"}); err != nil {
+		t.Fatalf("seed Create: %v", err)
+	}
+
+	rw := postImport(t, mux, "/", []string{"https://example.com/x.jpg"})
+	if rw.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429; body = %s", rw.Code, rw.Body.String())
+	}
+	if !strings.Contains(rw.Body.String(), "too_many_jobs") {
+		t.Errorf("body = %s, want too_many_jobs", rw.Body.String())
+	}
 }
 
 // TestImportURL_Queued_EventEmittedOnce asserts the batch-level `queued`
