@@ -45,6 +45,18 @@ func WithServerCtx(ctx context.Context) Option {
 	}
 }
 
+// WithURLClient overrides the URL import HTTP client. Production uses the
+// default protected urlfetch client; tests can inject a localhost-capable
+// client without widening the production path.
+func WithURLClient(client *http.Client) Option {
+	return func(h *Handler) {
+		if client == nil {
+			return
+		}
+		h.urlClient = client
+	}
+}
+
 // Register wires all API routes. settingsStore may be nil in tests that do
 // not exercise URL import or /api/settings — callers that pass nil get the
 // hard-coded Default() values from settings. Pass WithServerCtx in production

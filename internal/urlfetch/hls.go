@@ -142,6 +142,11 @@ func parseMasterPlaylist(body []byte, base *url.URL) (*url.URL, error) {
 	return resolved, nil
 }
 
+func validatePublicURL(ctx context.Context, resolver Resolver, u *url.URL) error {
+	_, err := lookupPublicIPs(ctx, resolver, u.Hostname())
+	return err
+}
+
 // sameURL compares two URLs by scheme/host/path — query/fragment ignored — so
 // a variant link with a differing token still counts as the same endpoint for
 // loop detection.
@@ -261,6 +266,8 @@ func fetchHLS(
 	warnings []string,
 	maxBytes int64,
 	cb *Callbacks,
+	allowPrivateNetworks bool,
+	resolver Resolver,
 ) (*Result, *FetchError) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, hlsMaxPlaylistBytes+1))
 	if err != nil {
@@ -279,6 +286,14 @@ func fetchHLS(
 			return nil, &FetchError{Code: "invalid_scheme", Err: err}
 		}
 		return nil, &FetchError{Code: "ffmpeg_error", Err: err}
+	}
+	if !allowPrivateNetworks {
+		if err := validatePublicURL(ctx, resolver, variantURL); err != nil {
+			if errors.Is(err, errPrivateNetwork) {
+				return nil, &FetchError{Code: "private_network", Err: err}
+			}
+			return nil, &FetchError{Code: "ffmpeg_error", Err: err}
+		}
 	}
 
 	name := deriveHLSFilename(parsed)

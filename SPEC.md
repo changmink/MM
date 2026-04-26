@@ -293,16 +293,17 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
   2. HTTP는 허용하되 `warnings`에 `"insecure_http"` 추가 (다운로드는 진행)
   3. HTTPS는 표준 TLS 인증서 검증 (자체서명 거부)
   4. 리다이렉트 최대 5회 추적 (스킴은 매 hop마다 재검증)
-  5. 요청 시 `Authorization` 등 인증 헤더 자동 첨부 안 함
-  6. 응답 헤더 검증:
+  5. DNS 해석 결과가 loopback/private/link-local/multicast/unspecified IP이면 거부 (`error: "private_network"`). 최초 요청과 redirect 이후 실제 dial 대상 모두에 적용하며, HLS master playlist의 선택 variant URL도 ffmpeg 실행 전에 동일하게 검증한다. 단, ffmpeg는 HLS variant/segment fetch 시 자체 DNS 해석을 수행하므로 DNS rebinding을 받는 호스트에 대해서는 우회될 수 있다 — §9 Boundaries 참조.
+  6. 요청 시 `Authorization` 등 인증 헤더 자동 첨부 안 함
+  7. 응답 헤더 검증:
      - `Content-Type`이 위 허용 목록에 없으면 거부 (`error: "unsupported_content_type"`)
      - **HLS 분기** (§2.6.1): Content-Type이 HLS 플레이리스트이거나, URL 경로가 `.m3u8`로 끝나고 Content-Type이 `text/plain` / `application/octet-stream` / 파싱 불가 → HLS 흐름으로 이탈하고 이하 §2.6 검증은 건너뜀
      - `Content-Length` 헤더가 있고 설정값 `url_import_max_bytes`(§2.7) 초과면 다운로드 시작 전 거부 (`error: "too_large"`)
      - `Content-Length` 헤더 없어도 다운로드 진행 (아래 누적 카운터로 런타임 보호)
-  7. 임시 파일에 스트리밍 저장
-  8. 다운로드 중 누적 바이트가 `url_import_max_bytes` 초과 시 즉시 중단 + 임시 파일 삭제 (`error: "too_large"`)
-  9. 검증 통과 시 임시 파일 → 최종 경로로 atomic rename
-  10. 이미지·동영상 성공 시 `.thumb/{name}.jpg` 섬네일 비동기 생성 (음악은 생략)
+  8. 임시 파일에 스트리밍 저장
+  9. 다운로드 중 누적 바이트가 `url_import_max_bytes` 초과 시 즉시 중단 + 임시 파일 삭제 (`error: "too_large"`)
+  10. 검증 통과 시 임시 파일 → 최종 경로로 atomic rename
+  11. 이미지·동영상 성공 시 `.thumb/{name}.jpg` 섬네일 비동기 생성 (음악은 생략)
 - [ ] **진행 이벤트 (SSE)**: URL당 최소 `start` → `done` 또는 `start` → `error`. 큰 파일은 중간에 `progress` 이벤트를 주기적으로 방출 (§5.1.1). 배치 단위로는 응답 헤더 직후 `register` 이벤트 1회(jobId 부여) → `queued` 이벤트 1회 → URL 단위 이벤트들 → `summary` 이벤트로 종료한다 (§5.1).
 - [ ] **타임아웃**: 연결 10초 + 전체 다운로드는 설정값 `url_import_timeout_seconds`(§2.7, 기본 30분, 개별 URL 단위). 초과 시 `error: "download_timeout"`
 - [ ] **배치 직렬화**: 서버는 `Handler.importSem`(size-1 채널 세마포어)로 `POST /api/import-url`을 **프로세스 전역에서 한 번에 한 배치씩 순차 처리**한다. 동시에 여러 클라이언트(또는 같은 사용자가 모달 재오픈으로 추가한 두 번째 배치)가 POST를 보내면, 응답 헤더는 즉시 가고 `queued` 이벤트가 곧바로 송출되지만, 후속 `start` 이벤트는 앞선 배치가 끝날 때까지 대기한다. 세마포어 wait는 **잡 컨텍스트(`Job.Ctx()`)와 함께 select** 되므로, 잡이 명시적 취소되면 미획득 상태로 즉시 종료된다. 클라이언트 disconnect는 잡을 취소하지 않는다 — 아래 *백그라운드 진행*.
@@ -646,6 +647,7 @@ file_server/
   - `"connect_timeout"` — 연결 10초 초과
   - `"download_timeout"` — `url_import_timeout_seconds`(§2.7) 초과
   - `"too_many_redirects"` — 5회 초과
+  - `"private_network"` — loopback/private/link-local/multicast/unspecified IP 대상 차단
   - `"tls_error"` — TLS 인증서 검증 실패
   - `"http_error"` — 4xx/5xx 응답
   - `"unsupported_content_type"` — 허용 Content-Type 목록 밖
@@ -936,6 +938,7 @@ volumes:
   - Content-Length 누락 + 본문이 설정 cap 초과 → `error: "too_large"` (런타임) + 임시 파일 정리 확인
   - `Content-Type: text/html` → `error: "unsupported_content_type"` 이벤트
   - HTTP URL → `done` + `warnings: ["insecure_http"]`
+  - private network URL(`127.0.0.1`, `192.168.0.0/16` 등) → `error: "private_network"`
   - URL 확장자와 Content-Type 불일치 → 확장자 교체 + `warnings: ["extension_replaced"]`
   - 부분 실패: 3개 URL 혼합 → 각 URL당 `done`/`error` 1개씩 + `summary` 1개
   - 리다이렉트 6회 → `error: "too_many_redirects"`
@@ -1014,4 +1017,4 @@ volumes:
 - HLS live stream은 설정값 `url_import_timeout_seconds`(§2.7, 기본 30분) 또는 `url_import_max_bytes`(기본 10 GiB) 시점에 강제 종료 — 긴 live 컨텐츠는 끝까지 기록되지 않는다. 명시적 live 감지·분기는 없음. 필요하면 UI에서 값을 키워 재시도 가능.
 - HLS 다운로드는 `start` 이벤트에 `total`이 없어 클라이언트 프로그래스 바는 indeterminate(수치 없이 애니메이션) 표시가 필요. 기존 UI가 `total` 없음을 허용하는지 §2.5 모달 구현 시 확인.
 - HLS 임시 파일 TOCTOU: `os.CreateTemp` → `Close` → ffmpeg `-y` 재오픈 사이에 동일 경로 write 권한을 가진 로컬 프로세스가 symlink로 대체하는 이론적 race 창이 존재. 단일 사용자 자기-호스팅 모델에서 `destDir` write 권한자는 사용자 본인이므로 실제 위협 없음 — 다중 사용자 배포로 확장 시 `O_NOFOLLOW` 또는 ffmpeg stdout 파이프 방식 재검토 필요.
-- URL import SSRF 정책(약함)은 설계상 선택. 사설 IP(`127.0.0.1`, `10.x`, `192.168.x`, `169.254.169.254` 등)은 호스트 검증 없이 그대로 fetch 허용 — LAN 미디어 서버 호출 등 정상 케이스 허용이 우선. VPS/다중 사용자 호스팅으로 확장 시 cloud metadata endpoint(`169.254.169.254`)는 무조건 차단 권장.
+- URL import SSRF 정책은 일반 HTTP 다운로드 경로에서 DNS 해석 결과를 검사하고 해당 IP literal로 dial해 DNS rebinding을 차단한다. HLS 경로는 ffmpeg가 variant/segment URL을 직접 fetch하면서 자체 DNS 해석을 수행하므로, Go-side variant URL 사전 검증과 ffmpeg protocol whitelist만으로는 DNS rebinding을 완전히 차단하지 못한다. 단일 사용자 LAN 모델의 acknowledged risk로 둔다. 강한 HLS SSRF 방어가 필요하면 Go-side playlist/segment fetch 또는 segment URL 재작성 설계를 별도 구현해야 한다.

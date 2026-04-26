@@ -38,7 +38,7 @@ func getJobs(t *testing.T, mux *http.ServeMux) listJobsBody {
 func TestListJobs_Empty(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close()
 
 	body := getJobs(t, mux)
@@ -50,7 +50,7 @@ func TestListJobs_Empty(t *testing.T) {
 func TestListJobs_ActiveAndFinished(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	// Pre-filled placeholder jobs need explicit termination so Close does
 	// not block the full WaitAll budget.
 	defer func() {
@@ -90,7 +90,7 @@ func TestListJobs_ActiveAndFinished(t *testing.T) {
 func TestListJobs_MethodNotAllowed(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close()
 
 	// DELETE is also a valid method on /jobs (J5 ?status=finished) so it
@@ -109,7 +109,7 @@ func TestListJobs_MethodNotAllowed(t *testing.T) {
 func TestSubscribeJob_NotFound(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/import-url/jobs/imp_unknown/events", nil)
@@ -123,7 +123,7 @@ func TestSubscribeJob_NotFound(t *testing.T) {
 func TestSubscribeJob_FinishedReturnsSnapshotAndCloses(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close()
 
 	job, err := h.registry.Create("/", []string{"https://placeholder/x"})
@@ -183,7 +183,7 @@ func TestSubscribeJob_ActiveReceivesLiveEvents(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close()
 
 	// First subscriber: the POST itself. We only need it to expose the jobId.
@@ -224,7 +224,7 @@ func TestSubscribeJob_ActiveReceivesLiveEvents(t *testing.T) {
 func TestSubscribeJob_BadRoute(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close()
 
 	job, err := h.registry.Create("/", []string{"u"})
@@ -237,7 +237,7 @@ func TestSubscribeJob_BadRoute(t *testing.T) {
 		path string
 		want int
 	}{
-		{"/api/import-url/jobs/" + job.ID, http.StatusMethodNotAllowed}, // bare id only allows DELETE
+		{"/api/import-url/jobs/" + job.ID, http.StatusMethodNotAllowed},           // bare id only allows DELETE
 		{"/api/import-url/jobs/" + job.ID + "/events/extra", http.StatusNotFound}, // suffix junk
 		{"/api/import-url/jobs/" + job.ID + "/unknown", http.StatusNotFound},      // typo'd action
 		{"/api/import-url/jobs/", http.StatusNotFound},                            // empty id
@@ -257,7 +257,7 @@ func TestSubscribeJob_BadRoute(t *testing.T) {
 func TestSubscribeJob_MethodNotAllowed(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close()
 
 	job, err := h.registry.Create("/", []string{"u"})
@@ -286,7 +286,7 @@ func TestCancelJob_Batch(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close()
 
 	// Hold the import semaphore so the batch we cancel never reaches the
@@ -339,7 +339,7 @@ func TestCancelJob_PerURL_Running(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close()
 
 	rec, wait := postImportStreaming(context.Background(), t, mux,
@@ -409,7 +409,7 @@ func TestCancelJob_PerURL_Pending(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close()
 
 	rec, wait := postImportStreaming(context.Background(), t, mux,
@@ -466,7 +466,7 @@ func TestCancelJob_PerURL_Pending_ThenBatch(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close()
 
 	rec, wait := postImportStreaming(context.Background(), t, mux,
@@ -603,7 +603,7 @@ func TestCancelJob_PerURL_Pending_ThenBatch_PreSemaphore(t *testing.T) {
 func TestCancelJob_NotFound(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close()
 
 	req := httptest.NewRequest(http.MethodPost,
@@ -618,7 +618,7 @@ func TestCancelJob_NotFound(t *testing.T) {
 func TestCancelJob_AlreadyFinished(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close()
 
 	job, err := h.registry.Create("/", []string{"u"})
@@ -639,7 +639,7 @@ func TestCancelJob_AlreadyFinished(t *testing.T) {
 func TestCancelJob_BadIndex(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close()
 
 	job, err := h.registry.Create("/", []string{"u"})
@@ -670,7 +670,7 @@ func TestCancelJob_BadIndex(t *testing.T) {
 func TestDeleteJob_Active(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close()
 
 	job, err := h.registry.Create("/", []string{"u"})
@@ -693,7 +693,7 @@ func TestDeleteJob_Active(t *testing.T) {
 func TestDeleteJob_Finished(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close()
 
 	job, err := h.registry.Create("/", []string{"u"})
@@ -716,7 +716,7 @@ func TestDeleteJob_Finished(t *testing.T) {
 func TestDeleteJob_NotFound(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer h.Close()
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/import-url/jobs/imp_unknown", nil)
@@ -730,7 +730,7 @@ func TestDeleteJob_NotFound(t *testing.T) {
 func TestDeleteFinishedJobs(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	h := Register(mux, root, root, nil)
+	h := registerImportTest(mux, root)
 	defer func() {
 		// Non-terminated placeholders need explicit cleanup so Close does
 		// not consume the WaitAll budget.
@@ -787,4 +787,3 @@ func TestDeleteFinishedJobs(t *testing.T) {
 		t.Errorf("active count = %d, want 1 (one job was queued)", len(active))
 	}
 }
-
