@@ -190,25 +190,6 @@ func NewClient(opts ...ClientOption) *http.Client {
 	}
 }
 
-func clientAllowsPrivateNetworks(client *http.Client) bool {
-	if client == nil {
-		return false
-	}
-	transport, ok := client.Transport.(*secureTransport)
-	return ok && transport.allowPrivateNetworks
-}
-
-func clientResolver(client *http.Client) Resolver {
-	if client == nil {
-		return net.DefaultResolver
-	}
-	transport, ok := client.Transport.(*secureTransport)
-	if !ok || transport.resolver == nil {
-		return net.DefaultResolver
-	}
-	return transport.resolver
-}
-
 func publicOnlyDialContext(dialer *net.Dialer, resolver Resolver) func(context.Context, string, string) (net.Conn, error) {
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
@@ -335,7 +316,7 @@ func Fetch(ctx context.Context, client *http.Client, rawURL, destDir, relDir str
 
 	rawContentType := resp.Header.Get("Content-Type")
 	if isHLSResponse(rawContentType, parsed.Path) {
-		return fetchHLS(ctx, resp, parsed, rawURL, destDir, relDir, warnings, maxBytes, cb, clientAllowsPrivateNetworks(client), clientResolver(client))
+		return fetchHLS(ctx, client, resp, parsed, rawURL, destDir, relDir, warnings, maxBytes, cb)
 	}
 
 	// A declared Content-Length above the cap is rejected up front so we

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -149,11 +150,6 @@ func parseMasterPlaylist(body []byte, base *url.URL) (*url.URL, error) {
 		return base, nil
 	}
 	return resolved, nil
-}
-
-func validatePublicURL(ctx context.Context, resolver Resolver, u *url.URL) error {
-	_, err := lookupPublicIPs(ctx, resolver, u.Hostname())
-	return err
 }
 
 // entryKind tags playlistEntry by its source tag — needed by materializeHLS to
@@ -447,49 +443,117 @@ func runHLSRemux(ctx context.Context, localPlaylistPath, outputPath string, cb *
 	return nil
 }
 
-// fetchHLS takes over an already-issued HTTP response that isHLSResponse
-// classified as HLS: it reads the playlist body (capped at hlsMaxPlaylistBytes),
-// closes the connection, picks the best variant, and drives ffmpeg via
-// runHLSRemux into a tmp file that is renamed into destDir on success. It
-// mirrors the non-HLS Fetch contract — *Result on success, *FetchError on
-// failure — so the caller does not need to branch on the return shape.
+// fetchHLS turns an HLS response into a remuxed MP4 entirely without exposing
+// origin URLs to ffmpeg. The flow (spec §3.1):
+//
+//  1. Read master playlist body from the already-issued response (1 MiB cap).
+//  2. parseMasterPlaylist → variantURL.
+//  3. If variantURL ≠ master URL, fetch the variant playlist body via the
+//     protected client (IP-pin + DNS validation per request).
+//  4. parseMediaPlaylist on the variant body → segment / key / init entries.
+//  5. Create destDir/.urlimport-hls-<random>/ as a self-contained workspace.
+//  6. materializeHLS downloads every segment / key / init through the same
+//     protected client and writes a rewritten playlist with local-only URIs.
+//  7. runHLSRemux invokes ffmpeg on that local playlist (-protocol_whitelist
+//     file,crypto). ffmpeg never performs DNS — DNS rebinding is closed.
+//  8. Atomic rename the output MP4 into destDir; defer cleanup wipes the
+//     working directory.
+//
+// All errors map to public FetchError.Code values via classifyHTTPError /
+// classifyHLSRemuxError / classifyMaterializeError. Cumulative byte cap
+// (maxBytes) is shared between segment downloads and ffmpeg output via a
+// single atomic.Int64 counter.
 func fetchHLS(
 	ctx context.Context,
+	client *http.Client,
 	resp *http.Response,
 	parsed *url.URL,
 	rawURL, destDir, relDir string,
 	warnings []string,
 	maxBytes int64,
 	cb *Callbacks,
-	allowPrivateNetworks bool,
-	resolver Resolver,
 ) (*Result, *FetchError) {
-	body, err := io.ReadAll(io.LimitReader(resp.Body, hlsMaxPlaylistBytes+1))
+	masterBody, err := io.ReadAll(io.LimitReader(resp.Body, hlsMaxPlaylistBytes+1))
 	if err != nil {
 		return nil, &FetchError{Code: "network_error", Err: err}
 	}
-	if int64(len(body)) > hlsMaxPlaylistBytes {
+	if int64(len(masterBody)) > hlsMaxPlaylistBytes {
 		return nil, &FetchError{Code: "hls_playlist_too_large"}
 	}
-	// Close eagerly so we do not hold the TCP connection open while ffmpeg
-	// spawns a fresh one for the variant download.
+	// Close eagerly so we do not hold the TCP connection open during the
+	// variant playlist + segments fetches.
 	_ = resp.Body.Close()
 
-	variantURL, err := parseMasterPlaylist(body, parsed)
+	variantURL, err := parseMasterPlaylist(masterBody, parsed)
 	if err != nil {
 		if errors.Is(err, errHLSVariantScheme) {
 			return nil, &FetchError{Code: "invalid_scheme", Err: err}
 		}
 		return nil, &FetchError{Code: "ffmpeg_error", Err: err}
 	}
-	if !allowPrivateNetworks {
-		if err := validatePublicURL(ctx, resolver, variantURL); err != nil {
-			if errors.Is(err, errPrivateNetwork) {
-				return nil, &FetchError{Code: "private_network", Err: err}
+
+	// Variant body source: the master itself if parseMasterPlaylist returned
+	// the original (no #EXT-X-STREAM-INF), or a fresh fetch via the protected
+	// client otherwise. The fetch path is what makes DNS rebinding-safe — the
+	// client's publicOnlyDialContext re-resolves and IP-pins per request.
+	var variantBody []byte
+	var variantBase *url.URL
+	if sameURL(variantURL, parsed) {
+		variantBody = masterBody
+		variantBase = parsed
+	} else {
+		body, ferr := fetchPlaylistBody(ctx, client, variantURL.String())
+		if ferr != nil {
+			return nil, ferr
+		}
+		variantBody = body
+		variantBase = variantURL
+	}
+
+	pl, err := parseMediaPlaylist(variantBody, variantBase)
+	if err != nil {
+		return nil, classifyMediaPlaylistError(err)
+	}
+
+	// Workspace lives inside destDir so atomic rename of the final MP4 stays
+	// on the same filesystem (no EXDEV) and so browse's dot-prefix filter
+	// hides the directory automatically. RemoveAll runs unconditionally —
+	// success / failure / panic all converge on cleanup.
+	hlsTempDir, err := os.MkdirTemp(destDir, ".urlimport-hls-*")
+	if err != nil {
+		return nil, &FetchError{Code: "write_error", Err: err}
+	}
+	defer os.RemoveAll(hlsTempDir)
+
+	// Single cumulative counter shared by segment downloads and ffmpeg
+	// output — spec D-9. atomic.Int64 keeps it safe under any future
+	// parallelization of segment fetches.
+	remaining := atomic.Int64{}
+	remaining.Store(maxBytes)
+
+	// Wrap progress callbacks so the materialize phase (Phase 1: segment
+	// bytes) and the remux phase (Phase 2: output MP4 bytes) emit a single
+	// monotonically increasing counter — spec D-4. Phase 2 emits are
+	// offset by Phase 1's total.
+	var phase1Total int64
+	wrappedCb := cb
+	if cb != nil {
+		original := cb
+		wrappedCb = &Callbacks{
+			Start: original.Start,
+		}
+		if original.Progress != nil {
+			wrappedCb.Progress = func(n int64) {
+				original.Progress(phase1Total + n)
 			}
-			return nil, &FetchError{Code: "ffmpeg_error", Err: err}
 		}
 	}
+
+	localPlaylistPath, totalDownloaded, mErr := materializeHLS(ctx, client, pl, hlsTempDir, &remaining, wrappedCb)
+	if mErr != nil {
+		return nil, classifyMaterializeError(mErr)
+	}
+	phase1Total = totalDownloaded
 
 	name := deriveHLSFilename(parsed)
 	// Extension is always forced to .mp4 (we remux away from .m3u8).
@@ -499,40 +563,20 @@ func fetchHLS(
 		cb.Start(name, 0, "video")
 	}
 
-	tmpFile, err := os.CreateTemp(destDir, ".urlimport-*.tmp")
-	if err != nil {
-		return nil, &FetchError{Code: "write_error", Err: err}
-	}
-	tmpPath := tmpFile.Name()
-	// Close the handle before ffmpeg reopens the path with -y. On Windows a
-	// lingering handle makes the subsequent ffmpeg open or os.Rename fail
-	// with sharing-violation errors, so treat any Close failure as a write
-	// error rather than silently carrying on.
-	if err := tmpFile.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return nil, &FetchError{Code: "write_error", Err: err}
-	}
-	renamed := false
-	defer func() {
-		if !renamed {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if err := runHLSRemux(ctx, variantURL.String(), tmpPath, cb, maxBytes); err != nil {
+	outputPath := filepath.Join(hlsTempDir, "output.mp4")
+	if err := runHLSRemux(ctx, localPlaylistPath, outputPath, wrappedCb, remaining.Load()); err != nil {
 		return nil, classifyHLSRemuxError(err)
 	}
 
-	stat, err := os.Stat(tmpPath)
+	stat, err := os.Stat(outputPath)
 	if err != nil {
 		return nil, &FetchError{Code: "write_error", Err: err}
 	}
 
-	finalName, didRename, err := renameUnique(tmpPath, destDir, name)
+	finalName, didRename, err := renameUnique(outputPath, destDir, name)
 	if err != nil {
 		return nil, &FetchError{Code: "write_error", Err: err}
 	}
-	renamed = true
 	if didRename {
 		warnings = append(warnings, "renamed")
 	}
@@ -545,6 +589,64 @@ func fetchHLS(
 		Type:     "video",
 		Warnings: warnings,
 	}, nil
+}
+
+// fetchPlaylistBody GETs a playlist URL through the protected client and
+// returns its body capped at hlsMaxPlaylistBytes. Errors map onto stable
+// FetchError codes so the caller can surface them in the SSE error frame
+// without wrapping again.
+func fetchPlaylistBody(ctx context.Context, client *http.Client, urlStr string) ([]byte, *FetchError) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, &FetchError{Code: "invalid_url", Err: err}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, classifyHTTPError(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, &FetchError{Code: "http_error", Err: fmt.Errorf("http %d", resp.StatusCode)}
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, hlsMaxPlaylistBytes+1))
+	if err != nil {
+		return nil, &FetchError{Code: "network_error", Err: err}
+	}
+	if int64(len(body)) > hlsMaxPlaylistBytes {
+		return nil, &FetchError{Code: "hls_playlist_too_large"}
+	}
+	return body, nil
+}
+
+// classifyMediaPlaylistError maps parseMediaPlaylist sentinels to public
+// FetchError codes. Defaults to ffmpeg_error for unrecognized parser issues
+// (defensive — keeps the wire contract narrow).
+func classifyMediaPlaylistError(err error) *FetchError {
+	switch {
+	case errors.Is(err, errHLSVariantScheme):
+		return &FetchError{Code: "invalid_scheme", Err: err}
+	case errors.Is(err, errHLSTooManySegments):
+		return &FetchError{Code: "hls_too_many_segments", Err: err}
+	default:
+		return &FetchError{Code: "ffmpeg_error", Err: err}
+	}
+}
+
+// classifyMaterializeError maps materializeHLS / downloadOne errors to public
+// FetchError codes. errHLSTooLarge surfaces as "too_large"; ctx errors map
+// to download_timeout / network_error; anything else flows through
+// classifyHTTPError so dial / TLS / private_network / http_error stay stable.
+func classifyMaterializeError(err error) *FetchError {
+	switch {
+	case errors.Is(err, errHLSTooLarge):
+		return &FetchError{Code: "too_large", Err: err}
+	case errors.Is(err, context.DeadlineExceeded):
+		return &FetchError{Code: "download_timeout", Err: err}
+	case errors.Is(err, context.Canceled):
+		return &FetchError{Code: "network_error", Err: err}
+	default:
+		return classifyHTTPError(err)
+	}
 }
 
 // deriveHLSFilename strips the URL's last path segment of its extension and
