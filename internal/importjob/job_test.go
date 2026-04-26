@@ -273,6 +273,88 @@ func TestJob_CancelOne_OutOfRange(t *testing.T) {
 	}
 }
 
+// TestJob_SubscribeWithSnapshot_NoDoubleDelivery proves the I1 fix: an
+// event published between Snapshot() and Subscribe() must never appear in
+// both the captured snapshot AND the live channel. Exercise the contract
+// by hammering Publish concurrently with SubscribeWithSnapshot — the URL
+// state seen in the snapshot must equal the URL state at the moment of
+// subscribe, with subsequent events arriving only on the channel.
+func TestJob_SubscribeWithSnapshot_NoDoubleDelivery(t *testing.T) {
+	job := newTestJob(t, "https://x")
+
+	// Pre-mutate so we have a deterministic non-zero starting state.
+	job.UpdateURL(0, func(s *URLState) {
+		s.Status = "running"
+		s.Received = 100
+	})
+
+	// Concurrently flip the URL to done and Publish that done event. The
+	// race is whether Publish lands BEFORE the snapshot capture (no
+	// channel delivery, snapshot shows done) or AFTER (channel sees done,
+	// snapshot shows running). Either is correct; what must NOT happen is
+	// "both snapshot shows done AND channel sees done".
+	pubReady := make(chan struct{})
+	go func() {
+		<-pubReady
+		job.UpdateURL(0, func(s *URLState) { s.Status = "done"; s.Received = 200 })
+		job.Publish(Event{Phase: "done", Data: []byte(`{"phase":"done","index":0}`)})
+	}()
+	close(pubReady)
+
+	snap, ch, unsub := job.SubscribeWithSnapshot()
+	defer unsub()
+
+	// Drain whatever the channel surfaces (at most a handful of events).
+	var live []Event
+	deadline := time.After(100 * time.Millisecond)
+drain:
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				break drain
+			}
+			live = append(live, ev)
+		case <-deadline:
+			break drain
+		}
+	}
+
+	snapDone := snap.URLs[0].Status == "done"
+	liveSawDone := false
+	for _, ev := range live {
+		if ev.Phase == "done" {
+			liveSawDone = true
+		}
+	}
+	// The whole point of the atomic API: never both true.
+	if snapDone && liveSawDone {
+		t.Errorf("done event delivered twice: snapshot=done AND channel saw done frame")
+	}
+}
+
+// TestJob_SubscribeWithSnapshot_TerminalReturnsClosedChannel ensures the
+// terminal-job branch still pre-closes the channel and short-circuits the
+// reader.
+func TestJob_SubscribeWithSnapshot_TerminalReturnsClosedChannel(t *testing.T) {
+	job := newTestJob(t, "a")
+	job.SetStatus(StatusCompleted)
+
+	snap, ch, unsub := job.SubscribeWithSnapshot()
+	defer unsub() // must be a no-op
+	if snap.Status != StatusCompleted {
+		t.Errorf("snapshot status = %q, want completed", snap.Status)
+	}
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Errorf("channel should be pre-closed for terminal job")
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Error("terminal-job channel did not close")
+	}
+}
+
 // TestJob_CancelOne_AtomicityCloseRace: even if a per-URL cancel is
 // registered AFTER an attempted CancelOne but BEFORE a follow-up call, the
 // next CancelOne sees the registered entry — confirming the registered

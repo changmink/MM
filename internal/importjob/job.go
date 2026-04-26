@@ -203,6 +203,13 @@ func (j *Job) URLCount() int {
 func (j *Job) Snapshot() JobSnapshot {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	return j.snapshotLocked()
+}
+
+// snapshotLocked builds the deep copy without taking j.mu — caller must
+// already hold it. Factored out so SubscribeWithSnapshot can capture the
+// snapshot and register the subscriber atomically under one lock.
+func (j *Job) snapshotLocked() JobSnapshot {
 	urlsCopy := make([]URLState, len(j.urls))
 	for i, u := range j.urls {
 		urlsCopy[i] = u
@@ -232,9 +239,35 @@ func (j *Job) Snapshot() JobSnapshot {
 // terminal at subscribe time, the returned channel is pre-closed so the
 // caller's read loop exits immediately; the snapshot reflects the final
 // state in that case.
+//
+// Use SubscribeWithSnapshot when the caller intends to relay an initial
+// snapshot followed by the live stream — that variant captures the snapshot
+// and registers the subscriber under one mutex hold so events published in
+// the gap between the two cannot land in both the snapshot AND the channel
+// (see I1 in review round 3).
 func (j *Job) Subscribe() (<-chan Event, func()) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	return j.subscribeLocked()
+}
+
+// SubscribeWithSnapshot atomically captures a JobSnapshot and registers a
+// new subscriber under a single j.mu acquisition. Any event published after
+// this call returns is delivered only via the channel — never duplicated
+// into both the snapshot and the channel. Pair the unsubscribe with defer
+// just like Subscribe.
+func (j *Job) SubscribeWithSnapshot() (JobSnapshot, <-chan Event, func()) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	snap := j.snapshotLocked()
+	ch, unsub := j.subscribeLocked()
+	return snap, ch, unsub
+}
+
+// subscribeLocked is the lock-held body of Subscribe. Caller must hold
+// j.mu. Returns the receive end of the new buffered channel plus an
+// unsubscribe func that re-acquires j.mu when called.
+func (j *Job) subscribeLocked() (<-chan Event, func()) {
 	ch := make(chan Event, defaultSubBuffer)
 	if j.status.IsTerminal() {
 		close(ch)
