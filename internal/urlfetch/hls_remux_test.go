@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,47 @@ import (
 	"testing"
 	"time"
 )
+
+// captureFfmpeg replaces runFfmpeg with a stub that records every invocation's
+// argv and writes a stub MP4 (ftyp box) at the output path so the caller's
+// subsequent os.Stat / atomic rename succeed. Returns a pointer to the slice
+// that accumulates argv across calls. Cleanup restores the original
+// runFfmpeg via t.Cleanup.
+//
+// IMPORTANT: tests using captureFfmpeg MUST NOT call t.Parallel() —
+// runFfmpeg is a package-level var and concurrent swaps would race. Code
+// review enforces this.
+func captureFfmpeg(t *testing.T) *[][]string {
+	t.Helper()
+	var captured [][]string
+	var mu sync.Mutex
+
+	orig := runFfmpeg
+	runFfmpeg = func(ctx context.Context, args []string, stderr io.Writer) error {
+		mu.Lock()
+		// Copy so future arg mutations cannot retroactively corrupt the record.
+		captured = append(captured, append([]string(nil), args...))
+		mu.Unlock()
+
+		// Write a stub MP4 at the output path so callers' Stat/rename succeed.
+		// argv pattern: ... -y <outPath> at the end.
+		for i := 0; i < len(args)-1; i++ {
+			if args[i] == "-y" {
+				outPath := args[i+1]
+				_ = os.WriteFile(outPath, []byte{
+					0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p',
+					'm', 'p', '4', '2', 0x00, 0x00, 0x00, 0x00,
+					'i', 's', 'o', 'm', 'm', 'p', '4', '2',
+				}, 0644)
+				break
+			}
+		}
+		return nil
+	}
+	t.Cleanup(func() { runFfmpeg = orig })
+
+	return &captured
+}
 
 // requireFFmpeg skips the test if ffmpeg is unavailable. Matches the pattern in
 // handler/stream_test.go so CI machines without ffmpeg can still run unit tests.
@@ -332,6 +374,43 @@ func TestClassifyHLSRemuxError(t *testing.T) {
 				t.Errorf("wrapped err not preserved")
 			}
 		})
+	}
+}
+
+// TestRunFfmpegSwap_StubBypassesBinary locks the captureFfmpeg contract used
+// by AC-10 / AC-11 argv invariant tests: with the stub installed, runHLSRemux
+// fully replaces the production path — no real ffmpeg executes, argv is
+// captured, and the stub MP4 is created at the output path so subsequent
+// rename / Stat in fetchHLS succeed. This is the prerequisite that lets
+// argv-checking tests run on machines without ffmpeg.
+func TestRunFfmpegSwap_StubBypassesBinary(t *testing.T) {
+	captured := captureFfmpeg(t)
+
+	outPath := filepath.Join(t.TempDir(), "out.mp4")
+	err := runHLSRemux(context.Background(),
+		"https://example.com/playlist.m3u8", outPath, nil, testMaxBytes)
+	if err != nil {
+		t.Fatalf("runHLSRemux: %v", err)
+	}
+	if len(*captured) != 1 {
+		t.Fatalf("captured calls = %d, want 1; argv = %v", len(*captured), *captured)
+	}
+	stat, err := os.Stat(outPath)
+	if err != nil {
+		t.Fatalf("stub MP4 missing: %v", err)
+	}
+	if stat.Size() < 8 {
+		t.Errorf("stub MP4 too small: %d bytes", stat.Size())
+	}
+	// Sanity: the variant URL appeared as the -i argument (still valid here
+	// because D2 hasn't switched the production argv yet).
+	args := (*captured)[0]
+	for i, a := range args {
+		if a == "-i" && i+1 < len(args) {
+			if args[i+1] != "https://example.com/playlist.m3u8" {
+				t.Errorf("-i arg = %q, want the variant URL", args[i+1])
+			}
+		}
 	}
 }
 

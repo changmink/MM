@@ -318,12 +318,41 @@ func extractBandwidth(line string) int64 {
 	return bw
 }
 
+// runFfmpeg is the swappable entry point that runHLSRemux invokes to spawn
+// ffmpeg. Tests replace this with a capture-only stub to verify argv
+// invariants (AC-10 / AC-11 in spec §4) without launching a real binary.
+// Production uses defaultRunFfmpeg. Replacement contract: the implementation
+// must honor ctx (kill the child on cancel) and write any process stderr
+// into the supplied io.Writer for log surfacing.
+//
+// Concurrency note: runFfmpeg is a package-level var; tests that swap it
+// MUST NOT use t.Parallel() — code review enforces this rather than a hard
+// runtime guard.
+var runFfmpeg = defaultRunFfmpeg
+
+// defaultRunFfmpeg surfaces errFFmpegMissing when the binary is absent so that
+// runHLSRemux can short-circuit at the same place — this also lets test swaps
+// bypass the LookPath check entirely (no ffmpeg needed for argv invariant
+// tests).
+func defaultRunFfmpeg(ctx context.Context, args []string, stderr io.Writer) error {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return errFFmpegMissing
+	}
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Wait()
+}
+
 // runHLSRemux spawns ffmpeg to pull variantURL via HLS and remux its segments
 // into a single MP4 at tmpPath. Output is capped at maxOutputBytes: a watcher
-// polls the tmp file size every hlsWatchInterval and kills ffmpeg if the cap
-// is exceeded. Context cancellation also kills ffmpeg via exec.CommandContext.
-// If cb.Progress is non-nil, the watcher reports the tmp file's current size
-// using the same throttling rules as progressReader (byte OR time threshold).
+// polls the tmp file size every hlsWatchInterval and cancels the ffmpeg ctx
+// if the cap is exceeded. Context cancellation also kills ffmpeg via the
+// child ctx that runFfmpeg honors. If cb.Progress is non-nil, the watcher
+// reports the tmp file's current size using the same throttling rules as
+// progressReader (byte OR time threshold).
 //
 // Returns one of: nil on exit 0; errHLSTooLarge if the cap was breached;
 // ctx.Err() on external cancel or deadline; *ffmpegExitError on non-zero exit
@@ -337,17 +366,13 @@ func extractBandwidth(line string) int64 {
 // video) the buffer does flush periodically and the watcher behaves as
 // documented.
 func runHLSRemux(ctx context.Context, variantURL, tmpPath string, cb *Callbacks, maxOutputBytes int64) error {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		return errFFmpegMissing
-	}
-
 	// -protocol_whitelist blocks file:, rtp:, udp:, data: and other schemes
 	// ffmpeg would otherwise follow from inside the playlist — essential
 	// defense against SSRF/LFI via a hostile master or media playlist.
 	// -rw_timeout bounds per-I/O read/write wait (microseconds) so a
 	// slow-loris origin cannot burn the whole per-URL timeout budget by
 	// feeding the segment connection at one byte/sec.
-	cmd := exec.CommandContext(ctx, "ffmpeg",
+	args := []string{
 		"-hide_banner", "-loglevel", "error",
 		"-protocol_whitelist", "http,https,tls,tcp,crypto",
 		"-rw_timeout", "30000000",
@@ -357,41 +382,46 @@ func runHLSRemux(ctx context.Context, variantURL, tmpPath string, cb *Callbacks,
 		"-f", "mp4",
 		"-movflags", "+faststart",
 		"-y", tmpPath,
-	)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Start(); err != nil {
-		return err
 	}
 
+	// ffmpegCtx is a child of ctx so external cancel/timeout still propagates
+	// to the process. The watcher cancels via cancelFfmpeg() on size-cap
+	// breach — that path also routes through ctx, so runFfmpeg only ever
+	// terminates ffmpeg through its supplied context (no out-of-band Kill).
+	ffmpegCtx, cancelFfmpeg := context.WithCancel(ctx)
+	defer cancelFfmpeg()
+
+	var stderr bytes.Buffer
+
 	// watchCtx is decoupled from parent ctx: we want the watcher to keep
-	// polling until we explicitly cancel it after cmd.Wait() returns, so a
+	// polling until we explicitly cancel it after runFfmpeg returns, so a
 	// client-initiated ctx cancel does not stop the final size sample from
-	// landing. The watcher is the only goroutine allowed to kill the ffmpeg
-	// process by itself (size-cap path); ctx cancel goes through
-	// exec.CommandContext.
+	// landing.
 	watchCtx, cancelWatch := context.WithCancel(context.Background())
 	var sizeExceeded atomic.Bool
 	watchDone := make(chan struct{})
 	go func() {
 		defer close(watchDone)
 		watchOutputFile(watchCtx, tmpPath, hlsWatchInterval, maxOutputBytes, cb, func() {
-			// Kill.Process.Kill() is safe to call even if the process has
-			// already exited — it just returns ErrProcessDone.
 			sizeExceeded.Store(true)
-			_ = cmd.Process.Kill()
+			cancelFfmpeg()
 		})
 	}()
 
-	waitErr := cmd.Wait()
+	waitErr := runFfmpeg(ffmpegCtx, args, &stderr)
 	cancelWatch()
 	<-watchDone
 
+	// errFFmpegMissing is a configuration error and must surface ahead of
+	// the watcher / ctx checks (those only matter once the process is up).
+	if errors.Is(waitErr, errFFmpegMissing) {
+		return errFFmpegMissing
+	}
 	if sizeExceeded.Load() {
 		return errHLSTooLarge
 	}
 	if ctx.Err() != nil {
+		// External cancel or deadline beat the size watcher.
 		return ctx.Err()
 	}
 	if waitErr != nil {
