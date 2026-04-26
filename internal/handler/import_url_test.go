@@ -518,6 +518,12 @@ func TestRedactURL(t *testing.T) {
 		{"token query masked", "https://h/x?token=abc", "https://h/x?token=REDACTED"},
 		{"signature masked, other preserved", "https://h/x?Signature=abc&q=z", "https://h/x?Signature=REDACTED&q=z"},
 		{"case-insensitive key match", "https://h/x?TOKEN=abc", "https://h/x?TOKEN=REDACTED"},
+		{"auth masked", "https://h/x?auth=abc", "https://h/x?auth=REDACTED"},
+		{"signed_url masked", "https://h/x?signed_url=abc", "https://h/x?signed_url=REDACTED"},
+		{"presigned_url masked", "https://h/x?presigned_url=abc", "https://h/x?presigned_url=REDACTED"},
+		{"x-amz-signature masked", "https://h/x?x-amz-signature=abc", "https://h/x?x-amz-signature=REDACTED"},
+		{"password masked", "https://h/x?password=abc", "https://h/x?password=REDACTED"},
+		{"secret masked", "https://h/x?secret=abc", "https://h/x?secret=REDACTED"},
 		{"empty url", "", ""},
 		{"unparseable", "://nope", "<unparseable>"},
 	}

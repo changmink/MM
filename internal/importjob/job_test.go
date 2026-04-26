@@ -277,6 +277,15 @@ func TestJob_CancelOne_OutOfRange(t *testing.T) {
 // between Snapshot() and Subscribe() must never appear in both the
 // captured snapshot AND the live channel. Exercise the contract by
 // hammering Publish concurrently with SubscribeWithSnapshot.
+//
+// Caveat: this asserts the API-side guarantee (Snapshot + Subscribe under
+// one mu hold), not exactly-once delivery end-to-end. The producer's
+// UpdateURL → Publish pair is two separate mu acquisitions, so an
+// adversarial schedule (UpdateURL → SubscribeWithSnapshot → Publish) can
+// still leave the consumer with snap=done AND channel=done. Closing that
+// would require an atomic UpdateURLAndPublish helper on Job. The pubReady
+// barrier biases the schedule toward "Subscribe wins the lock first" so
+// the test predominantly exercises the API-contract branch.
 func TestJob_SubscribeWithSnapshot_NoDoubleDelivery(t *testing.T) {
 	job := newTestJob(t, "https://x")
 

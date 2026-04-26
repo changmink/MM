@@ -221,10 +221,15 @@ func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destA
 		if rec := recover(); rec != nil {
 			slog.Error("import worker panic",
 				"jobId", job.ID, "panic", rec, "stack", string(debug.Stack()))
-			sum := summarizeURLs(job.Snapshot().URLs)
-			job.SetSummary(sum)
-			job.Publish(summaryEvent(sum))
-			job.SetStatus(importjob.StatusFailed)
+			// If the worker already published a terminal summary, do not
+			// overwrite it — a panic from a late defer would otherwise flip
+			// a legitimate Completed/Cancelled status to Failed.
+			if !job.Status().IsTerminal() {
+				sum := summarizeURLs(job.Snapshot().URLs)
+				job.SetSummary(sum)
+				job.Publish(summaryEvent(sum))
+				job.SetStatus(importjob.StatusFailed)
+			}
 		}
 	}()
 
