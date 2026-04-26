@@ -412,6 +412,47 @@ func TestMaterializeHLS_RawLinesPreserved(t *testing.T) {
 	}
 }
 
+func TestMaterializeHLS_UnrecognizedTagURINeutered(t *testing.T) {
+	// A media playlist that includes an LL-HLS / unknown tag with a remote
+	// URI attribute — parseMediaPlaylist does not recognize the tag, so it
+	// produces no entry, and the URI passes through rawLines verbatim. The
+	// rewrite pass must normalize URI="..." → URI="" so that even if a
+	// future ffmpeg whitelist relaxation occurred, no remote URL could
+	// reach the binary via an unrecognized tag.
+	srv := servePaths(t, map[string][]byte{"/seg.ts": []byte("d")})
+	body := []byte(fmt.Sprintf(`#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:4
+#EXT-X-PRELOAD-HINT:TYPE=PART,URI="https://attacker.example/secret.bin"
+#EXTINF:4.0,
+%s/seg.ts
+#EXT-X-ENDLIST
+`, srv.URL))
+	base, _ := url.Parse(srv.URL + "/p.m3u8")
+	pl, err := parseMediaPlaylist(body, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tempDir := t.TempDir()
+	localPath, _, err := materializeHLS(context.Background(),
+		NewClient(AllowPrivateNetworks()),
+		pl, tempDir, newCounter(testMaxBytes), nil)
+	if err != nil {
+		t.Fatalf("materializeHLS: %v", err)
+	}
+	pstr, _ := os.ReadFile(localPath)
+	if strings.Contains(string(pstr), "attacker.example") {
+		t.Errorf("rewritten playlist still contains remote URL on unrecognized tag; got:\n%s", pstr)
+	}
+	if !strings.Contains(string(pstr), `#EXT-X-PRELOAD-HINT`) {
+		t.Errorf("unrecognized tag itself was dropped; got:\n%s", pstr)
+	}
+	if !strings.Contains(string(pstr), `URI=""`) {
+		t.Errorf("URI attribute on unrecognized tag was not normalized to empty; got:\n%s", pstr)
+	}
+}
+
 func TestMaterializeHLS_CumulativeCapEnforced(t *testing.T) {
 	// First segment fits, second exceeds remaining — error surfaces.
 	srv := servePaths(t, map[string][]byte{

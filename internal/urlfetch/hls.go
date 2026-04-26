@@ -28,6 +28,9 @@ var (
 	errFFmpegMissing       = errors.New("ffmpeg_missing")
 	errHLSTooLarge         = errors.New("hls_too_large")
 	errHLSTooManySegments  = errors.New("hls_too_many_segments")
+	errHLSTooManyKeys      = errors.New("hls_too_many_keys")
+	errHLSTooManyInits     = errors.New("hls_too_many_inits")
+	errHLSDuplicateURIAttr = errors.New("hls_duplicate_uri_attr")
 	errHLSMissingMapURI    = errors.New("hls_map_missing_uri")
 )
 
@@ -37,6 +40,21 @@ var (
 // flood that the cumulative byte cap (url_import_max_bytes) cannot stop on
 // its own. See spec §3.2 D-8.
 const hlsMaxSegments = 10000
+
+// hlsMaxKeyEntries caps the number of #EXT-X-KEY rotations a single media
+// playlist may declare. Real-world HLS rarely rotates keys more than a few
+// times per stream; 256 is generous (~25 minutes of 6-second segments under
+// 1-segment-per-key rotation). The cap closes the budget-exhaustion vector
+// where a hostile playlist declares thousands of keys, each up to
+// hlsMaxKeyBytes (64 KiB), to drain url_import_max_bytes before any real
+// segment fires.
+const hlsMaxKeyEntries = 256
+
+// hlsMaxInitEntries caps the number of #EXT-X-MAP init segments. Standard
+// HLS uses at most one (per discontinuity, rarely). 4 leaves room for
+// pathological-but-possible playlists with multiple discontinuities while
+// blocking the same byte-budget exhaustion class as hlsMaxKeyEntries.
+const hlsMaxInitEntries = 4
 
 // ffmpegExitError wraps a non-zero ffmpeg termination with captured stderr so
 // the caller can surface diagnostic context in logs.
@@ -192,11 +210,22 @@ var uriAttrRE = regexp.MustCompile(`URI="([^"]*)"`)
 // parseMediaPlaylist walks the playlist body and collects every external
 // resource (#EXTINF segments, #EXT-X-KEY URIs except METHOD=NONE, and
 // #EXT-X-MAP init segments) with its URL resolved against base. Returns
-// errHLSVariantScheme for any URI whose resolved scheme is not http/https,
-// errHLSTooManySegments past hlsMaxSegments, errHLSMissingMapURI for an
-// #EXT-X-MAP without URI. Empty / comment-only bodies return a playlist
-// with no entries (no error) — fetchHLS will treat that as a degenerate
-// stream and let ffmpeg fail naturally.
+//   - errHLSVariantScheme for any URI whose resolved scheme is not http/https
+//   - errHLSTooManySegments / errHLSTooManyKeys / errHLSTooManyInits past caps
+//   - errHLSDuplicateURIAttr if a single #EXT-X-KEY/#EXT-X-MAP line declares
+//     more than one URI="..." attribute (parser took the first; rewriter
+//     would touch all — refuse the playlist to keep the two in lockstep)
+//   - errHLSMissingMapURI for an #EXT-X-MAP without URI
+//
+// Per RFC 8216 §4.1.1, between #EXTINF and the segment URI line a media
+// playlist may insert helper tags such as #EXT-X-DISCONTINUITY,
+// #EXT-X-BYTERANGE, or #EXT-X-PROGRAM-DATE-TIME. The pendingSeg latch keeps
+// state across those (any line starting with `#` is preserved verbatim and
+// does not consume the latch).
+//
+// Empty / comment-only bodies return a playlist with no entries (no error)
+// — fetchHLS will treat that as a degenerate stream and let ffmpeg fail
+// naturally.
 func parseMediaPlaylist(body []byte, base *url.URL) (*mediaPlaylist, error) {
 	rawLines := splitPlaylistLines(body)
 	pl := &mediaPlaylist{rawLines: rawLines}
@@ -205,6 +234,8 @@ func parseMediaPlaylist(body []byte, base *url.URL) (*mediaPlaylist, error) {
 	// line is the segment URI for that segment.
 	pendingSeg := false
 	segCount := 0
+	keyCount := 0
+	initCount := 0
 
 	for i, line := range rawLines {
 		trim := strings.TrimSpace(line)
@@ -212,6 +243,9 @@ func parseMediaPlaylist(body []byte, base *url.URL) (*mediaPlaylist, error) {
 		case strings.HasPrefix(trim, "#EXTINF"):
 			pendingSeg = true
 		case strings.HasPrefix(trim, "#EXT-X-KEY"):
+			if strings.Count(trim, `URI="`) > 1 {
+				return nil, errHLSDuplicateURIAttr
+			}
 			uriStr := uriAttrValue(trim)
 			if uriStr == "" {
 				// METHOD=NONE has no URI — nothing to download. Other tags
@@ -223,7 +257,14 @@ func parseMediaPlaylist(body []byte, base *url.URL) (*mediaPlaylist, error) {
 				return nil, err
 			}
 			pl.entries = append(pl.entries, entry)
+			keyCount++
+			if keyCount > hlsMaxKeyEntries {
+				return nil, errHLSTooManyKeys
+			}
 		case strings.HasPrefix(trim, "#EXT-X-MAP"):
+			if strings.Count(trim, `URI="`) > 1 {
+				return nil, errHLSDuplicateURIAttr
+			}
 			uriStr := uriAttrValue(trim)
 			if uriStr == "" {
 				return nil, errHLSMissingMapURI
@@ -233,9 +274,16 @@ func parseMediaPlaylist(body []byte, base *url.URL) (*mediaPlaylist, error) {
 				return nil, err
 			}
 			pl.entries = append(pl.entries, entry)
+			initCount++
+			if initCount > hlsMaxInitEntries {
+				return nil, errHLSTooManyInits
+			}
 		case strings.HasPrefix(trim, "#"):
 			// Other tag (#EXTM3U, #EXT-X-VERSION, #EXT-X-BYTERANGE, etc.) —
-			// preserved in rawLines, no entry created.
+			// preserved in rawLines, no entry created. materializeHLS's
+			// rewrite pass normalizes any URI="..." attribute here to "" so
+			// unrecognized tags can never carry a remote URL into ffmpeg's
+			// input even if a future ffmpeg whitelist relaxation occurred.
 		case trim == "":
 			// Blank line — preserved in rawLines, no entry.
 		default:
@@ -619,13 +667,18 @@ func fetchPlaylistBody(ctx context.Context, client *http.Client, urlStr string) 
 }
 
 // classifyMediaPlaylistError maps parseMediaPlaylist sentinels to public
-// FetchError codes. Defaults to ffmpeg_error for unrecognized parser issues
-// (defensive — keeps the wire contract narrow).
+// FetchError codes. The three "too many" caps share a single wire code
+// (hls_too_many_segments) — operators can grep server logs for the
+// underlying sentinel name to distinguish segment / key / init flooding.
+// Defaults to ffmpeg_error for unrecognized parser issues (defensive —
+// keeps the wire contract narrow).
 func classifyMediaPlaylistError(err error) *FetchError {
 	switch {
 	case errors.Is(err, errHLSVariantScheme):
 		return &FetchError{Code: "invalid_scheme", Err: err}
-	case errors.Is(err, errHLSTooManySegments):
+	case errors.Is(err, errHLSTooManySegments),
+		errors.Is(err, errHLSTooManyKeys),
+		errors.Is(err, errHLSTooManyInits):
 		return &FetchError{Code: "hls_too_many_segments", Err: err}
 	default:
 		return &FetchError{Code: "ffmpeg_error", Err: err}

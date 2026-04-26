@@ -180,17 +180,26 @@ func materializeHLS(
 		}
 	}
 
-	// Second pass: rewrite rawLines, replacing only lines that materialized
-	// a remote resource. All other lines (#EXTM3U, #EXTINF, #EXT-X-VERSION,
-	// #EXT-X-BYTERANGE, …) pass through verbatim so ffmpeg sees the same
-	// playlist semantics it would have received from the origin.
+	// Second pass: rewrite rawLines.
+	//   - Lines that materialized a remote resource get their URI replaced
+	//     with the local file name we just wrote.
+	//   - Tag lines we did not recognize (e.g. #EXT-X-MEDIA,
+	//     #EXT-X-SESSION-DATA, #EXT-X-PRELOAD-HINT, LL-HLS extensions, future
+	//     RFC tags) are passed through with any URI="..." attribute
+	//     normalized to URI="". ffmpeg's -protocol_whitelist file,crypto
+	//     already blocks remote fetches, but normalizing here adds a second
+	//     defense layer so a future whitelist relaxation cannot reopen SSRF
+	//     via an unrecognized tag the parser missed.
+	//   - All other lines (#EXTM3U, #EXTINF, #EXT-X-VERSION, #EXT-X-BYTERANGE,
+	//     blank lines, segment URIs that were already rewritten above) pass
+	//     through verbatim.
 	out := make([]string, len(pl.rawLines))
 	for i, line := range pl.rawLines {
 		if newName, ok := nameByLineIdx[i]; ok {
 			out[i] = rewritePlaylistLine(line, newName)
-		} else {
-			out[i] = line
+			continue
 		}
+		out[i] = stripUnrecognizedURIAttr(line)
 	}
 
 	localPlaylistPath = filepath.Join(hlsTempDir, "playlist.m3u8")
@@ -211,10 +220,31 @@ func segmentExt(u *url.URL) string {
 	return ".bin"
 }
 
+// stripUnrecognizedURIAttr empties any URI="..." attribute on a tag line
+// that materializeHLS did not produce a local file for. Non-tag lines pass
+// through unchanged. This is defense in depth: parseMediaPlaylist only
+// recognizes #EXT-X-KEY and #EXT-X-MAP as URI sources, but RFC 8216 + LL-HLS
+// + future extensions define more (#EXT-X-SESSION-DATA, #EXT-X-PRELOAD-HINT,
+// #EXT-X-PART, …). ffmpeg's protocol whitelist already blocks the resulting
+// remote fetch, but neutering the URL string itself means even a hypothetical
+// whitelist relaxation cannot turn unrecognized tags into SSRF.
+func stripUnrecognizedURIAttr(line string) string {
+	trim := strings.TrimSpace(line)
+	if !strings.HasPrefix(trim, "#") {
+		return line
+	}
+	if !strings.Contains(line, `URI="`) {
+		return line
+	}
+	return uriAttrRE.ReplaceAllLiteralString(line, `URI=""`)
+}
+
 // rewritePlaylistLine substitutes the URI within an EXT-X-KEY / EXT-X-MAP
 // attribute line, or replaces the entire URI line for a segment, with the
 // local relative name. Leading whitespace on segment URI lines is preserved
-// so ffmpeg's playlist parser sees identical structure.
+// so ffmpeg's playlist parser sees identical structure. Segment URI lines
+// are standalone per RFC 8216 §4.3 — any trailing whitespace or comment is
+// not preserved (it would not be valid HLS anyway).
 func rewritePlaylistLine(line, newName string) string {
 	trim := strings.TrimSpace(line)
 	if strings.HasPrefix(trim, "#EXT-X-KEY") || strings.HasPrefix(trim, "#EXT-X-MAP") {

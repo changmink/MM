@@ -485,6 +485,53 @@ func TestParseMediaPlaylist_EmptyBody(t *testing.T) {
 	}
 }
 
+func TestParseMediaPlaylist_TooManyKeys(t *testing.T) {
+	// hlsMaxKeyEntries + 1 keys → errHLSTooManyKeys.
+	var buf strings.Builder
+	buf.WriteString("#EXTM3U\n")
+	for i := 0; i <= hlsMaxKeyEntries; i++ {
+		buf.WriteString(`#EXT-X-KEY:METHOD=AES-128,URI="https://k.example/k.bin"` + "\n")
+	}
+	body := []byte(buf.String())
+	base, _ := url.Parse("https://cdn.example.com/p.m3u8")
+	_, err := parseMediaPlaylist(body, base)
+	if !errors.Is(err, errHLSTooManyKeys) {
+		t.Errorf("err = %v, want errHLSTooManyKeys", err)
+	}
+}
+
+func TestParseMediaPlaylist_TooManyInits(t *testing.T) {
+	// hlsMaxInitEntries + 1 init segments → errHLSTooManyInits.
+	var buf strings.Builder
+	buf.WriteString("#EXTM3U\n")
+	for i := 0; i <= hlsMaxInitEntries; i++ {
+		buf.WriteString(`#EXT-X-MAP:URI="https://cdn.example/init.mp4"` + "\n")
+	}
+	body := []byte(buf.String())
+	base, _ := url.Parse("https://cdn.example.com/p.m3u8")
+	_, err := parseMediaPlaylist(body, base)
+	if !errors.Is(err, errHLSTooManyInits) {
+		t.Errorf("err = %v, want errHLSTooManyInits", err)
+	}
+}
+
+func TestParseMediaPlaylist_DuplicateURIAttribute(t *testing.T) {
+	// Hostile playlist with two URI attributes on a single tag — parser
+	// extracts the first, but rewriter would replace all. Refuse the
+	// playlist to keep the two stages in lockstep.
+	body := []byte(`#EXTM3U
+#EXT-X-KEY:METHOD=AES-128,URI="https://A/k.bin",URI="https://B/secret"
+#EXTINF:4.0,
+seg.ts
+#EXT-X-ENDLIST
+`)
+	base, _ := url.Parse("https://cdn.example.com/p.m3u8")
+	_, err := parseMediaPlaylist(body, base)
+	if !errors.Is(err, errHLSDuplicateURIAttr) {
+		t.Errorf("err = %v, want errHLSDuplicateURIAttr", err)
+	}
+}
+
 func TestParseMediaPlaylist_TooManySegments(t *testing.T) {
 	// hlsMaxSegments + 1 segments → errHLSTooManySegments. Build the body
 	// programmatically because writing 10001 #EXTINF blocks by hand is silly.
