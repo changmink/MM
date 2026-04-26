@@ -166,3 +166,20 @@
 - [x] MSM-3: 카드/테이블 개별 체크박스 + 선택 상태 스타일
 - [x] MSM-4: 선택 묶음 drag payload + 기존 drop target에서 순차 move 처리
 - [x] MSM-5: 회귀 테스트 및 Docker Compose API 검증
+
+## Phase 23 — 프론트엔드 모듈 분할 (`feature/frontend-modularization`) — spec [`spec-frontend-modularization.md`](./spec-frontend-modularization.md), plan [`plan-frontend-modularization.md`](./plan-frontend-modularization.md)
+
+`web/app.js` 2,408 라인을 12개 ES module로 분해. 동작 변경 0. 번들러 미사용(브라우저 네이티브 ESM). 각 단계가 그 자체로 동작 — 단계 종료마다 spec §5.2 회귀 체크.
+
+- [ ] FM-0: `feature/frontend-modularization` 브랜치 생성 + 베이스라인 smoke (browse/lightbox/upload/urlImport/tree)
+- [ ] FM-1: `state.js` + `dom.js` + `util.js` 추출 (앵커: app.js 3–96, 1920–2055) — `let` 변수는 setter 경유, DOM ref는 `$` 객체 단일 export, `index.html` script 태그를 `type="module"`로 전환. **체크포인트: §5.2 전체**
+- [ ] FM-2: `router.js` 추출 (98–130, 2253–2272) — `wireRouter()`/`wireToolbar()` 함수화 + `main`에서 호출
+- [ ] FM-3: `tree.js` 추출 (2057–2251)
+- [ ] FM-4: `settings.js` 추출 (2274–2397)
+- [ ] FM-5: `convert.js` 추출 (1583–1778) — 자체 `consumeSSE` 유지 (공통화는 별도 작업)
+- [ ] FM-6: `urlImport.js` + `urlImportJobs.js` 동시 추출 (717–1581) — 순환 발생 시 `urlImportRow.js` 분리(13개 됨). 진행 throttle 1 MiB/250 ms 상수 미변경 grep 확인
+- [ ] FM-7: `fileOps.js` 추출 (596–715, 1780–2017) — upload + delete + rename + dnd + folder create
+- [ ] FM-8: `browse.js` 추출 (132–595) — browse + render + lightbox + audio. **체크포인트: §5.2 전체 + Chrome+Firefox**
+- [ ] FM-9: `app.js → main.js` 이름 변경 + `index.html`의 `<script type="module" src="/main.js?v=29">` 갱신 + 모든 모듈 상단 한 줄 요약 주석. **체크포인트: spec §7 acceptance criteria 전부**
+
+검증 시 매 단계: `go test ./... && go vet ./...` + 브라우저 콘솔 0 에러 + 해당 도메인 회귀.
