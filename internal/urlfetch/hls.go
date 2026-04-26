@@ -583,6 +583,17 @@ func fetchHLS(
 	// bytes) and the remux phase (Phase 2: output MP4 bytes) emit a single
 	// monotonically increasing counter — spec D-4. Phase 2 emits are
 	// offset by Phase 1's total.
+	//
+	// Concurrency contract: phase1Total is written exactly once after
+	// materializeHLS returns (line below) and read by wrappedCb.Progress
+	// thereafter. This is safe ONLY because materializeHLS calls
+	// cb.Progress synchronously from its own goroutine and runHLSRemux's
+	// watcher does not start firing Progress until materializeHLS has
+	// returned. If a future change introduces concurrent Progress emit
+	// from materializeHLS (e.g. parallel segment downloads), this closure
+	// must be replaced with an atomic.Int64 read of the running total —
+	// the captured-by-reference `phase1Total` would otherwise produce a
+	// torn read.
 	var phase1Total int64
 	wrappedCb := cb
 	if cb != nil {

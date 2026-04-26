@@ -259,10 +259,21 @@ func rewritePlaylistLine(line, newName string) string {
 }
 
 // copyWithCaps streams src into dst while enforcing a per-resource cap and a
-// shared cumulative counter. Sequential by design — atomic.Int64 keeps it
-// safe for any future parallel materializeHLS variant. On cap breach returns
-// errHLSTooLarge after writing the bytes that fit; the caller removes the
-// partial file.
+// shared cumulative counter. On cap breach returns errHLSTooLarge after
+// writing the bytes that fit; the caller removes the partial file.
+//
+// Concurrency contract: this function is meant to be called by a single
+// goroutine at a time on a given remaining counter — its Load + Add pattern
+// is non-atomic across the two operations and so does NOT prevent races if
+// multiple goroutines decrement the same counter concurrently. atomic.Int64
+// is used for two reasons that don't require strict sequential consistency:
+//   1. visibility — runHLSRemux's watcher goroutine can call remaining.Load()
+//      from a different goroutine to compute its remaining output budget,
+//      and atomic guarantees the value is observed without tearing.
+//   2. forward compatibility — if/when materializeHLS is parallelized, the
+//      check-then-add window must be replaced with a CAS loop. Using
+//      atomic.Int64 today makes that a local change rather than a type
+//      migration.
 func copyWithCaps(dst io.Writer, src io.Reader, perResourceMax int64, remaining *atomic.Int64) (int64, error) {
 	var written int64
 	buf := make([]byte, 32*1024)
