@@ -1973,6 +1973,7 @@ async function loadTree() {
     }
     renderTreeChildren(root.children, treeRoot, 0);
     highlightTreeCurrent();
+    syncSidebarSticky();
   } catch (e) {
     showTreeError(e.message);
   } finally {
@@ -2100,6 +2101,7 @@ async function toggleNode(wrapEl, node, depth) {
     chevron.textContent = '▶';
     chevron.setAttribute('aria-expanded', 'false');
   }
+  syncSidebarSticky();
 }
 
 function highlightTreeCurrent() {
@@ -2110,6 +2112,33 @@ function highlightTreeCurrent() {
   const sel = `.tree-node[data-path="${CSS.escape(currentPath)}"] > .tree-node-row`;
   const target = treeRoot.querySelector(sel);
   if (target) target.classList.add('active');
+}
+
+// Sticky-until-bottom for the desktop sidebar. When the tree is taller than
+// the viewport's available area, set a negative top so the sidebar pins with
+// its bottom flush against the viewport bottom — page scroll then reveals the
+// rest of the tree. Mobile (<600px) is a fixed drawer; leave its top alone.
+const sidebarEl = document.getElementById('sidebar');
+function syncSidebarSticky() {
+  if (!sidebarEl) return;
+  if (window.matchMedia('(max-width: 600px)').matches) {
+    sidebarEl.style.top = '';
+    return;
+  }
+  const headerH = parseInt(
+    getComputedStyle(document.documentElement).getPropertyValue('--header-h'),
+    10,
+  ) || 57;
+  const sidebarH = sidebarEl.scrollHeight;
+  const viewportH = window.innerHeight;
+  const overflow = Math.max(0, sidebarH - (viewportH - headerH));
+  sidebarEl.style.top = (headerH - overflow) + 'px';
+}
+window.addEventListener('resize', syncSidebarSticky);
+if (sidebarEl && typeof ResizeObserver !== 'undefined') {
+  // Catches mutations not covered by explicit syncSidebarSticky() calls
+  // (e.g. third-party DOM changes, font load reflows).
+  new ResizeObserver(syncSidebarSticky).observe(sidebarEl);
 }
 
 // ── Sidebar toggle (mobile) ──────────────────────────────────────────────────

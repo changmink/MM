@@ -48,13 +48,21 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 
 /* Upload zone */
 .upload-zone {
-  margin: 16px 24px;
+  /* Vertical margin removed so sticky pins the box at exactly --header-h —
+     a top margin would leave it visually offset from the header bottom and
+     create a visible jump when sticky engages. The original gap below the
+     upload zone is preserved via #browse-toolbar's margin-top. */
+  margin: 0 24px;
   border: 2px dashed var(--border);
   border-radius: 8px;
   padding: 20px;
   text-align: center;
   color: var(--text-dim);
   transition: border-color 0.2s, background 0.2s;
+  position: sticky;
+  top: var(--header-h);
+  z-index: 5;
+  background: var(--bg);
 }
 .upload-zone.drag-over {
   border-color: var(--accent);
@@ -80,9 +88,11 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   border-right: 1px solid var(--border);
   padding: 12px 8px;
   position: sticky;
+  /* top is set dynamically by syncSidebarSticky() so a tree taller than the
+     viewport pins flush with the viewport bottom. The CSS fallback keeps the
+     sidebar usable when JS is disabled. */
   top: var(--header-h);
-  height: calc(100vh - var(--header-h));
-  overflow-y: auto;
+  align-self: start;
   font-size: 0.95rem;
 }
 .sidebar .tree-empty {
@@ -235,6 +245,8 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   display: flex;
   gap: 8px;
   padding: 8px 24px;
+  /* Compensates for the upload-zone vertical margin removed for sticky alignment. */
+  margin-top: 16px;
   align-items: center;
   flex-wrap: wrap;
   border-bottom: 1px solid var(--border);
