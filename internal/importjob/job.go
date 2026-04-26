@@ -237,14 +237,11 @@ func (j *Job) snapshotLocked() JobSnapshot {
 // reaches a terminal state — callers should always defer the unsubscribe
 // to avoid leaking the channel on early returns. If the job is already
 // terminal at subscribe time, the returned channel is pre-closed so the
-// caller's read loop exits immediately; the snapshot reflects the final
-// state in that case.
+// caller's read loop exits immediately.
 //
-// Use SubscribeWithSnapshot when the caller intends to relay an initial
-// snapshot followed by the live stream — that variant captures the snapshot
-// and registers the subscriber under one mutex hold so events published in
-// the gap between the two cannot land in both the snapshot AND the channel
-// (see I1 in review round 3).
+// Use SubscribeWithSnapshot when the caller also needs an initial snapshot
+// — that variant captures the snapshot and registers the subscriber under
+// one mutex hold, so an event published in the gap cannot land in both.
 func (j *Job) Subscribe() (<-chan Event, func()) {
 	j.mu.Lock()
 	defer j.mu.Unlock()

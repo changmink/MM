@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -334,25 +333,7 @@ func TestCancelJob_Batch(t *testing.T) {
 func TestCancelJob_PerURL_Running(t *testing.T) {
 	// Origin holds index 0 indefinitely; index 1 finishes promptly so the
 	// batch's terminal state lands as Completed (succeeded≥1) per spec §3.6.
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	releaseFn := func() { releaseOnce.Do(func() { close(release) }) }
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "image/jpeg")
-		w.Header().Set("Content-Length", strconv.Itoa(len(jpegBody)))
-		w.WriteHeader(http.StatusOK)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-		if strings.Contains(r.URL.Path, "hold") {
-			select {
-			case <-release:
-			case <-r.Context().Done():
-				return
-			}
-		}
-		w.Write(jpegBody)
-	}))
+	srv, releaseFn := newHoldReleaseOrigin(t)
 	defer srv.Close()
 	defer releaseFn()
 
@@ -422,21 +403,7 @@ func TestCancelJob_PerURL_Running(t *testing.T) {
 func TestCancelJob_PerURL_Pending(t *testing.T) {
 	// Origin holds the FIRST URL ("hold") so URL 1 is pending while we
 	// cancel it; URL 0 finishes after we release.
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	releaseFn := func() { releaseOnce.Do(func() { close(release) }) }
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "image/jpeg")
-		w.Header().Set("Content-Length", strconv.Itoa(len(jpegBody)))
-		w.WriteHeader(http.StatusOK)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-		if strings.Contains(r.URL.Path, "hold") {
-			<-release
-		}
-		w.Write(jpegBody)
-	}))
+	srv, releaseFn := newHoldReleaseOrigin(t)
 	defer srv.Close()
 	defer releaseFn()
 

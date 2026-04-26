@@ -221,20 +221,9 @@ func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destA
 		if rec := recover(); rec != nil {
 			slog.Error("import worker panic",
 				"jobId", job.ID, "panic", rec, "stack", string(debug.Stack()))
-			// Re-tally from URLState so already-emitted done frames stay
-			// honored. Counting every URL as failed would contradict the
-			// per-row UI (which still shows "완료") and the files already on
-			// disk. Anything not in a terminal URLState lands in failed —
-			// the panic interrupted the worker mid-flight and we cannot
-			// know which way pending/running URLs would have gone.
 			sum := summarizeURLs(job.Snapshot().URLs)
 			job.SetSummary(sum)
-			job.Publish(mustEvent("summary", sseSummary{
-				Phase:     "summary",
-				Succeeded: sum.Succeeded,
-				Failed:    sum.Failed,
-				Cancelled: sum.Cancelled,
-			}))
+			job.Publish(summaryEvent(sum))
 			job.SetStatus(importjob.StatusFailed)
 		}
 	}()
@@ -268,9 +257,7 @@ func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destA
 		}
 		summary := importjob.Summary{Cancelled: len(urls)}
 		job.SetSummary(summary)
-		job.Publish(mustEvent("summary", sseSummary{
-			Phase: "summary", Succeeded: 0, Failed: 0, Cancelled: len(urls),
-		}))
+		job.Publish(summaryEvent(summary))
 		job.SetStatus(importjob.StatusCancelled)
 		return
 	}
@@ -319,9 +306,7 @@ func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destA
 		Succeeded: succeeded, Failed: failed, Cancelled: cancelled,
 	}
 	job.SetSummary(summary)
-	job.Publish(mustEvent("summary", sseSummary{
-		Phase: "summary", Succeeded: succeeded, Failed: failed, Cancelled: cancelled,
-	}))
+	job.Publish(summaryEvent(summary))
 
 	switch {
 	case succeeded > 0:
@@ -564,11 +549,9 @@ func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, payload any) {
 	flusher.Flush()
 }
 
-// summarizeURLs counts URLState entries by terminal status. Used by the
-// runImportJob panic-recovery path so the summary reported to the client
-// matches the per-row UI: every already-emitted done/error/cancelled stays
-// honored, anything still pending/running lands in failed (the panic
-// interrupted the worker before it could resolve them either way).
+// summarizeURLs folds URLState entries into a Summary by terminal status.
+// Pending/running URLs land in Failed — used by the panic-recovery path
+// where the worker was interrupted before resolving them either way.
 func summarizeURLs(urls []importjob.URLState) importjob.Summary {
 	var sum importjob.Summary
 	for _, u := range urls {
@@ -582,6 +565,17 @@ func summarizeURLs(urls []importjob.URLState) importjob.Summary {
 		}
 	}
 	return sum
+}
+
+// summaryEvent builds the SSE summary frame. Centralizes the "summary"
+// phase string so the wire-format constant lives in one place.
+func summaryEvent(s importjob.Summary) importjob.Event {
+	return mustEvent("summary", sseSummary{
+		Phase:     "summary",
+		Succeeded: s.Succeeded,
+		Failed:    s.Failed,
+		Cancelled: s.Cancelled,
+	})
 }
 
 // mustEvent marshals payload into a importjob.Event with the given phase.

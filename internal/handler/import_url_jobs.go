@@ -246,7 +246,7 @@ func (h *Handler) handleSubscribeJob(w http.ResponseWriter, r *http.Request, job
 	// Atomic snapshot+subscribe under a single j.mu hold — closes the race
 	// window where an event published between Snapshot() and Subscribe()
 	// would land in both the snapshot AND the channel and double-count on
-	// the client. See review round 3 I1.
+	// the client.
 	snapshot, events, unsubscribe := job.SubscribeWithSnapshot()
 	defer unsubscribe()
 

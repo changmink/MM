@@ -820,10 +820,9 @@ function maybeFinalize() {
   else if (failed === 0 && cancelled > 0)                    cls = 'status-cancelled';
   else                                                       cls = 'status-error';
 
-  // Round entry guard above (round.length === 0 short-circuits) plus the
-  // "every batch done" requirement guarantee at least one terminal URL,
-  // so at least one of the three counters is non-zero. No empty-parts
-  // fallback needed.
+  // The round.length>0 + every-batch-done preconditions guarantee at
+  // least one of the three counters is non-zero; parts.join cannot be
+  // empty.
   const parts = [];
   if (succeeded > 0) parts.push(`성공 ${succeeded}`);
   if (failed > 0)    parts.push(`실패 ${failed}`);
@@ -1220,16 +1219,14 @@ async function bootstrapURLJobs() {
     return;
   }
   const active = Array.isArray(body.active) ? body.active : [];
-  const finishedAll = Array.isArray(body.finished) ? body.finished : [];
   // Soft cap on restored history. Server keeps every dismissed-but-not-
   // cleared job until restart (single-user, unbounded growth tolerated by
   // the spec); the client renders only the most recent N so a long-running
   // browser session can't bloat the modal DOM. Active jobs are never
   // capped — they're still in flight and dropping any would lose UI.
   const HISTORY_CAP = 50;
-  const finished = finishedAll.length > HISTORY_CAP
-    ? finishedAll.slice(finishedAll.length - HISTORY_CAP)
-    : finishedAll;
+  const finished = (Array.isArray(body.finished) ? body.finished : [])
+    .slice(-HISTORY_CAP);
   if (active.length === 0 && finished.length === 0) return;
 
   // Render finished first so they sit at the top of the result area —

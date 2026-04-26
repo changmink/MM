@@ -273,12 +273,10 @@ func TestJob_CancelOne_OutOfRange(t *testing.T) {
 	}
 }
 
-// TestJob_SubscribeWithSnapshot_NoDoubleDelivery proves the I1 fix: an
-// event published between Snapshot() and Subscribe() must never appear in
-// both the captured snapshot AND the live channel. Exercise the contract
-// by hammering Publish concurrently with SubscribeWithSnapshot — the URL
-// state seen in the snapshot must equal the URL state at the moment of
-// subscribe, with subsequent events arriving only on the channel.
+// TestJob_SubscribeWithSnapshot_NoDoubleDelivery: an event published
+// between Snapshot() and Subscribe() must never appear in both the
+// captured snapshot AND the live channel. Exercise the contract by
+// hammering Publish concurrently with SubscribeWithSnapshot.
 func TestJob_SubscribeWithSnapshot_NoDoubleDelivery(t *testing.T) {
 	job := newTestJob(t, "https://x")
 
