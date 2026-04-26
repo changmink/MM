@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -326,27 +325,85 @@ func TestCancelJob_Batch(t *testing.T) {
 	}
 }
 
+// TestCancelJob_PerURL_Running: cancel a URL that is currently in flight.
+// The worker observes the per-URL ctx fire, urlfetch returns a cancellation
+// error, and fetchOneJob's existing path emits exactly one error("cancelled")
+// frame for that index. The handler responds 204 without publishing its
+// own frame — duplication would inflate the cancelled counter.
+func TestCancelJob_PerURL_Running(t *testing.T) {
+	// Origin holds index 0 indefinitely; index 1 finishes promptly so the
+	// batch's terminal state lands as Completed (succeeded≥1) per spec §3.6.
+	srv, releaseFn := newHoldReleaseOrigin(t)
+	defer srv.Close()
+	defer releaseFn()
+
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	h := Register(mux, root, root, nil)
+	defer h.Close()
+
+	rec, wait := postImportStreaming(context.Background(), t, mux,
+		"/", []string{srv.URL + "/hold.jpg", srv.URL + "/b.jpg"})
+	regEv := waitForPhase(t, rec, "register")
+	jobID, _ := regEv["jobId"].(string)
+	waitForPhase(t, rec, "start") // hold.jpg is in flight
+
+	cancelReq := httptest.NewRequest(http.MethodPost,
+		"/api/import-url/jobs/"+jobID+"/cancel?index=0", nil)
+	cancelRW := httptest.NewRecorder()
+	mux.ServeHTTP(cancelRW, cancelReq)
+	if cancelRW.Code != http.StatusNoContent {
+		t.Fatalf("cancel status = %d, want 204; body = %s",
+			cancelRW.Code, cancelRW.Body.String())
+	}
+
+	releaseFn()
+	wait()
+
+	job, _ := h.registry.Get(jobID)
+	select {
+	case <-job.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("job never finished")
+	}
+
+	// Exactly one error frame for index 0 — duplicate emission would
+	// indicate handler-side double-publishing on the running path.
+	body := rec.all.String()
+	events := parseSSEEvents(t, body)
+	errFrames := 0
+	for _, e := range events {
+		if e["phase"] != "error" {
+			continue
+		}
+		if int(e["index"].(float64)) == 0 && e["error"] == "cancelled" {
+			errFrames++
+		}
+	}
+	if errFrames != 1 {
+		t.Errorf("error(cancelled) frames for index 0 = %d, want exactly 1; phases = %v",
+			errFrames, phasesOf(events))
+	}
+
+	snap := job.Snapshot()
+	if snap.URLs[0].Status != "cancelled" {
+		t.Errorf("urls[0].status = %q, want cancelled", snap.URLs[0].Status)
+	}
+	if snap.Summary == nil || snap.Summary.Cancelled != 1 || snap.Summary.Succeeded != 1 {
+		t.Errorf("summary = %+v, want {succeeded:1, cancelled:1}", snap.Summary)
+	}
+	if got := job.Status(); got != importjob.StatusCompleted {
+		t.Errorf("status = %q, want %q (1 success → completed)", got, importjob.StatusCompleted)
+	}
+}
+
 // TestCancelJob_PerURL_Pending: cancel one URL while it is still pending
 // (worker hasn't reached it yet). The worker skips it when it gets there;
 // the rest of the batch finishes normally and status is Completed.
 func TestCancelJob_PerURL_Pending(t *testing.T) {
 	// Origin holds the FIRST URL ("hold") so URL 1 is pending while we
 	// cancel it; URL 0 finishes after we release.
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	releaseFn := func() { releaseOnce.Do(func() { close(release) }) }
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "image/jpeg")
-		w.Header().Set("Content-Length", strconv.Itoa(len(jpegBody)))
-		w.WriteHeader(http.StatusOK)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-		if strings.Contains(r.URL.Path, "hold") {
-			<-release
-		}
-		w.Write(jpegBody)
-	}))
+	srv, releaseFn := newHoldReleaseOrigin(t)
 	defer srv.Close()
 	defer releaseFn()
 

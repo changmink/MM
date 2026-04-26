@@ -820,12 +820,15 @@ function maybeFinalize() {
   else if (failed === 0 && cancelled > 0)                    cls = 'status-cancelled';
   else                                                       cls = 'status-error';
 
+  // The round.length>0 + every-batch-done preconditions guarantee at
+  // least one of the three counters is non-zero; parts.join cannot be
+  // empty.
   const parts = [];
   if (succeeded > 0) parts.push(`성공 ${succeeded}`);
   if (failed > 0)    parts.push(`실패 ${failed}`);
   if (cancelled > 0) parts.push(`취소 ${cancelled}`);
   urlSummary.className = 'url-summary ' + cls;
-  urlSummary.textContent = parts.length > 0 ? parts.join(' · ') : '완료된 항목 없음';
+  urlSummary.textContent = parts.join(' · ');
 
   if (succeeded > 0) {
     // Success: clear ONLY this round (restored history stays). Browse
@@ -1216,7 +1219,14 @@ async function bootstrapURLJobs() {
     return;
   }
   const active = Array.isArray(body.active) ? body.active : [];
-  const finished = Array.isArray(body.finished) ? body.finished : [];
+  // Soft cap on restored history. Server keeps every dismissed-but-not-
+  // cleared job until restart (single-user, unbounded growth tolerated by
+  // the spec); the client renders only the most recent N so a long-running
+  // browser session can't bloat the modal DOM. Active jobs are never
+  // capped — they're still in flight and dropping any would lose UI.
+  const HISTORY_CAP = 50;
+  const finished = (Array.isArray(body.finished) ? body.finished : [])
+    .slice(-HISTORY_CAP);
   if (active.length === 0 && finished.length === 0) return;
 
   // Render finished first so they sit at the top of the result area —
@@ -1328,6 +1338,14 @@ function applyJobSnapshotToBatch(batch, job) {
   batch.succeeded = succeeded;
   batch.failed = failed;
   batch.cancelled = cancelled;
+  // Invariant: URL count is fixed at job Create time. If a future server
+  // change ever lets jobs grow URLs mid-flight, the row map would silently
+  // hold orphans. Surface that here so the regression is visible in the
+  // console rather than as a confusing UI glitch.
+  if (batch.rowEls.size !== job.urls.length) {
+    console.warn('row count mismatch: rows=%d snapshot.urls=%d (jobId=%s)',
+      batch.rowEls.size, job.urls.length, batch.jobId);
+  }
 }
 
 // removeBatchRows tears down every DOM contribution this batch made — the

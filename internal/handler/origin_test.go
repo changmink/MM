@@ -13,17 +13,25 @@ import (
 // header-parsing minutiae.
 func TestSameOrigin_Decision(t *testing.T) {
 	cases := []struct {
-		name   string
-		origin string
-		host   string
-		want   bool
+		name      string
+		origin    string
+		fetchSite string
+		host      string
+		want      bool
 	}{
-		{"missing origin", "", "localhost:8080", true},
-		{"matching origin", "http://localhost:8080", "localhost:8080", true},
-		{"matching https", "https://example.com", "example.com", true},
-		{"different host", "http://evil.example", "localhost:8080", false},
-		{"different port", "http://localhost:9000", "localhost:8080", false},
-		{"unparseable origin", "://nope", "localhost:8080", false},
+		{"missing origin", "", "", "localhost:8080", true},
+		{"matching origin", "http://localhost:8080", "", "localhost:8080", true},
+		{"matching https", "https://example.com", "", "example.com", true},
+		{"different host", "http://evil.example", "", "localhost:8080", false},
+		{"different port", "http://localhost:9000", "", "localhost:8080", false},
+		{"unparseable origin", "://nope", "", "localhost:8080", false},
+		// Sec-Fetch-Site fallback when Origin is absent.
+		{"no origin, sec-fetch-site cross-site", "", "cross-site", "localhost:8080", false},
+		{"no origin, sec-fetch-site cross-origin", "", "cross-origin", "localhost:8080", false},
+		{"no origin, sec-fetch-site same-origin", "", "same-origin", "localhost:8080", true},
+		{"no origin, sec-fetch-site none", "", "none", "localhost:8080", true},
+		// Origin present takes precedence over Sec-Fetch-Site.
+		{"matching origin overrides cross-site", "http://localhost:8080", "cross-site", "localhost:8080", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -32,9 +40,12 @@ func TestSameOrigin_Decision(t *testing.T) {
 			if tc.origin != "" {
 				r.Header.Set("Origin", tc.origin)
 			}
+			if tc.fetchSite != "" {
+				r.Header.Set("Sec-Fetch-Site", tc.fetchSite)
+			}
 			if got := sameOrigin(r); got != tc.want {
-				t.Errorf("sameOrigin(origin=%q, host=%q) = %v, want %v",
-					tc.origin, tc.host, got, tc.want)
+				t.Errorf("sameOrigin(origin=%q, sec-fetch-site=%q, host=%q) = %v, want %v",
+					tc.origin, tc.fetchSite, tc.host, got, tc.want)
 			}
 		})
 	}

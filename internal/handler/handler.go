@@ -110,11 +110,21 @@ func requireSameOrigin(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // sameOrigin reports whether the request's Origin header (if present)
-// matches the request's Host. An absent Origin is treated as same-origin.
+// matches the request's Host. An absent Origin defers to Sec-Fetch-Site
+// — browsers send it on every request, and a cross-site value rejects
+// even if Origin was somehow stripped (extension, niche client). With
+// both signals absent the request passes: curl, server-side callers, and
+// pre-2020 browsers omit both, and the LAN single-user threat model
+// accepts that.
 func sameOrigin(r *http.Request) bool {
 	o := r.Header.Get("Origin")
 	if o == "" {
-		return true
+		switch r.Header.Get("Sec-Fetch-Site") {
+		case "cross-site", "cross-origin":
+			return false
+		default:
+			return true
+		}
 	}
 	u, err := url.Parse(o)
 	if err != nil {

@@ -228,8 +228,8 @@ func (h *Handler) handleDeleteFinishedJobs(w http.ResponseWriter, r *http.Reques
 // handleSubscribeJob streams the named job's lifecycle as SSE: a single
 // snapshot frame followed by every subsequent live event until the job
 // terminates. A subscriber that arrives after the job is already finished
-// receives only the snapshot — Subscribe pre-closes its channel in that
-// case so the loop falls out immediately on the first read.
+// receives only the snapshot — SubscribeWithSnapshot pre-closes its
+// channel in that case so the loop falls out immediately on the first read.
 func (h *Handler) handleSubscribeJob(w http.ResponseWriter, r *http.Request, jobID string) {
 	job, ok := h.registry.Get(jobID)
 	if !ok {
@@ -243,10 +243,11 @@ func (h *Handler) handleSubscribeJob(w http.ResponseWriter, r *http.Request, job
 		return
 	}
 
-	// Subscribe BEFORE writing the snapshot so any event published in the
-	// gap between snapshot capture and stream start lands in the channel
-	// buffer instead of being lost.
-	events, unsubscribe := job.Subscribe()
+	// Atomic snapshot+subscribe under a single j.mu hold — closes the race
+	// window where an event published between Snapshot() and Subscribe()
+	// would land in both the snapshot AND the channel and double-count on
+	// the client.
+	snapshot, events, unsubscribe := job.SubscribeWithSnapshot()
 	defer unsubscribe()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -254,7 +255,7 @@ func (h *Handler) handleSubscribeJob(w http.ResponseWriter, r *http.Request, job
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
-	writeSSEEvent(w, flusher, snapshotEnvelope{Phase: "snapshot", Job: job.Snapshot()})
+	writeSSEEvent(w, flusher, snapshotEnvelope{Phase: "snapshot", Job: snapshot})
 
 	for {
 		select {

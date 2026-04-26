@@ -221,11 +221,9 @@ func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destA
 		if rec := recover(); rec != nil {
 			slog.Error("import worker panic",
 				"jobId", job.ID, "panic", rec, "stack", string(debug.Stack()))
-			urls := job.Snapshot().URLs
-			job.SetSummary(importjob.Summary{Failed: len(urls)})
-			job.Publish(mustEvent("summary", sseSummary{
-				Phase: "summary", Failed: len(urls),
-			}))
+			sum := summarizeURLs(job.Snapshot().URLs)
+			job.SetSummary(sum)
+			job.Publish(summaryEvent(sum))
 			job.SetStatus(importjob.StatusFailed)
 		}
 	}()
@@ -259,9 +257,7 @@ func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destA
 		}
 		summary := importjob.Summary{Cancelled: len(urls)}
 		job.SetSummary(summary)
-		job.Publish(mustEvent("summary", sseSummary{
-			Phase: "summary", Succeeded: 0, Failed: 0, Cancelled: len(urls),
-		}))
+		job.Publish(summaryEvent(summary))
 		job.SetStatus(importjob.StatusCancelled)
 		return
 	}
@@ -310,9 +306,7 @@ func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destA
 		Succeeded: succeeded, Failed: failed, Cancelled: cancelled,
 	}
 	job.SetSummary(summary)
-	job.Publish(mustEvent("summary", sseSummary{
-		Phase: "summary", Succeeded: succeeded, Failed: failed, Cancelled: cancelled,
-	}))
+	job.Publish(summaryEvent(summary))
 
 	switch {
 	case succeeded > 0:
@@ -481,20 +475,29 @@ func logFetchError(u string, ferr *urlfetch.FetchError) {
 }
 
 // sensitiveQueryKeys lists query parameters whose value the URL redactor
-// strips before logging. The match is case-insensitive and is intentionally
-// narrow — broad redaction would obscure useful diagnostic info on benign
-// origins.
+// strips before logging. Match is case-insensitive (lookup lowercases the
+// key, so entries here MUST be lowercase). Intentionally narrow — broad
+// redaction would obscure useful diagnostic info on benign origins.
+// Hyphenated and snake_case variants are listed separately because URL
+// query keys are not normalized.
 var sensitiveQueryKeys = map[string]struct{}{
-	"token":         {},
-	"access_token":  {},
-	"signature":     {},
-	"sig":           {},
+	// Generic auth tokens.
+	"token":        {},
+	"access_token": {},
+	"auth":         {},
+	// Signed-URL signatures.
+	"signature":       {},
+	"sig":             {},
 	"x-amz-signature": {},
-	"key":           {},
-	"apikey":        {},
-	"api_key":       {},
-	"password":      {},
-	"secret":        {},
+	"signed_url":      {},
+	"presigned_url":   {},
+	// API keys.
+	"key":     {},
+	"apikey":  {},
+	"api_key": {},
+	// Generic credentials.
+	"password": {},
+	"secret":   {},
 }
 
 // redactURL strips userinfo and masks values for query parameters that look
@@ -544,6 +547,35 @@ func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, payload any) {
 	}
 	fmt.Fprintf(w, "data: %s\n\n", data)
 	flusher.Flush()
+}
+
+// summarizeURLs folds URLState entries into a Summary by terminal status.
+// Pending/running URLs land in Failed — used by the panic-recovery path
+// where the worker was interrupted before resolving them either way.
+func summarizeURLs(urls []importjob.URLState) importjob.Summary {
+	var sum importjob.Summary
+	for _, u := range urls {
+		switch u.Status {
+		case "done":
+			sum.Succeeded++
+		case "cancelled":
+			sum.Cancelled++
+		default:
+			sum.Failed++
+		}
+	}
+	return sum
+}
+
+// summaryEvent builds the SSE summary frame. Centralizes the "summary"
+// phase string so the wire-format constant lives in one place.
+func summaryEvent(s importjob.Summary) importjob.Event {
+	return mustEvent("summary", sseSummary{
+		Phase:     "summary",
+		Succeeded: s.Succeeded,
+		Failed:    s.Failed,
+		Cancelled: s.Cancelled,
+	})
 }
 
 // mustEvent marshals payload into a importjob.Event with the given phase.
