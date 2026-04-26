@@ -5,7 +5,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/chang/file_server/internal/settings"
+	"file_server/internal/settings"
 )
 
 // handleSettings serves GET /api/settings (current values) and

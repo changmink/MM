@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/chang/file_server/internal/media"
+	"file_server/internal/media"
 )
 
 // streamCacheDir is the on-disk subdir (under dataDir) where remuxed mp4s live.

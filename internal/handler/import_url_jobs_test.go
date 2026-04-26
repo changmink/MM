@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chang/file_server/internal/importjob"
+	"file_server/internal/importjob"
 )
 
 // listJobsBody decodes the GET /api/import-url/jobs response so tests can

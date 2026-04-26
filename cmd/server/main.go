@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/chang/file_server/internal/handler"
-	"github.com/chang/file_server/internal/settings"
+	"file_server/internal/handler"
+	"file_server/internal/settings"
 )
 
 func main() {

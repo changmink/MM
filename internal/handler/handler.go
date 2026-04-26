@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chang/file_server/internal/importjob"
-	"github.com/chang/file_server/internal/settings"
-	"github.com/chang/file_server/internal/thumb"
-	"github.com/chang/file_server/internal/urlfetch"
+	"file_server/internal/importjob"
+	"file_server/internal/settings"
+	"file_server/internal/thumb"
+	"file_server/internal/urlfetch"
 )
 
 type Handler struct {

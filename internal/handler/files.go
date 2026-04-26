@@ -13,8 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/chang/file_server/internal/media"
-	"github.com/chang/file_server/internal/thumb"
+	"file_server/internal/media"
+	"file_server/internal/thumb"
 )
 
 func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {

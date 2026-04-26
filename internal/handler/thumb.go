@@ -5,8 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/chang/file_server/internal/media"
-	"github.com/chang/file_server/internal/thumb"
+	"file_server/internal/media"
+	"file_server/internal/thumb"
 )
 
 func (h *Handler) handleThumb(w http.ResponseWriter, r *http.Request) {

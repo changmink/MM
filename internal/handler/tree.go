@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/chang/file_server/internal/media"
+	"file_server/internal/media"
 )
 
 const maxTreeDepth = 5

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/chang/file_server/internal/media"
+	"file_server/internal/media"
 )
 
 // Pool serializes thumbnail generation through a bounded set of workers so

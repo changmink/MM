@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/chang/file_server/internal/importjob"
+	"file_server/internal/importjob"
 )
 
 // listJobsResponse is the wire shape of GET /api/import-url/jobs. Splitting

@@ -24,7 +24,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chang/file_server/internal/media"
+	"file_server/internal/media"
 )
 
 const (

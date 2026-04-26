@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/chang/file_server/internal/thumb"
+	"file_server/internal/thumb"
 )
 
 func TestBrowse(t *testing.T) {

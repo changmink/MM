@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chang/file_server/internal/convert"
-	"github.com/chang/file_server/internal/media"
+	"file_server/internal/convert"
+	"file_server/internal/media"
 )
 
 const (

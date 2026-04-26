@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/chang/file_server/internal/settings"
+	"file_server/internal/settings"
 )
 
 // newSettingsMux spins up a test server with a backing settings.Store so

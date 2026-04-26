@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/chang/file_server/internal/urlfetch"
+	"file_server/internal/urlfetch"
 )
 
 func newImageHandler(body []byte, contentType string, headerLength int) http.HandlerFunc {

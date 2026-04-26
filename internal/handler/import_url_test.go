@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chang/file_server/internal/importjob"
-	"github.com/chang/file_server/internal/urlfetch"
+	"file_server/internal/importjob"
+	"file_server/internal/urlfetch"
 )
 
 // jpegBody is a minimal JFIF byte sequence — enough for tests; we don't decode it.
