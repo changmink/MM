@@ -531,6 +531,47 @@ func TestRedactURL(t *testing.T) {
 	}
 }
 
+// TestSummarizeURLs locks the panic-recovery tally contract: URLs that
+// already settled as done/cancelled are preserved, and any non-terminal
+// state (pending/running/error/empty) folds into Failed so the recovered
+// summary matches what the user can see in the UI.
+func TestSummarizeURLs(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []importjob.URLState
+		want importjob.Summary
+	}{
+		{
+			"all done",
+			[]importjob.URLState{{Status: "done"}, {Status: "done"}},
+			importjob.Summary{Succeeded: 2},
+		},
+		{
+			"mixed terminal preserves done and cancelled",
+			[]importjob.URLState{{Status: "done"}, {Status: "cancelled"}, {Status: "error"}},
+			importjob.Summary{Succeeded: 1, Cancelled: 1, Failed: 1},
+		},
+		{
+			"non-terminal folds into failed",
+			[]importjob.URLState{{Status: "running"}, {Status: "pending"}, {Status: ""}},
+			importjob.Summary{Failed: 3},
+		},
+		{
+			"empty",
+			nil,
+			importjob.Summary{},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := summarizeURLs(tc.in)
+			if got != tc.want {
+				t.Errorf("summarizeURLs = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestNormalizeURLs_LengthCap drops over-length entries silently so a
 // payload that pads URLs into the registry cannot bloat GET /jobs once
 // J4 ships.
