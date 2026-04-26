@@ -83,9 +83,16 @@ go run ./cmd/server
 | DELETE | `/api/folder?path=` | 폴더 재귀 삭제 |
 | PATCH | `/api/file?path=` | 파일 rename |
 | DELETE | `/api/file?path=` | 파일 삭제 |
-| POST | `/api/import-url?path=` | URL/HLS 다운로드 (SSE) |
+| POST | `/api/import-url?path=` | URL/HLS 다운로드 시작 (SSE 응답에 `register`+`queued`+...) |
+| GET | `/api/import-url/jobs` | 활성·이력 잡 목록 (페이지 새로고침 시 복원용) |
+| GET | `/api/import-url/jobs/{id}/events` | 잡에 라이브 SSE 재구독 (snapshot+events) |
+| POST | `/api/import-url/jobs/{id}/cancel` | 배치 전체 취소 (`?index=N`이면 개별 URL) |
+| DELETE | `/api/import-url/jobs/{id}` | 종료된 잡을 history에서 제거 (활성이면 409) |
+| DELETE | `/api/import-url/jobs?status=finished` | 종료된 잡 일괄 정리 |
 | POST | `/api/convert` | TS → MP4 영구 변환 (SSE) |
 | GET/PATCH | `/api/settings` | 다운로드 설정 |
+
+mutating 라우트(POST·PATCH·DELETE)는 모두 `Origin == Host` 또는 `Sec-Fetch-Site` allowlist를 통과해야 한다. 거부 시 `403 cross_origin` (상세는 SPEC.md §5.3).
 
 스키마 상세는 [SPEC.md §5](SPEC.md#5-api-design).
 
@@ -101,6 +108,7 @@ internal/
   thumb/          이미지·동영상 썸네일 생성 (ffmpeg 프레임 폴백)
   urlfetch/       URL/HLS 다운로드 (SSE 진행 스트림)
   convert/        TS → MP4 ffmpeg remux 러너
+  importjob/      잡 라이프사이클·이벤트 채널·Registry (인메모리)
   settings/       다운로드 설정 영속화
 web/              index.html + app.js + style.css (vanilla)
 ```

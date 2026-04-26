@@ -249,9 +249,16 @@ func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destA
 		defer func() { <-h.importSem }()
 	case <-job.Ctx().Done():
 		// Cancelled before acquiring the semaphore — every URL is reported
-		// cancelled, no Start/Done was ever emitted.
+		// cancelled, no Start/Done was ever emitted. URLs that were already
+		// flipped to "cancelled" by a prior per-URL CancelOne handler keep
+		// their existing event (the handler already published it under
+		// CancelKindPending) — re-emitting here would deliver the same
+		// error("cancelled") twice for the same index.
 		urls := job.Snapshot().URLs
 		for i, u := range urls {
+			if job.URLStatus(i) == "cancelled" {
+				continue
+			}
 			job.UpdateURL(i, func(s *importjob.URLState) {
 				s.Status = "cancelled"
 				s.Error = "cancelled"
@@ -275,8 +282,15 @@ func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destA
 	for i, urlState := range urls {
 		if job.Ctx().Err() != nil {
 			// Batch cancelled mid-flight: mark every remaining URL cancelled
-			// and stop hitting origins.
+			// and stop hitting origins. Skip indices that a prior per-URL
+			// CancelOne handler already flipped to "cancelled" — the handler
+			// owns that lifecycle event and re-emitting here would double-
+			// deliver error("cancelled") for the same index.
 			for j := i; j < len(urls); j++ {
+				if job.URLStatus(j) == "cancelled" {
+					cancelled++
+					continue
+				}
 				u := urls[j].URL
 				job.UpdateURL(j, func(s *importjob.URLState) {
 					s.Status = "cancelled"
