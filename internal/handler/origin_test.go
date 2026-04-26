@@ -25,13 +25,22 @@ func TestSameOrigin_Decision(t *testing.T) {
 		{"different host", "http://evil.example", "", "localhost:8080", false},
 		{"different port", "http://localhost:9000", "", "localhost:8080", false},
 		{"unparseable origin", "://nope", "", "localhost:8080", false},
-		// Sec-Fetch-Site fallback when Origin is absent.
+		// Sec-Fetch-Site fallback when Origin is absent. Allowlist semantics:
+		// only "", "same-origin", and "none" pass.
 		{"no origin, sec-fetch-site cross-site", "", "cross-site", "localhost:8080", false},
 		{"no origin, sec-fetch-site cross-origin", "", "cross-origin", "localhost:8080", false},
 		{"no origin, sec-fetch-site same-origin", "", "same-origin", "localhost:8080", true},
 		{"no origin, sec-fetch-site none", "", "none", "localhost:8080", true},
+		// Allowlist fail-closed cases: same-site (sibling subdomain), unknown
+		// future values, and case-mismatched header values must be rejected.
+		{"no origin, sec-fetch-site same-site", "", "same-site", "localhost:8080", false},
+		{"no origin, sec-fetch-site junk value", "", "garbage", "localhost:8080", false},
+		{"no origin, sec-fetch-site uppercase rejected", "", "Same-Origin", "localhost:8080", false},
 		// Origin present takes precedence over Sec-Fetch-Site.
 		{"matching origin overrides cross-site", "http://localhost:8080", "cross-site", "localhost:8080", true},
+		{"cross-origin origin overrides same-origin fetch-site", "http://evil.example", "same-origin", "localhost:8080", false},
+		// IPv6 host literal — locks the url.Parse round-trip on bracketed hosts.
+		{"ipv6 host match", "http://[::1]:8080", "", "[::1]:8080", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

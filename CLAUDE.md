@@ -2,6 +2,12 @@
 
 Guidance for Claude Code and other AI agents working in this repo. Not product documentation — that is in [README.md](README.md) and [SPEC.md](SPEC.md).
 
+## 언어 규칙
+
+- 모든 소통은 한글로 진행한다.
+- 코드를 제외한 모든 기록은 한글로 남긴다 — 주석, `.md` 파일, 커밋 로그, PR 본문 등.
+- 코드 식별자(함수·변수·타입명)와 라이브러리/도구 이름은 영문 그대로 둔다.
+
 ## Project at a glance
 
 - **개인용 단일 사용자** 로컬 네트워크 미디어 서버. 인증 없음, 동시성 가정 느슨.
