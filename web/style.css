@@ -55,6 +55,10 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   text-align: center;
   color: var(--text-dim);
   transition: border-color 0.2s, background 0.2s;
+  position: sticky;
+  top: var(--header-h);
+  z-index: 5;
+  background: var(--bg);
 }
 .upload-zone.drag-over {
   border-color: var(--accent);
@@ -80,9 +84,11 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   border-right: 1px solid var(--border);
   padding: 12px 8px;
   position: sticky;
+  /* top is set dynamically by syncSidebarSticky() so a tree taller than the
+     viewport pins flush with the viewport bottom. The CSS fallback keeps the
+     sidebar usable when JS is disabled. */
   top: var(--header-h);
-  height: calc(100vh - var(--header-h));
-  overflow-y: auto;
+  align-self: start;
   font-size: 0.95rem;
 }
 .sidebar .tree-empty {
