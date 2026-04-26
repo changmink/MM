@@ -29,8 +29,14 @@ func main() {
 		log.Fatalf("settings: %v", err)
 	}
 
+	// serverCtx is cancelled by SIGINT/SIGTERM. Long-lived background work
+	// (import job registry, future workers) derives from it via WithServerCtx
+	// so graceful shutdown unwinds them cleanly.
+	serverCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
 	mux := http.NewServeMux()
-	h := handler.Register(mux, dataDir, webDir, settingsStore)
+	h := handler.Register(mux, dataDir, webDir, settingsStore, handler.WithServerCtx(serverCtx))
 
 	srv := &http.Server{Addr: ":8080", Handler: mux}
 
@@ -41,14 +47,11 @@ func main() {
 		}
 	}()
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	<-stop
-
+	<-serverCtx.Done()
 	log.Println("shutdown: draining connections")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(shutCtx); err != nil {
 		log.Printf("shutdown: %v", err)
 	}
 	h.Close()

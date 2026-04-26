@@ -634,10 +634,14 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .url-result.hidden { display: none; }
 
 .url-rows { display: flex; flex-direction: column; gap: 8px; }
-/* Divider inserted between successive batches when the user queues more
-   URLs before the current batch finishes. Purely visual — the row groups
-   themselves stay flat in the DOM, distinguished by `data-batch`. */
-.url-batch-divider {
+/* Per-batch header containing the optional position label ("배치 N") and
+   the cancel/dismiss control buttons. Always present so every batch — POST
+   or restored, single or stacked — has a consistent place to issue
+   batch-level actions. */
+.url-batch-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-top: 6px;
   padding-top: 6px;
   border-top: 1px dashed var(--border);
@@ -645,6 +649,51 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   font-size: 0.72rem;
   letter-spacing: 0.02em;
 }
+.url-batch-header:first-child {
+  border-top: none;
+  padding-top: 0;
+  margin-top: 0;
+}
+.url-batch-label { flex: 1; }
+.url-batch-actions { display: inline-flex; gap: 4px; }
+.url-batch-cancel-all,
+.url-batch-dismiss {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.url-batch-cancel-all:hover { color: var(--danger); border-color: var(--danger); }
+.url-batch-dismiss:hover    { color: var(--text); border-color: var(--text); }
+.url-row-cancel {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  margin-left: 4px;
+}
+.url-row-cancel:hover { color: var(--danger); }
+.url-row.status-done .url-row-cancel,
+.url-row.status-error .url-row-cancel {
+  display: none;
+}
+.modal-actions-spacer { flex: 1; }
+.btn-subtle {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 3px;
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.btn-subtle:hover { color: var(--text); border-color: var(--text); }
 .url-row {
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -686,6 +735,12 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .url-row.status-error .url-progress-fill { background: var(--danger); width: 100%; }
 .url-row.status-error .url-row-status { color: var(--danger); }
 .url-row.status-done .url-row-status { color: #16a34a; }
+/* Cancelled is a deliberate user action (per-URL or batch cancel), not a
+   failure — render with the muted text-dim tone instead of the alarming
+   danger red used by status-error. */
+.url-row.status-cancelled .url-progress-fill { background: var(--text-dim); width: 100%; opacity: 0.5; }
+.url-row.status-cancelled .url-row-status { color: var(--text-dim); font-style: italic; }
+.url-row.status-cancelled .url-row-cancel { display: none; }
 
 /* Indeterminate mode: HLS imports have no known total, so the fill
    shuttles left-to-right instead of pinning to 0%. The fixed 40% width
@@ -712,6 +767,9 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .url-summary.status-done { background: #dcfce7; color: #166534; }
 .url-summary.status-error { background: #fee2e2; color: #991b1b; }
 .url-summary.status-mixed { background: #fef3c7; color: #92400e; }
+/* All-cancelled round: neutral gray, no warning tone. Cancellation is
+   user-initiated and shouldn't read as a failure. */
+.url-summary.status-cancelled { background: #f1f5f9; color: var(--text-dim); }
 
 /* Responsive */
 @media (max-width: 600px) {

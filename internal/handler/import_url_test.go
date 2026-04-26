@@ -9,12 +9,15 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/chang/file_server/internal/importjob"
 )
 
 // jpegBody is a minimal JFIF byte sequence — enough for tests; we don't decode it.
@@ -144,19 +147,19 @@ func TestImportURL_SSE_SingleImage_StartDoneSummary(t *testing.T) {
 	events := parseSSEEvents(t, rw.Body.String())
 	phases := phasesOf(events)
 
-	// queued (batch acquires semaphore immediately since nothing is in flight),
-	// start, done (no progress for tiny payload), summary.
-	if !equalSlices(phases, []string{"queued", "start", "done", "summary"}) {
-		t.Fatalf("phases = %v, want [queued start done summary]", phases)
+	// register (per-request job id), queued (batch acquires semaphore immediately
+	// since nothing is in flight), start, done (no progress for tiny payload), summary.
+	if !equalSlices(phases, []string{"register", "queued", "start", "done", "summary"}) {
+		t.Fatalf("phases = %v, want [register queued start done summary]", phases)
 	}
-	if events[1]["name"] != "cat.jpg" || events[1]["type"] != "image" {
-		t.Errorf("start event = %v", events[1])
+	if events[2]["name"] != "cat.jpg" || events[2]["type"] != "image" {
+		t.Errorf("start event = %v", events[2])
 	}
-	if events[2]["name"] != "cat.jpg" || events[2]["path"] != "/cat.jpg" {
-		t.Errorf("done event = %v", events[2])
+	if events[3]["name"] != "cat.jpg" || events[3]["path"] != "/cat.jpg" {
+		t.Errorf("done event = %v", events[3])
 	}
-	if events[3]["succeeded"].(float64) != 1 || events[3]["failed"].(float64) != 0 {
-		t.Errorf("summary = %v, want {1, 0}", events[3])
+	if events[4]["succeeded"].(float64) != 1 || events[4]["failed"].(float64) != 0 {
+		t.Errorf("summary = %v, want {1, 0}", events[4])
 	}
 	if _, err := os.Stat(filepath.Join(root, "cat.jpg")); err != nil {
 		t.Errorf("file missing on disk: %v", err)
@@ -176,14 +179,14 @@ func TestImportURL_SSE_HeaderError_NoStart(t *testing.T) {
 	events := parseSSEEvents(t, rw.Body.String())
 	phases := phasesOf(events)
 
-	if !equalSlices(phases, []string{"queued", "error", "summary"}) {
-		t.Fatalf("phases = %v, want [queued error summary]", phases)
+	if !equalSlices(phases, []string{"register", "queued", "error", "summary"}) {
+		t.Fatalf("phases = %v, want [register queued error summary]", phases)
 	}
-	if events[1]["error"] != "unsupported_content_type" {
-		t.Errorf("error code = %v, want unsupported_content_type", events[1]["error"])
+	if events[2]["error"] != "unsupported_content_type" {
+		t.Errorf("error code = %v, want unsupported_content_type", events[2]["error"])
 	}
-	if events[2]["succeeded"].(float64) != 0 || events[2]["failed"].(float64) != 1 {
-		t.Errorf("summary = %v, want {0, 1}", events[2])
+	if events[3]["succeeded"].(float64) != 0 || events[3]["failed"].(float64) != 1 {
+		t.Errorf("summary = %v, want {0, 1}", events[3])
 	}
 }
 
@@ -193,7 +196,8 @@ func TestImportURL_SSE_Mixed_PartialSuccess(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root, nil)
+	h := Register(mux, root, root, nil)
+	defer h.Close()
 
 	rw := postImport(t, mux, "/", []string{
 		srv.URL + "/ok.jpg",
@@ -203,12 +207,16 @@ func TestImportURL_SSE_Mixed_PartialSuccess(t *testing.T) {
 	events := parseSSEEvents(t, rw.Body.String())
 
 	// Index-grouped expectations: index 0 → start+done, 1 → error, 2 → error, then summary.
-	// The leading `queued` event is batch-scoped (no index) so we skip it here.
+	// The leading `register` (per-request job id) and `queued` (batch-scoped)
+	// events have no index so we skip them here.
 	byIndex := map[int][]string{}
 	var summary map[string]any
-	var sawQueued bool
+	var sawQueued, sawRegister bool
 	for _, e := range events {
 		switch e["phase"] {
+		case "register":
+			sawRegister = true
+			continue
 		case "queued":
 			sawQueued = true
 			continue
@@ -218,6 +226,9 @@ func TestImportURL_SSE_Mixed_PartialSuccess(t *testing.T) {
 		}
 		idx := int(e["index"].(float64))
 		byIndex[idx] = append(byIndex[idx], e["phase"].(string))
+	}
+	if !sawRegister {
+		t.Error("expected a register event, got none")
 	}
 	if !sawQueued {
 		t.Error("expected a queued event, got none")
@@ -236,6 +247,26 @@ func TestImportURL_SSE_Mixed_PartialSuccess(t *testing.T) {
 	}
 	if summary["succeeded"].(float64) != 1 || summary["failed"].(float64) != 2 {
 		t.Errorf("summary = %v, want {1, 2}", summary)
+	}
+
+	// Spec §3.6 status precedence: succeeded ≥ 1 → completed even when other
+	// URLs failed. Lock the rule with an explicit status check.
+	regEv := events[0]
+	jobID, _ := regEv["jobId"].(string)
+	if jobID == "" {
+		t.Fatal("register event missing jobId")
+	}
+	job, ok := h.registry.Get(jobID)
+	if !ok {
+		t.Fatalf("job %q not in registry", jobID)
+	}
+	select {
+	case <-job.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("job did not finish within 2s")
+	}
+	if got := job.Status(); got != importjob.StatusCompleted {
+		t.Errorf("status = %q, want %q (any success → completed)", got, importjob.StatusCompleted)
 	}
 }
 
@@ -279,8 +310,8 @@ func TestImportURL_SSE_AudioSkipsThumbPool(t *testing.T) {
 	rw := postImport(t, mux, "/", []string{srv.URL + "/song.mp3"})
 	events := parseSSEEvents(t, rw.Body.String())
 	phases := phasesOf(events)
-	if !equalSlices(phases, []string{"queued", "start", "done", "summary"}) {
-		t.Fatalf("phases = %v, want [queued start done summary]", phases)
+	if !equalSlices(phases, []string{"register", "queued", "start", "done", "summary"}) {
+		t.Fatalf("phases = %v, want [register queued start done summary]", phases)
 	}
 	// Audio file should land on disk.
 	if _, err := os.Stat(filepath.Join(root, "song.mp3")); err != nil {
@@ -293,9 +324,14 @@ func TestImportURL_SSE_AudioSkipsThumbPool(t *testing.T) {
 	}
 }
 
-func TestImportURL_SSE_ClientCancelled_StopsBatch(t *testing.T) {
-	// Origin counts hits so we can confirm the loop never reaches URLs after
-	// the client disconnects.
+// TestImportURL_HandlerDisconnect_JobContinues asserts the Phase 20 contract:
+// the client closing the SSE stream (or refreshing the tab) does NOT cancel
+// the underlying import job. The handler returns promptly, but the worker
+// keeps draining URLs until summary, and the registry retains the finished
+// job for snapshot/list queries.
+func TestImportURL_HandlerDisconnect_JobContinues(t *testing.T) {
+	// Origin counts hits so we can confirm every URL was attempted even
+	// after the handler returned.
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
@@ -308,24 +344,39 @@ func TestImportURL_SSE_ClientCancelled_StopsBatch(t *testing.T) {
 
 	root := t.TempDir()
 	mux := http.NewServeMux()
-	Register(mux, root, root, nil)
+	h := Register(mux, root, root, nil)
+	defer h.Close() // drains thumbPool + registry.WaitAll for clean t.TempDir cleanup
 
-	// Pre-cancelled context simulates a client that gave up before the handler
-	// dispatched the first fetch.
+	// Cancel the request context after the first frame so we observe a real
+	// disconnect mid-stream rather than a pre-cancelled never-started one.
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	body, _ := json.Marshal(map[string]any{
-		"urls": []string{srv.URL + "/a.jpg", srv.URL + "/b.jpg", srv.URL + "/c.jpg"},
+	rec, wait := postImportStreaming(ctx, t, mux, "/", []string{
+		srv.URL + "/a.jpg", srv.URL + "/b.jpg", srv.URL + "/c.jpg",
 	})
-	req := httptest.NewRequestWithContext(ctx, http.MethodPost,
-		"/api/import-url?path=/", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rw := httptest.NewRecorder()
-	mux.ServeHTTP(rw, req)
+	registerEv := waitForPhase(t, rec, "register")
+	jobID, _ := registerEv["jobId"].(string)
+	if jobID == "" {
+		t.Fatal("register event missing jobId")
+	}
+	cancel()
+	wait() // handler returns when its ctx is cancelled
 
-	if got := hits.Load(); got != 0 {
-		t.Errorf("origin received %d requests, want 0 (handler should have aborted on cancelled ctx)", got)
+	// Wait for the background worker to finish via the registry.
+	job, ok := h.registry.Get(jobID)
+	if !ok {
+		t.Fatalf("job %q not found in registry", jobID)
+	}
+	select {
+	case <-job.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("background job did not finish within 5s after handler disconnect")
+	}
+
+	if got := hits.Load(); got != 3 {
+		t.Errorf("origin received %d requests, want 3 (every URL should be attempted)", got)
+	}
+	if got := job.Status(); got != importjob.StatusCompleted {
+		t.Errorf("job status = %q, want %q", got, importjob.StatusCompleted)
 	}
 }
 
@@ -419,6 +470,50 @@ func TestImportURL_InvalidBody(t *testing.T) {
 	mux.ServeHTTP(rw, req)
 	if rw.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rw.Code)
+	}
+}
+
+// TestRedactURL covers the credential-stripping log helper. The helper is
+// applied inside logFetchError so signed-URL secrets do not bleed into
+// journald or pasted log snippets when an origin fetch fails.
+func TestRedactURL(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"no secrets", "https://host/path", "https://host/path"},
+		{"userinfo stripped", "https://user:pass@host/path", "https://host/path"},
+		{"userinfo only user", "https://alice@host/path", "https://host/path"},
+		{"token query masked", "https://h/x?token=abc", "https://h/x?token=REDACTED"},
+		{"signature masked, other preserved", "https://h/x?Signature=abc&q=z", "https://h/x?Signature=REDACTED&q=z"},
+		{"case-insensitive key match", "https://h/x?TOKEN=abc", "https://h/x?TOKEN=REDACTED"},
+		{"empty url", "", ""},
+		{"unparseable", "://nope", "<unparseable>"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := redactURL(tc.in)
+			if got != tc.want {
+				t.Errorf("redactURL(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNormalizeURLs_LengthCap drops over-length entries silently so a
+// payload that pads URLs into the registry cannot bloat GET /jobs once
+// J4 ships.
+func TestNormalizeURLs_LengthCap(t *testing.T) {
+	huge := strings.Repeat("a", maxImportURLLength+1)
+	out := normalizeURLs([]string{"https://ok", huge, "https://also-ok"})
+	if len(out) != 2 || out[0] != "https://ok" || out[1] != "https://also-ok" {
+		t.Errorf("normalizeURLs = %v, want [https://ok https://also-ok]", out)
+	}
+
+	exact := "https://" + strings.Repeat("b", maxImportURLLength-len("https://"))
+	if got := normalizeURLs([]string{exact}); len(got) != 1 || got[0] != exact {
+		t.Errorf("URL of exact maxImportURLLength dropped unexpectedly")
 	}
 }
 
@@ -583,8 +678,9 @@ func TestImportURL_Queued_EventEmittedOnce(t *testing.T) {
 	events := parseSSEEvents(t, rw.Body.String())
 	phases := phasesOf(events)
 
-	if len(phases) == 0 || phases[0] != "queued" {
-		t.Fatalf("first phase = %v, want leading queued; phases = %v", phases[:min(1, len(phases))], phases)
+	// register precedes queued; queued is the second frame.
+	if len(phases) < 2 || phases[0] != "register" || phases[1] != "queued" {
+		t.Fatalf("phases prefix = %v, want [register queued ...]; phases = %v", phases[:min(2, len(phases))], phases)
 	}
 	var queuedCount int
 	for _, p := range phases {
@@ -596,8 +692,8 @@ func TestImportURL_Queued_EventEmittedOnce(t *testing.T) {
 		t.Fatalf("queued events = %d, want exactly 1", queuedCount)
 	}
 	// The queued payload has no index (batch-scoped).
-	if _, ok := events[0]["index"]; ok {
-		t.Errorf("queued event carries index field, want none: %v", events[0])
+	if _, ok := events[1]["index"]; ok {
+		t.Errorf("queued event carries index field, want none: %v", events[1])
 	}
 }
 
@@ -663,8 +759,8 @@ func TestImportURL_Serialization_TwoBatches(t *testing.T) {
 	waitB()
 
 	phasesB := phasesOf(parseSSEEvents(t, recB.all.String()))
-	if !equalSlices(phasesB, []string{"queued", "start", "done", "summary"}) {
-		t.Errorf("batch B phases = %v, want [queued start done summary]", phasesB)
+	if !equalSlices(phasesB, []string{"register", "queued", "start", "done", "summary"}) {
+		t.Errorf("batch B phases = %v, want [register queued start done summary]", phasesB)
 	}
 }
 
@@ -709,23 +805,34 @@ func TestImportURL_Queued_CanceledWhileWaiting(t *testing.T) {
 		"/", []string{srv.URL + "/hold.jpg"})
 	waitForPhase(t, recA, "start")
 
-	// Batch B queues, then we cancel its context mid-wait.
-	ctxB, cancelB := context.WithCancel(context.Background())
-	recB, waitB := postImportStreaming(ctxB, t, mux,
+	// Batch B queues. Phase 20 contract: handler disconnect alone no longer
+	// aborts the job, so to verify the wait-at-semaphore cancellation path we
+	// reach into the registry and cancel the job directly. (J5 will add an
+	// HTTP endpoint that does this.)
+	recB, waitB := postImportStreaming(context.Background(), t, mux,
 		"/", []string{srv.URL + "/b.jpg"})
+	regEv := waitForPhase(t, recB, "register")
+	bJobID, _ := regEv["jobId"].(string)
+	if bJobID == "" {
+		t.Fatal("batch B register event missing jobId")
+	}
 	waitForPhase(t, recB, "queued")
 
-	cancelB()
+	bJob, ok := h.registry.Get(bJobID)
+	if !ok {
+		t.Fatalf("batch B job %q not in registry", bJobID)
+	}
+	bJob.Cancel()
 	waitB()
 
-	// Batch B should have emitted only the queued event — it never acquired
-	// the semaphore, so neither `start` nor `summary` can have fired.
-	for _, ev := range parseSSEEvents(t, recB.all.String()) {
-		if ev["phase"] != "queued" {
-			t.Errorf("batch B emitted post-queue phase %q after cancel: %v",
-				ev["phase"], ev)
-			break
-		}
+	// B never acquired the semaphore so origin must not see its URL. The
+	// worker exits via the queued-cancel path: error(cancelled) + summary.
+	phasesB := phasesOf(parseSSEEvents(t, recB.all.String()))
+	if len(phasesB) == 0 || phasesB[len(phasesB)-1] != "summary" {
+		t.Errorf("batch B phases = %v, want trailing summary", phasesB)
+	}
+	if bJob.Status() != importjob.StatusCancelled {
+		t.Errorf("batch B status = %q, want %q", bJob.Status(), importjob.StatusCancelled)
 	}
 
 	releaseOnce()
@@ -733,5 +840,82 @@ func TestImportURL_Queued_CanceledWhileWaiting(t *testing.T) {
 
 	if got := hits.Load(); got != 1 {
 		t.Errorf("origin hits = %d, want 1 (batch B must cancel before its URL is fetched)", got)
+	}
+}
+
+// TestImportURL_Register_FirstEvent verifies the POST response leads with a
+// register frame carrying a base32 jobId — the contract that lets a refresh
+// rebind to the same job via GET /api/import-url/jobs/{id}/events.
+func TestImportURL_Register_FirstEvent(t *testing.T) {
+	srv := newOriginServer()
+	defer srv.Close()
+
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	h := Register(mux, root, root, nil)
+	defer h.Close()
+
+	rw := postImport(t, mux, "/", []string{srv.URL + "/cat.jpg"})
+	events := parseSSEEvents(t, rw.Body.String())
+	if len(events) == 0 {
+		t.Fatal("no SSE events emitted")
+	}
+	first := events[0]
+	if first["phase"] != "register" {
+		t.Fatalf("first phase = %v, want register; events = %v", first["phase"], phasesOf(events))
+	}
+	jobID, _ := first["jobId"].(string)
+	if jobID == "" {
+		t.Fatalf("register event missing jobId: %v", first)
+	}
+	if !regexp.MustCompile(`^imp_[a-z2-7]{8}$`).MatchString(jobID) {
+		t.Errorf("jobId %q does not match imp_[a-z2-7]{8}", jobID)
+	}
+	if _, ok := h.registry.Get(jobID); !ok {
+		t.Errorf("jobId %q not registered after POST response", jobID)
+	}
+}
+
+// TestImportURL_TooManyJobs verifies the 100-active-job cap surfaces as a
+// 429 response without consuming the semaphore. Tests poke the registry's
+// internal cap so we don't have to spin up 100 fake batches.
+func TestImportURL_TooManyJobs(t *testing.T) {
+	srv := newOriginServer()
+	defer srv.Close()
+
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	h := Register(mux, root, root, nil)
+	// Pre-filled placeholder jobs have no worker so they would never reach a
+	// terminal state on their own — mark them done before Close so its 5s
+	// WaitAll(grace) returns immediately.
+	defer func() {
+		active, _ := h.registry.List()
+		for _, j := range active {
+			j.SetStatus(importjob.StatusCancelled)
+		}
+		h.Close()
+	}()
+
+	// Pre-fill the registry up to a small cap so the next POST is rejected
+	// without having to actually run anything to completion.
+	const maxJobs = 3
+	for i := 0; i < maxJobs; i++ {
+		_, err := h.registry.Create("/", []string{"https://placeholder/" + strconv.Itoa(i)})
+		if err != nil {
+			t.Fatalf("pre-fill #%d: %v", i, err)
+		}
+	}
+	// Tighten the cap so the next Create returns ErrTooManyJobs without us
+	// having to fill 100 slots. SetMaxQueuedForTesting is a documented test
+	// seam in importjob; production code never calls it.
+	importjob.SetMaxQueuedForTesting(h.registry, maxJobs)
+
+	rw := postImport(t, mux, "/", []string{srv.URL + "/cat.jpg"})
+	if rw.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429; body = %s", rw.Code, rw.Body.String())
+	}
+	if !strings.Contains(rw.Body.String(), "too_many_jobs") {
+		t.Errorf("body = %s, want 'too_many_jobs'", rw.Body.String())
 	}
 }

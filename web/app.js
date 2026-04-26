@@ -63,6 +63,7 @@ const urlSummary    = document.getElementById('url-summary');
 const urlResult     = document.getElementById('url-result');
 const urlCancelBtn  = document.getElementById('url-cancel-btn');
 const urlConfirmBtn = document.getElementById('url-confirm-btn');
+const urlClearFinishedBtn = document.getElementById('url-clear-finished-btn');
 const urlBadge     = document.getElementById('url-badge');
 const convertAllBtn       = document.getElementById('convert-all-btn');
 const convertModal        = document.getElementById('convert-modal');
@@ -661,6 +662,9 @@ const URL_ERROR_LABELS = {
   ffmpeg_error: 'HLS 리먹싱 실패',
   ffmpeg_missing: 'ffmpeg 미설치 (서버 설정 필요)',
   hls_playlist_too_large: 'HLS 플레이리스트 크기 초과',
+  // `cancelled` is handled as a distinct row state (not a failure) — see
+  // handleSSEEvent's error branch and applyURLStateToRow's "cancelled"
+  // case. No dictionary entry needed.
 };
 
 // Each batch captures one in-flight POST /api/import-url. Several batches
@@ -696,6 +700,7 @@ function anyBatchSucceeded() {
 urlImportBtn.addEventListener('click', openURLModal);
 urlCancelBtn.addEventListener('click', closeURLModal);
 urlConfirmBtn.addEventListener('click', submitURLImport);
+urlClearFinishedBtn.addEventListener('click', dismissAllFinishedBatches);
 urlModal.addEventListener('click', e => { if (e.target === urlModal) closeURLModal(); });
 urlBadge.addEventListener('click', openURLModal);
 document.addEventListener('keydown', e => {
@@ -704,25 +709,26 @@ document.addEventListener('keydown', e => {
 });
 
 function openURLModal() {
-  const hasActive = anyBatchActive();
   urlInput.value = '';
   urlError.textContent = '';
   urlError.classList.add('hidden');
 
-  if (!hasActive) {
-    // Fresh start: drop any completed-but-still-listed batches and reset
-    // the row area. Success completions already fired browse() via
-    // maybeFinalize(); failure-only rounds drop their rows here so the
-    // user gets a clean slate to try again.
-    urlBatches.length = 0;
+  // Preserve the modal's contents whenever urlBatches has anything to
+  // show. That includes:
+  //   - active batches (live progress)
+  //   - finished batches restored from bootstrapURLJobs (history rows
+  //     the user can dismiss via "닫기" / "완료 항목 모두 지우기")
+  //   - finished batches still lingering from an in-session error round
+  // Only fully-empty registry counts as a "fresh start" — that's when
+  // maybeFinalize already cleared everything after a successful round
+  // or after the 3-second linger of an error-only round.
+  if (urlBatches.length === 0) {
     urlBadgeLinger = false;
     urlRows.innerHTML = '';
     urlSummary.textContent = '';
     urlSummary.className = 'url-summary hidden';
     urlResult.classList.add('hidden');
   }
-  // When hasActive: keep existing rows / summary visible so the modal
-  // picks up right where the background work is.
 
   urlModal.classList.remove('hidden');
   updateURLBadge();
@@ -756,6 +762,12 @@ function closeURLModal() {
 }
 
 function updateURLBadge() {
+  // The "완료 항목 모두 지우기" button lives inside the modal — keep its
+  // visibility in lockstep with the registry so the user sees it as soon
+  // as a finished batch is available to dismiss.
+  const hasFinished = urlBatches.some(b => b.done);
+  urlClearFinishedBtn.classList.toggle('hidden', !hasFinished);
+
   const modalHidden = urlModal.classList.contains('hidden');
   const shouldShow = modalHidden && (anyBatchActive() || urlBadgeLinger);
   if (!shouldShow) {
@@ -763,10 +775,13 @@ function updateURLBadge() {
     urlBadge.classList.remove('has-error');
     return;
   }
-  // Aggregate completion across every batch still on the registry.
+  // Badge aggregates ONLY active batches (restored or freshly POSTed) so
+  // the running progress bar reflects what's still in flight. Restored
+  // finished batches are background context, not active progress.
   let completed = 0, total = 0, failed = 0;
   for (const b of urlBatches) {
-    completed += b.succeeded + b.failed;
+    if (b.done) continue;
+    completed += b.succeeded + b.failed + (b.cancelled || 0);
     total     += b.total;
     failed    += b.failed;
   }
@@ -776,56 +791,75 @@ function updateURLBadge() {
 }
 
 // maybeFinalize runs whenever a batch settles (normal completion, abort,
-// network error, or HTTP error). When every batch is done it renders an
-// aggregate summary, fires browse() once for success rounds, and tears
-// down the badge / linger state.
+// network error, or HTTP error). It scopes summarization to "this session's
+// round" — batches submitted in this session AND not loaded from the
+// server's history snapshot. Restored batches are backdrop UI; aggregating
+// them into the round summary would mix prior-session results into the
+// current operation's totals.
 function maybeFinalize() {
-  if (anyBatchActive()) return;
-
-  // Nothing to finalize — the HTTP-error path pops its batch before
-  // landing here, so urlBatches may be empty even though we were just
-  // submitting something.
-  if (urlBatches.length === 0) {
+  // Round = batches submitted in this session (restored ones are history).
+  const round = urlBatches.filter(b => !b.restored);
+  if (round.length === 0) {
     updateURLBadge();
     return;
   }
+  if (round.some(b => !b.done)) return;
 
-  // Aggregate per-URL counts across every batch in the current round.
-  let succeeded = 0, failed = 0;
-  for (const b of urlBatches) {
+  let succeeded = 0, failed = 0, cancelled = 0;
+  for (const b of round) {
     succeeded += b.succeeded;
     failed    += b.failed;
+    cancelled += b.cancelled || 0;
   }
-  const cls = failed === 0 ? 'status-done'
-            : succeeded === 0 ? 'status-error'
-            : 'status-mixed';
+
+  // Mirror server status precedence (SPEC §2.6): succeeded≥1 → completed
+  // even if some failed/cancelled; cancelled-only → cancelled; else error.
+  let cls;
+  if (succeeded > 0 && failed === 0 && cancelled === 0)      cls = 'status-done';
+  else if (succeeded > 0)                                    cls = 'status-mixed';
+  else if (failed === 0 && cancelled > 0)                    cls = 'status-cancelled';
+  else                                                       cls = 'status-error';
+
+  const parts = [];
+  if (succeeded > 0) parts.push(`성공 ${succeeded}`);
+  if (failed > 0)    parts.push(`실패 ${failed}`);
+  if (cancelled > 0) parts.push(`취소 ${cancelled}`);
   urlSummary.className = 'url-summary ' + cls;
-  urlSummary.textContent = `성공 ${succeeded}개 · 실패 ${failed}개`;
+  urlSummary.textContent = parts.length > 0 ? parts.join(' · ') : '완료된 항목 없음';
 
   if (succeeded > 0) {
-    // Success: clear the registry so a later close (without reopen)
-    // cannot trigger a second browse(). Badge hides because
-    // anyBatchActive() is now false and linger is off.
-    urlBatches.length = 0;
+    // Success: clear ONLY this round (restored history stays). Browse
+    // refresh will surface the new files; the modal can keep history rows
+    // for the user to dismiss when they want.
+    clearRoundBatches(round);
     urlBadgeLinger = false;
     updateURLBadge();
     browse(currentPath, false);
     return;
   }
 
-  // Error-only round: keep the badge up briefly so the user can still
-  // click it to inspect the errors after they dismissed the modal.
+  // No success (all failed or all cancelled): keep the badge up briefly so
+  // the user can click in to inspect, then clear THIS round (we capture
+  // `round` in closure so a new round started in the meantime is unaffected).
   urlBadgeLinger = true;
   updateURLBadge();
   setTimeout(() => {
-    // Guard: the user may have started a new batch during the grace
-    // window. Only clear if nothing is still running.
-    if (!anyBatchActive()) {
-      urlBatches.length = 0;
-      urlBadgeLinger = false;
-      updateURLBadge();
-    }
+    clearRoundBatches(round);
+    urlBadgeLinger = false;
+    updateURLBadge();
   }, 3000);
+}
+
+// clearRoundBatches tears down the DOM for each batch and removes it from
+// urlBatches, while leaving the rest of the registry alone. Used by
+// maybeFinalize so completed rounds graduate out of the active state but
+// restored history stays visible until the user dismisses it.
+function clearRoundBatches(batches) {
+  for (const b of batches) {
+    removeBatchRows(b);
+    const idx = urlBatches.indexOf(b);
+    if (idx !== -1) urlBatches.splice(idx, 1);
+  }
 }
 
 async function submitURLImport() {
@@ -847,9 +881,10 @@ async function submitURLImport() {
   }
 
   urlError.classList.add('hidden');
-  const appending = anyBatchActive();
-  if (!appending) {
-    // Fresh round: wipe any lingering rows from a prior completed batch.
+  // Wipe DOM only when the registry is truly empty. Restored history (or
+  // a still-clearing prior round) stays visible — clearing them here while
+  // they remain in urlBatches would desync DOM from internal counters.
+  if (urlBatches.length === 0) {
     urlRows.innerHTML = '';
     urlSummary.textContent = '';
     urlSummary.className = 'url-summary hidden';
@@ -858,24 +893,24 @@ async function submitURLImport() {
 
   const batch = {
     id: ++urlBatchSeq,
+    jobId: null,
     rowEls: new Map(),
+    headerEl: null,
     succeeded: 0,
     failed: 0,
+    cancelled: 0,
     total: urls.length,
     done: false,
+    restored: false,
+    eventSource: null,
   };
   urlBatches.push(batch);
 
-  if (appending) {
-    // Visual separator between the previous rows and the new batch. The
-    // label counts by registry position in the current round so users see
-    // "배치 2", "배치 3", ... regardless of the monotonic batch.id value.
-    const divider = document.createElement('div');
-    divider.className = 'url-batch-divider';
-    divider.dataset.batch = String(batch.id);
-    divider.textContent = `배치 ${urlBatches.length}`;
-    urlRows.appendChild(divider);
-  }
+  // Position label counts only current-round batches — restored history
+  // has its own labels ("복원된 배치"/"이전 결과") so it shouldn't bump the
+  // "배치 N" numbering. The first batch in a fresh round gets no label.
+  const roundCount = urlBatches.filter(b => !b.restored).length;
+  appendBatchHeader(batch, roundCount > 1 ? `배치 ${roundCount}` : '');
 
   // Pre-create one pending row per URL so users see immediate feedback even
   // before the first SSE event arrives.
@@ -903,23 +938,16 @@ async function submitURLImport() {
       try { msg = (await res.json()).error || ''; } catch { /* not JSON */ }
       if (!msg) msg = `요청 실패 (${res.status})`;
       showURLError(msg);
-      if (!appending) {
-        // Only this (failed) batch exists in the result area, so hide it
-        // entirely and let the main error banner carry the message.
-        urlResult.classList.add('hidden');
-      } else {
-        // Other batches are still running above. Tear down this batch's
-        // DOM contributions only — pre-created rows and the divider —
-        // so they don't linger as stuck pending placeholders.
-        for (const row of batch.rowEls.values()) row.remove();
-        const divider = urlRows.querySelector(
-          `.url-batch-divider[data-batch="${batch.id}"]`);
-        if (divider) divider.remove();
-      }
-      // Drop the batch from the registry — aggregate counters would
-      // otherwise show a stuck 0/N entry in the badge.
+      // Tear down this batch's DOM regardless — its pre-created rows
+      // would otherwise linger as stuck "대기 중" placeholders. If
+      // nothing else (active or restored) is in the registry, hide the
+      // whole result panel; otherwise leave it visible for siblings.
+      removeBatchRows(batch);
       const idx = urlBatches.indexOf(batch);
       if (idx !== -1) urlBatches.splice(idx, 1);
+      if (urlBatches.length === 0) {
+        urlResult.classList.add('hidden');
+      }
       return;
     }
     // SSE connected. Free the button so the user can queue another batch
@@ -947,6 +975,7 @@ async function submitURLImport() {
     if (sseOpened) finalizeOrphanRows(batch);
     batch.done = true;
     urlSubmittingNow = false;
+    updateBatchControls(batch);
     maybeFinalize();
     updateConfirmButton();
     updateURLBadge();
@@ -959,7 +988,9 @@ async function submitURLImport() {
 // terminal events for every URL.
 function finalizeOrphanRows(batch) {
   for (const row of batch.rowEls.values()) {
-    if (row.classList.contains('status-done') || row.classList.contains('status-error')) {
+    if (row.classList.contains('status-done') ||
+        row.classList.contains('status-error') ||
+        row.classList.contains('status-cancelled')) {
       continue;
     }
     row.classList.remove('url-row-indeterminate');
@@ -1008,22 +1039,68 @@ function ensureURLRow(batch, index, fallbackUrl) {
     <div class="url-row-head">
       <span class="url-row-name">${esc(fallbackUrl || '')}</span>
       <span class="url-row-status">대기 중</span>
+      <button class="url-row-cancel" type="button" aria-label="이 URL 취소" title="취소">✕</button>
     </div>
     <div class="url-progress-bar"><div class="url-progress-fill"></div></div>
   `;
+  // CSS hides this on terminal states; clicks before that fire a per-URL
+  // cancel against the server. We let SSE drive the visible state change so
+  // a network failure cleanly leaves the button intact for retry.
+  row.querySelector('.url-row-cancel')
+    .addEventListener('click', () => cancelURLAt(batch, index));
   urlRows.appendChild(row);
   batch.rowEls.set(index, row);
   return row;
 }
 
 function setRowStatus(row, statusClass, statusText) {
-  row.classList.remove('status-pending', 'status-downloading', 'status-done', 'status-error');
+  row.classList.remove('status-pending', 'status-downloading', 'status-done', 'status-error', 'status-cancelled');
   row.classList.add(statusClass);
   row.querySelector('.url-row-status').textContent = statusText;
 }
 
 function handleSSEEvent(batch, ev) {
   switch (ev.phase) {
+    case 'register': {
+      // First frame on POST responses — server hands us the jobId so a
+      // refresh can rebind via GET /jobs/{id}/events. Restored batches
+      // already have jobId from the bootstrap fetch and never see this
+      // phase. Once we have jobId the per-batch cancel/dismiss controls
+      // become meaningful, so refresh their visibility.
+      if (!batch.jobId) batch.jobId = ev.jobId;
+      updateBatchControls(batch);
+      break;
+    }
+    case 'snapshot': {
+      // First frame on EventSource subscriptions — re-apply server state
+      // to every row. Idempotent: if bootstrapURLJobs already restored
+      // the rows from GET /jobs, this just overwrites with the same
+      // values. The job inside `ev` mirrors the JobSnapshot wire shape.
+      applyJobSnapshotToBatch(batch, ev.job);
+      // Race window: the job may have transitioned to terminal between
+      // bootstrap's GET /jobs and our subscribe. The server's stream
+      // closes cleanly in that case (Subscribe pre-closes the channel
+      // for terminal jobs and never publishes summary), so without this
+      // guard the browser's default EventSource auto-reconnect would
+      // spin against a finished job every ~3s — wasting connections and
+      // re-encoding the same snapshot indefinitely. Detect the terminal
+      // status here and finalize locally just like the live summary
+      // path would have.
+      const status = ev.job && ev.job.status;
+      if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+        if (batch.eventSource) {
+          batch.eventSource.close();
+          batch.eventSource = null;
+        }
+        if (!batch.done) {
+          batch.done = true;
+          updateBatchControls(batch);
+          maybeFinalize();
+          updateURLBadge();
+        }
+      }
+      break;
+    }
     case 'queued': {
       // Server accepted the POST but has not yet acquired the batch
       // semaphore — another batch is still running. Flip this batch's
@@ -1078,9 +1155,17 @@ function handleSSEEvent(batch, ev) {
     case 'error': {
       const row = ensureURLRow(batch, ev.index, ev.url);
       row.classList.remove('url-row-indeterminate');
-      const label = URL_ERROR_LABELS[ev.error] || ev.error || '알 수 없는 오류';
-      setRowStatus(row, 'status-error', '실패 · ' + label);
-      batch.failed++;
+      // Cancellation is a deliberate user action, not a failure — render
+      // it with the dedicated status-cancelled class (muted) and bump
+      // the cancelled counter so summary text and badge reflect intent.
+      if (ev.error === 'cancelled') {
+        setRowStatus(row, 'status-cancelled', '취소됨');
+        batch.cancelled = (batch.cancelled || 0) + 1;
+      } else {
+        const label = URL_ERROR_LABELS[ev.error] || ev.error || '알 수 없는 오류';
+        setRowStatus(row, 'status-error', '실패 · ' + label);
+        batch.failed++;
+      }
       updateURLBadge();
       break;
     }
@@ -1089,6 +1174,19 @@ function handleSSEEvent(batch, ev) {
       // batches possibly in flight, consecutive summaries would overwrite
       // each other unpredictably. maybeFinalize() aggregates across every
       // batch in the round once the last one settles.
+      //
+      // For EventSource-subscribed batches (restored via bootstrap or a
+      // second tab) the POST submitURLImport finally never runs, so we
+      // close the stream and finalize here instead. POST-driven batches
+      // have no eventSource and fall through — their finally handles it.
+      if (batch.eventSource) {
+        batch.eventSource.close();
+        batch.eventSource = null;
+        batch.done = true;
+        updateBatchControls(batch);
+        maybeFinalize();
+        updateURLBadge();
+      }
       break;
     }
   }
@@ -1097,6 +1195,299 @@ function handleSSEEvent(batch, ev) {
 function showURLError(msg) {
   urlError.textContent = msg;
   urlError.classList.remove('hidden');
+}
+
+// ── Background job bootstrap / fan-out subscription (Phase 20 J4) ────────────
+// On every page load we ask the server which import jobs are alive, restore
+// rows for them, and (for active jobs) attach an EventSource so live progress
+// keeps flowing into the same UI the POST flow uses. A second tab opening
+// the page sees the same jobs with no extra ceremony.
+
+async function bootstrapURLJobs() {
+  let body;
+  try {
+    const res = await fetch('/api/import-url/jobs');
+    if (!res.ok) return;
+    body = await res.json();
+  } catch (e) {
+    // Network or parse failure: silently fall through. The user sees no
+    // restored progress, but the rest of the app still works.
+    console.warn('bootstrapURLJobs failed', e);
+    return;
+  }
+  const active = Array.isArray(body.active) ? body.active : [];
+  const finished = Array.isArray(body.finished) ? body.finished : [];
+  if (active.length === 0 && finished.length === 0) return;
+
+  // Render finished first so they sit at the top of the result area —
+  // active progress rows naturally land below as the user-current focus.
+  for (const job of finished) restoreJobBatch(job, false);
+  for (const job of active) restoreJobBatch(job, true);
+
+  if (urlBatches.length > 0) {
+    urlResult.classList.remove('hidden');
+  }
+  updateConfirmButton();
+  updateURLBadge();
+}
+
+// restoreJobBatch builds a batch from a server JobSnapshot and renders one
+// row per URL with the correct status/progress already applied. Restored
+// batches carry restored=true so they don't fold into the current session's
+// summary aggregation (see maybeFinalize) — they are backdrop history that
+// the user can dismiss when they want.
+function restoreJobBatch(jobSnap, isActive) {
+  const batch = {
+    id: ++urlBatchSeq,
+    jobId: jobSnap.id,
+    rowEls: new Map(),
+    headerEl: null,
+    succeeded: 0,
+    failed: 0,
+    cancelled: 0,
+    total: jobSnap.urls.length,
+    done: !isActive,
+    restored: true,
+    eventSource: null,
+  };
+  urlBatches.push(batch);
+
+  // Synthetic tag distinguishes restored rows from freshly submitted ones.
+  appendBatchHeader(batch, isActive ? '복원된 배치' : '이전 결과');
+
+  jobSnap.urls.forEach((u, i) => {
+    const row = ensureURLRow(batch, i, u.url);
+    applyURLStateToRow(row, u);
+    if (u.status === 'done')           batch.succeeded++;
+    else if (u.status === 'error')     batch.failed++;
+    else if (u.status === 'cancelled') batch.cancelled++;
+  });
+
+  if (isActive) subscribeToJob(batch);
+}
+
+// applyURLStateToRow reflects a server URLState onto an existing DOM row.
+// Used both by the bootstrap restore path and by the EventSource snapshot
+// frame for late subscribers — the operation is idempotent.
+function applyURLStateToRow(row, u) {
+  row.querySelector('.url-row-name').textContent = u.name || u.url;
+  const total = Number(u.total) || 0;
+  row.dataset.total = String(total);
+  row.classList.toggle('url-row-indeterminate', total === 0 && u.status === 'running');
+  const fill = row.querySelector('.url-progress-fill');
+  switch (u.status) {
+    case 'pending':
+      setRowStatus(row, 'status-pending', '대기 중');
+      fill.style.width = '0%';
+      break;
+    case 'running': {
+      if (total > 0) {
+        const received = Number(u.received) || 0;
+        const pct = Math.min(100, (received / total) * 100);
+        fill.style.width = pct.toFixed(1) + '%';
+        setRowStatus(row, 'status-downloading',
+          `${formatSize(received)} / ${formatSize(total)} · ${Math.floor(pct)}%`);
+      } else {
+        setRowStatus(row, 'status-downloading', formatSize(Number(u.received) || 0));
+      }
+      break;
+    }
+    case 'done': {
+      fill.style.width = '100%';
+      const warn = (u.warnings && u.warnings.length > 0) ? ` · ${u.warnings.join(', ')}` : '';
+      setRowStatus(row, 'status-done', `완료 (${formatSize(Number(u.received) || 0)})${warn}`);
+      break;
+    }
+    case 'cancelled':
+      setRowStatus(row, 'status-cancelled', '취소됨');
+      break;
+    case 'error': {
+      const label = URL_ERROR_LABELS[u.error] || u.error || '알 수 없는 오류';
+      setRowStatus(row, 'status-error', '실패 · ' + label);
+      break;
+    }
+  }
+}
+
+// applyJobSnapshotToBatch is the EventSource analogue: re-apply the server
+// snapshot to every row in the batch AND recompute the batch's terminal
+// counters. The recompute is essential — the snapshot is authoritative,
+// and a job that finished between bootstrap's GET /jobs and our subscribe
+// would otherwise leave succeeded/failed/cancelled at the bootstrap-time
+// values, undercounting the badge and summary aggregations downstream.
+function applyJobSnapshotToBatch(batch, job) {
+  if (!job || !Array.isArray(job.urls)) return;
+  let succeeded = 0, failed = 0, cancelled = 0;
+  job.urls.forEach((u, i) => {
+    const row = ensureURLRow(batch, i, u.url);
+    applyURLStateToRow(row, u);
+    if (u.status === 'done')           succeeded++;
+    else if (u.status === 'error')     failed++;
+    else if (u.status === 'cancelled') cancelled++;
+  });
+  batch.succeeded = succeeded;
+  batch.failed = failed;
+  batch.cancelled = cancelled;
+}
+
+// removeBatchRows tears down every DOM contribution this batch made — the
+// per-URL rows and the header. Used by HTTP-error rollback, dismiss, and
+// the J5 removed phase handler.
+function removeBatchRows(batch) {
+  for (const row of batch.rowEls.values()) row.remove();
+  batch.rowEls.clear();
+  if (batch.headerEl) {
+    batch.headerEl.remove();
+    batch.headerEl = null;
+  }
+}
+
+// appendBatchHeader creates the per-batch label + control bar and inserts
+// it ahead of the rows. Always called once per batch (POST or restored) so
+// the user has a consistent place to issue batch-level cancel / dismiss.
+function appendBatchHeader(batch, label) {
+  const header = document.createElement('div');
+  header.className = 'url-batch-header';
+  header.dataset.batch = String(batch.id);
+
+  const labelEl = document.createElement('span');
+  labelEl.className = 'url-batch-label';
+  labelEl.textContent = label || '';
+  header.appendChild(labelEl);
+
+  const actions = document.createElement('span');
+  actions.className = 'url-batch-actions';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'url-batch-cancel-all hidden';
+  cancelBtn.textContent = '전체 취소';
+  cancelBtn.addEventListener('click', () => cancelBatchAll(batch));
+  actions.appendChild(cancelBtn);
+
+  const dismissBtn = document.createElement('button');
+  dismissBtn.type = 'button';
+  dismissBtn.className = 'url-batch-dismiss hidden';
+  dismissBtn.textContent = '닫기';
+  dismissBtn.addEventListener('click', () => dismissBatch(batch));
+  actions.appendChild(dismissBtn);
+
+  header.appendChild(actions);
+  urlRows.appendChild(header);
+  batch.headerEl = header;
+  updateBatchControls(batch);
+}
+
+// updateBatchControls flips the cancel/dismiss buttons based on whether
+// the batch is still active. Called from header creation, summary, and
+// HTTP-error finalize paths so the visible state never lags reality.
+function updateBatchControls(batch) {
+  if (!batch.headerEl) return;
+  const cancelBtn = batch.headerEl.querySelector('.url-batch-cancel-all');
+  const dismissBtn = batch.headerEl.querySelector('.url-batch-dismiss');
+  // Without a server-issued jobId we have nothing to call — hide both
+  // controls. The POST flow lands jobId in `register`, so the gap is at
+  // most a single round-trip.
+  const hasJobId = !!batch.jobId;
+  cancelBtn.classList.toggle('hidden', batch.done || !hasJobId);
+  dismissBtn.classList.toggle('hidden', !batch.done || !hasJobId);
+}
+
+// cancelURLAt fires a per-URL cancel against the server. The visible row
+// state updates via the SSE error("cancelled") frame the worker emits in
+// response — keeping a single source of truth for state transitions.
+async function cancelURLAt(batch, index) {
+  if (!batch.jobId) return;
+  try {
+    await fetch(
+      '/api/import-url/jobs/' + encodeURIComponent(batch.jobId) +
+      '/cancel?index=' + encodeURIComponent(String(index)),
+      { method: 'POST' });
+  } catch (e) {
+    console.warn('cancel url failed', e);
+  }
+}
+
+async function cancelBatchAll(batch) {
+  if (!batch.jobId) return;
+  try {
+    await fetch(
+      '/api/import-url/jobs/' + encodeURIComponent(batch.jobId) + '/cancel',
+      { method: 'POST' });
+  } catch (e) {
+    console.warn('cancel batch failed', e);
+  }
+}
+
+async function dismissBatch(batch) {
+  if (!batch.jobId || !batch.done) return;
+  try {
+    const res = await fetch(
+      '/api/import-url/jobs/' + encodeURIComponent(batch.jobId),
+      { method: 'DELETE' });
+    if (!res.ok) return;
+  } catch (e) {
+    console.warn('dismiss failed', e);
+    return;
+  }
+  removeBatchRows(batch);
+  if (batch.eventSource) {
+    batch.eventSource.close();
+    batch.eventSource = null;
+  }
+  const idx = urlBatches.indexOf(batch);
+  if (idx !== -1) urlBatches.splice(idx, 1);
+  updateURLBadge();
+}
+
+async function dismissAllFinishedBatches() {
+  try {
+    const res = await fetch('/api/import-url/jobs?status=finished',
+      { method: 'DELETE' });
+    if (!res.ok) return;
+  } catch (e) {
+    console.warn('dismiss-all failed', e);
+    return;
+  }
+  // Server tore down every terminal job — mirror that locally. Active
+  // batches stay (they were already excluded by the filter).
+  const remaining = [];
+  for (const batch of urlBatches) {
+    if (batch.done) {
+      removeBatchRows(batch);
+      if (batch.eventSource) {
+        batch.eventSource.close();
+        batch.eventSource = null;
+      }
+      continue;
+    }
+    remaining.push(batch);
+  }
+  urlBatches.length = 0;
+  urlBatches.push(...remaining);
+  updateURLBadge();
+}
+
+// subscribeToJob opens an EventSource against /api/import-url/jobs/{id}/events
+// and routes every frame through the existing handleSSEEvent path. The
+// EventSource is closed explicitly on summary so the auto-reconnect default
+// does not waste a round-trip on a finished job.
+function subscribeToJob(batch) {
+  if (!batch.jobId) return;
+  const es = new EventSource('/api/import-url/jobs/' + encodeURIComponent(batch.jobId) + '/events');
+  batch.eventSource = es;
+  es.onmessage = e => {
+    let ev;
+    try { ev = JSON.parse(e.data); }
+    catch (err) { console.warn('bad sse frame', e.data, err); return; }
+    handleSSEEvent(batch, ev);
+  };
+  es.onerror = () => {
+    // EventSource auto-reconnects on transient failures. We close
+    // explicitly only after summary was processed (in handleSSEEvent),
+    // so an onerror here means a real network drop. Let the browser
+    // retry; if the server is back we resync via the snapshot frame.
+  };
 }
 
 // ── TS → MP4 변환 ─────────────────────────────────────────────────────────────
@@ -1868,3 +2259,7 @@ syncToolbarUI();
 const initPath = new URLSearchParams(location.search).get('path') || '/';
 browse(initPath, false);
 loadTree();
+// Restore in-progress URL imports from the server (Phase 20 J4). Independent
+// of browse/tree — safe to fire-and-forget; the badge appears asynchronously
+// when the response arrives.
+bootstrapURLJobs();
