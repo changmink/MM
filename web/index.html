@@ -49,6 +49,11 @@
           <option value="date:asc">수정일 ↑</option>
           <option value="date:desc">수정일 ↓</option>
         </select>
+        <label id="select-all-wrap" class="select-all-wrap">
+          <input type="checkbox" id="select-all-files">
+          <span id="selection-summary">선택 0개</span>
+        </label>
+        <button id="clear-selection-btn" class="clear-selection-btn" type="button" hidden>선택 해제</button>
         <button id="convert-all-btn" class="convert-all-btn" type="button" hidden></button>
       </div>
 
@@ -166,6 +171,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=27"></script>
+  <script src="/app.js?v=28"></script>
 </body>
 </html>

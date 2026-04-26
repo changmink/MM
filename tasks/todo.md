@@ -158,3 +158,11 @@
 - [x] TFV-2: `web/app.js` — `syncSidebarSticky()` 추가, `top = headerH - max(0, sidebarH - (viewportH - headerH))` 계산. `loadTree()` / `toggleNode()` 끝, `window.resize`, `ResizeObserver(sidebar)` 에서 호출. 모바일에서는 인라인 `top` 제거. `app.js?v=26→27`.
 - [x] TFV-3: chromedp 기반 e2e 테스트 — `internal/handler/web_sticky_e2e_test.go` 2개 시나리오(짧은 트리: 사이드바·업로드 존 pin / 긴 트리: 첫 노드 페이지 상단 가시 + 마지막 노드 페이지 하단 스크롤 후 가시). `go.mod` 에 `github.com/chromedp/chromedp` 추가. Chrome 부재 시 ExecAllocator 가 자체 에러로 빠진다.
 - [x] TFV-4: `SPEC.md §2.5` 한 줄 추가 + 본 todo entry.
+
+## Phase 22 — 다중 파일 선택 이동 UI (`feature/multi-file-move-ui`) — spec [`spec-multi-file-move-ui.md`](./spec-multi-file-move-ui.md)
+
+- [x] MSM-1: SPEC.md + tasks/spec-multi-file-move-ui.md + todo entry 작성
+- [x] MSM-2: 툴바 전체 선택/선택 해제 UI + visible 파일 기준 선택 상태 관리
+- [x] MSM-3: 카드/테이블 개별 체크박스 + 선택 상태 스타일
+- [x] MSM-4: 선택 묶음 drag payload + 기존 drop target에서 순차 move 처리
+- [x] MSM-5: 회귀 테스트 및 Docker Compose API 검증
