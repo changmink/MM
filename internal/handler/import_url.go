@@ -221,10 +221,19 @@ func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destA
 		if rec := recover(); rec != nil {
 			slog.Error("import worker panic",
 				"jobId", job.ID, "panic", rec, "stack", string(debug.Stack()))
-			urls := job.Snapshot().URLs
-			job.SetSummary(importjob.Summary{Failed: len(urls)})
+			// Re-tally from URLState so already-emitted done frames stay
+			// honored. Counting every URL as failed would contradict the
+			// per-row UI (which still shows "완료") and the files already on
+			// disk. Anything not in a terminal URLState lands in failed —
+			// the panic interrupted the worker mid-flight and we cannot
+			// know which way pending/running URLs would have gone.
+			sum := summarizeURLs(job.Snapshot().URLs)
+			job.SetSummary(sum)
 			job.Publish(mustEvent("summary", sseSummary{
-				Phase: "summary", Failed: len(urls),
+				Phase:     "summary",
+				Succeeded: sum.Succeeded,
+				Failed:    sum.Failed,
+				Cancelled: sum.Cancelled,
 			}))
 			job.SetStatus(importjob.StatusFailed)
 		}
@@ -481,20 +490,29 @@ func logFetchError(u string, ferr *urlfetch.FetchError) {
 }
 
 // sensitiveQueryKeys lists query parameters whose value the URL redactor
-// strips before logging. The match is case-insensitive and is intentionally
-// narrow — broad redaction would obscure useful diagnostic info on benign
-// origins.
+// strips before logging. Match is case-insensitive (lookup lowercases the
+// key, so entries here MUST be lowercase). Intentionally narrow — broad
+// redaction would obscure useful diagnostic info on benign origins.
+// Hyphenated and snake_case variants are listed separately because URL
+// query keys are not normalized.
 var sensitiveQueryKeys = map[string]struct{}{
-	"token":         {},
-	"access_token":  {},
-	"signature":     {},
-	"sig":           {},
+	// Generic auth tokens.
+	"token":        {},
+	"access_token": {},
+	"auth":         {},
+	// Signed-URL signatures.
+	"signature":       {},
+	"sig":             {},
 	"x-amz-signature": {},
-	"key":           {},
-	"apikey":        {},
-	"api_key":       {},
-	"password":      {},
-	"secret":        {},
+	"signed_url":      {},
+	"presigned_url":   {},
+	// API keys.
+	"key":     {},
+	"apikey":  {},
+	"api_key": {},
+	// Generic credentials.
+	"password": {},
+	"secret":   {},
 }
 
 // redactURL strips userinfo and masks values for query parameters that look
@@ -544,6 +562,26 @@ func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, payload any) {
 	}
 	fmt.Fprintf(w, "data: %s\n\n", data)
 	flusher.Flush()
+}
+
+// summarizeURLs counts URLState entries by terminal status. Used by the
+// runImportJob panic-recovery path so the summary reported to the client
+// matches the per-row UI: every already-emitted done/error/cancelled stays
+// honored, anything still pending/running lands in failed (the panic
+// interrupted the worker before it could resolve them either way).
+func summarizeURLs(urls []importjob.URLState) importjob.Summary {
+	var sum importjob.Summary
+	for _, u := range urls {
+		switch u.Status {
+		case "done":
+			sum.Succeeded++
+		case "cancelled":
+			sum.Cancelled++
+		default:
+			sum.Failed++
+		}
+	}
+	return sum
 }
 
 // mustEvent marshals payload into a importjob.Event with the given phase.
