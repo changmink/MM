@@ -1,5 +1,6 @@
 # IDE / tooling
 .claude/settings.local.json
+.codex
 .idea/
 .vscode/
 
