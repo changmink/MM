@@ -20,6 +20,13 @@ export function setVisibleFilePaths(v) { visibleFilePaths = v; }
 export let lbIndex = 0;
 export function setLbIndex(v) { lbIndex = v; }
 
+// 동영상 라이트박스가 들고 있는 현재 entry path. 이미지는 imageEntries[lbIndex]로
+// 충분하지만 동영상은 prev/next가 없어 인덱스 추적이 없으므로 별도 보관.
+// 라이트박스 닫힘 트리거에서 반드시 null로 리셋해 다음 이미지 라이트박스에서
+// stale path가 살아남지 않게 한다.
+export let lbCurrentVideoPath = null;
+export function setLbCurrentVideoPath(v) { lbCurrentVideoPath = v; }
+
 export let playlist = [];       // audio playlist (visible set)
 export function setPlaylist(v) { playlist = v; }
 

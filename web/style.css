@@ -520,7 +520,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   max-height: 90vh;
   border-radius: 4px;
 }
-.lb-close, .lb-prev, .lb-next {
+.lb-close, .lb-delete, .lb-prev, .lb-next {
   position: absolute;
   background: rgba(255,255,255,0.1);
   border: none;
@@ -535,8 +535,9 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   justify-content: center;
   transition: background 0.2s;
 }
-.lb-close:hover, .lb-prev:hover, .lb-next:hover { background: rgba(255,255,255,0.25); }
-.lb-close { top: 16px; right: 16px; }
+.lb-close:hover, .lb-delete:hover, .lb-prev:hover, .lb-next:hover { background: rgba(255,255,255,0.25); }
+.lb-close  { top: 16px; right: 16px; }
+.lb-delete { top: 16px; right: 72px; }
 .lb-prev { left: 16px; top: 50%; transform: translateY(-50%); }
 .lb-next { right: 16px; top: 50%; transform: translateY(-50%); }
 
