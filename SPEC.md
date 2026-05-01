@@ -190,6 +190,7 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
 - [ ] **TS → MP4 변환 트리거** (§2.3.3): 동영상 카드별 "MP4로 변환" 버튼 + 현재 폴더 일괄 변환 버튼 + 진행 모달(URL import 모달과 동일한 SSE 진행 바 스타일)
 - [ ] **사이드바 sticky-until-bottom + 업로드 존 sticky**: 사이드바는 콘텐츠 자연 높이로 자라며 `syncSidebarSticky()` 가 sticky `top` 을 동적으로 계산해, 트리가 길어도 페이지 스크롤만으로 마지막 노드까지 닿게 한다(내부 overflow 스크롤 없음). 업로드 존은 헤더 바로 아래에 sticky 로 고정되어 본문 스크롤 중에도 항상 보인다. 모바일(<600px) 드로어 동작은 그대로. 상세: [`tasks/spec-tree-full-visible.md`](tasks/spec-tree-full-visible.md).
 - [ ] **다중 파일 선택 이동**: 파일 카드/테이블 행에서 체크박스로 파일을 선택하고, 툴바에서 현재 필터/검색을 통과한 visible 파일 전체를 선택/해제할 수 있다. 선택된 파일 중 하나를 사이드바 폴더 또는 breadcrumb 경로로 드래그하면 선택 묶음을 기존 `PATCH /api/file {"to": ...}` API로 순차 이동한다. 선택이 없거나 선택되지 않은 파일을 드래그하면 기존 단일 파일 이동 동작을 유지한다. 폴더는 선택 대상에서 제외한다. 상세: [`tasks/spec-multi-file-move-ui.md`](tasks/spec-multi-file-move-ui.md).
+- [ ] **Rubber-band 영역 선택** (§2.5.4)
 
 ### 2.5.1 파일 용량 표시
 
@@ -305,6 +306,43 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
 - GIF duration 서버 측 추출 — 본 기능은 서버 무변경 원칙. 필요해지면 별도 Phase.
 - 움짤 전용 뷰(섹션 병합, 자동재생 미리보기 등).
 - 움짤 조건 커스터마이징 (50MB / 30s 상수, 사용자 설정 없음).
+
+**서버 변경:** 없음.
+
+### 2.5.4 Rubber-band 영역 선택
+
+빈 영역에서 시작한 마우스 드래그로 사각형을 그려 그 안의 카드/행을 일괄 선택한다. Phase 22의 다중 선택 인프라(`selectedPaths`, [`tasks/spec-multi-file-move-ui.md`](tasks/spec-multi-file-move-ui.md))를 그대로 활용 — 별도 selection 상태 도입 안 함.
+
+**활성화 조건:**
+- mousedown이 카드/행/버튼/링크/체크박스/모달/라이트박스가 아닌 **빈 영역**에서 시작.
+- **데스크톱 (>600px) 한정** — 모바일/터치는 기존 체크박스 UX 유지.
+- 좌클릭(`button === 0`)만 — 우클릭·중클릭은 무시.
+
+**상호작용:**
+- mousedown → 시작점 + 기존 selection 스냅샷 기록.
+- mousemove **5px 초과** 이동 → 반투명 overlay 생성, 시작점부터 커서까지의 사각형 그림. (5px 이하 이동은 click으로 간주해 selection 미변경.)
+- 드래그 중 → 사각형과 **교차**(intersect)하는 visible 카드/행을 `selectedPaths`에 실시간 반영.
+- mouseup → overlay 제거, selection 확정.
+- ESC → 드래그 중단 + **mousedown 시점 selection 스냅샷으로 복원**.
+
+**Modifier 키:**
+- 기본(modifier 없음) → 드래그 시작 시 selection **대체** (시작 시 클리어 후 사각형 결과 적용).
+- Ctrl 또는 Shift+드래그 → 기존 selection **유지 + 사각형이 잡은 항목 추가** (additive only — 사각형이 줄어들어도 한 번 들어온 항목은 빠지지 않음).
+
+**대상:**
+- 이미지 그리드 / 비디오 그리드 / 테이블 행. **visible 항목만** — 필터로 가려진 항목은 사각형이 덮어도 미선택.
+- 폴더 카드는 selection 정책상 제외(§2.1.3) — `bindEntrySelection`이 이미 차단.
+
+**시각:**
+- overlay는 `position: absolute`, 반투명 accent 색 배경 + 1px solid border. main 영역 안에서만 그려져 사이드바·헤더·툴바 위로 안 넘침.
+- 드래그 중 텍스트 선택 차단(`user-select: none`).
+
+**Non-goals:**
+- 모바일/터치 long-press + drag.
+- 사이드바 트리에서의 영역 선택.
+- 키보드 화살표 + Shift 범위 선택.
+- 드래그 중 viewport 자동 스크롤(사각형이 viewport 끝에 닿을 때 자동 따라감) — 별도 phase.
+- 사각형이 줄어들 때 toggle off (additive only 정책 일관).
 
 **서버 변경:** 없음.
 

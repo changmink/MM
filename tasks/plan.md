@@ -3690,3 +3690,91 @@ PJ1과 PJ2는 leaf로 병렬 가능. PJ3는 PJ1+PJ2가 모두 끝나야 시작. 
 - **위험: 큰 PNG (수십 MB) 디코드 메모리** — `imaging.Open` 은 전체 이미지를 메모리에 올린다. 단일 사용자 가정 + 일반 사진 크기에서 문제 없음. 4K 스크린샷도 ~50MB RAM. 별도 cap 도입 안 함.
 - **롤백:** Phase 25 머지 단위로 revert → Phase 24 상태 복귀. settings.json 의 `auto_convert_png_to_jpg` 키는 남지만 서버가 무시(미지의 필드는 `DisallowUnknownFields`로 PATCH 거부 — 실제로는 GET/디스크 로드는 허용이라 무해). 기존 사용자 PNG 파일은 변환 안 됨(자동 변환은 신규 업로드부터만 적용된 상태였음). 데이터 손실 없음.
 
+## Phase 27 — Rubber-band 영역 선택 (`feature/drag-select`)
+
+**Spec:** [SPEC.md §2.5.4](../SPEC.md) (Rubber-band 영역 선택)
+
+빈 영역에서 시작한 마우스 드래그로 사각형을 그려 그 안의 visible 카드를 일괄 선택한다. Phase 22의 `selectedPaths` 인프라를 그대로 활용 — 별도 selection 상태 미도입. 백엔드 변경 없음.
+
+**의존 그래프**
+
+```
+  state.js (selectedPaths)         ─┐
+  browse.js (.thumb-card / tr)     ─┼→ 신규 web/dragSelect.js ─→ DOM overlay
+  main.js (wire)                   ─┘
+```
+
+selection 변경 → `setSelected` → `renderView` → 카드 `.selected` 클래스 갱신 (기존 흐름 그대로).
+
+**범위**
+- 변경 파일: 신규 `web/dragSelect.js`, 수정 `web/main.js`(wire), `web/style.css`(overlay 스타일), `web/index.html`(버전 bump).
+- 변경 없음: 백엔드 전부 / browse.js / state.js / fileOps.js (드래그 이동 로직 무영향).
+
+### DS-1 — SPEC + plan + todo (선행 커밋)
+
+**파일:** `SPEC.md`, `tasks/plan.md`, `tasks/todo.md`
+
+- SPEC.md §2.5.4 신설(활성 조건/상호작용/modifier/대상/시각/Non-goals/서버 변경 없음) + §2.5 글머리 한 줄 추가.
+- tasks/plan.md Phase 27 섹션 신규.
+- tasks/todo.md Phase 27 entry 신규.
+
+**완료 기준:** 문서만 변경, `go test ./... && go vet ./...` 회귀 통과.
+
+### DS-2 — `web/dragSelect.js` 구현
+
+**파일:** 신규 `web/dragSelect.js`, 수정 `web/main.js`, `web/style.css`, `web/index.html`
+
+- `wireDragSelect()` export — main 영역 mousedown 핸들러 등록.
+- 빈 영역 판정: `e.target.closest('.thumb-card, tr, button, a, input, label, .lightbox, .modal-overlay, .audio-player') == null`.
+- 5px movement threshold 후 overlay 생성. 단순 클릭(<5px)은 selection 미변경.
+- visible 카드 위치(`getBoundingClientRect()`)는 mousedown 시점에 **1회 캐시** → mousemove 동안 재계산 안 함 (성능, 200카드도 안전).
+- intersect 판정: 사각형 vs 카드 rect overlap (모서리 닿음 포함).
+- modifier 분기: `e.ctrlKey || e.metaKey || e.shiftKey` → additive (기존 selection 유지 + 추가), 아니면 기존 selection 클리어 후 사각형 결과 적용.
+- mousedown 시점 selection 스냅샷(`new Set(selectedPaths)`) 보관 → ESC 시 복원.
+- mouseup/cancel 시 cleanup (overlay 제거, document 임시 listener 해제, 텍스트 선택 차단 클래스 제거).
+- viewport 너비 `≤ 600px`이면 wireDragSelect 진입 즉시 return — 모바일 비활성.
+- main.js에 `wireDragSelect()` 호출 추가.
+- `style.css` `.drag-select-overlay` 규칙 (position: absolute, 반투명 accent, pointer-events: none, z-index < 모달).
+- index.html main.js 버전 bump (Phase 26 반영 상태에 맞춰 v=37).
+
+**완료 기준:**
+- 빈 영역 좌클릭 → 5px 미만은 click으로 처리, 5px 초과는 사각형 + selection 갱신.
+- 카드 위에서 시작하면 rubber-band 미발생 (기존 폴더 이동 DnD 그대로).
+- 우/중 클릭 무시. 모바일 viewport 무동작.
+- ESC로 드래그 시작 시점 selection 복원.
+- 폴더 카드는 사각형이 덮어도 미선택. 필터로 가려진 항목 미선택.
+
+**검증:**
+- `go test ./... && go vet ./...` (백엔드 무영향 — 무조건 pass).
+- 코드 리뷰: visible 카드 rect 캐시는 mousedown 후 mouseup까지 변하지 않는다는 가정(드래그 도중 browse 재로드 트리거 없음).
+
+### DS-3 — Docker rebuild + 수동 E2E
+
+**`docker compose up -d --build`** 후 시나리오 7개:
+1. 빈 영역 클릭+짧게 드래그(<5px) → selection 변경 없이 단순 click 처리.
+2. 빈 영역 드래그 → 반투명 사각형, 안 카드 실시간 선택.
+3. 카드 위에서 드래그 시작 → 기존 폴더 이동 DnD (rubber-band 미발생).
+4. Ctrl+드래그 → 기존 selection 유지 + 사각형 항목 추가.
+5. Shift+드래그 → Ctrl과 동일.
+6. 드래그 중 ESC → overlay 사라지고 시작 시점 selection 복원.
+7. 모바일 viewport(<600px) → 동작 안 함 (기존 체크박스만).
+
+회귀: 카드 단일 클릭(lightbox/play), 카드 드래그(폴더 이동), PNG 일괄 변환 selection 연동, 텍스트 선택 가능 영역(파일명 등) 무영향.
+
+**체크포인트:** 7개 통과 + 회귀 4건 스모크. 통과 시 develop 머지.
+
+### Out of scope (Phase 27)
+- 모바일/터치 long-press + drag.
+- 사이드바 트리에서 영역 선택.
+- 키보드 화살표 + Shift 범위 선택.
+- 드래그 중 viewport 자동 스크롤(사각형이 viewport 끝에 닿을 때 자동 따라감).
+- 사각형 줄어들 때 toggle off (additive only).
+
+### 위험 / 롤백
+- **위험: 클릭 vs 짧은 드래그 충돌** — 5px movement threshold로 분기. threshold 미만이면 selection 미변경.
+- **위험: HTML5 dragstart와 충돌** — mousedown이 카드에서 시작하면 HTML5 dragstart 발화하고 우리 handler는 빈 영역 판정에서 빠짐. 충돌 없음.
+- **위험: 성능 (대량 카드)** — 200 카드 × 60fps = 12k rect 계산. mousedown 시점 1회 캐시로 회피, mousemove는 사각형 ↔ 캐시 비교만 O(N).
+- **위험: 캐시 stale** — 드래그 중 카드 추가/제거가 일어나는 케이스(lazy load, 외부 갱신). visible 카드는 이미 mousedown 시점에 모두 렌더된 상태이고 드래그 중 browse 재로드 트리거가 없으므로 안전.
+- **위험: ESC 복원 정확성** — mousedown 시점 `new Set(selectedPaths)` 스냅샷으로 보장.
+- **롤백:** `web/dragSelect.js` 삭제 + main.js wire 라인 제거 + CSS overlay 규칙 제거 + index.html 버전 되돌리기. 다른 모듈 무영향.
+
