@@ -9,6 +9,7 @@ export const $ = {
   lightbox:             document.getElementById('lightbox'),
   lbContent:            document.getElementById('lb-content'),
   lbClose:              document.getElementById('lb-close'),
+  lbDelete:             document.getElementById('lb-delete'),
   lbPrev:               document.getElementById('lb-prev'),
   lbNext:               document.getElementById('lb-next'),
   audioPlayer:          document.getElementById('audio-player'),
