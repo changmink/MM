@@ -83,16 +83,29 @@ export function visiblePNGPaths(visible) {
     .map(e => e.path);
 }
 
+// selectedPaths ∩ visible 중 PNG만. visible 인자로 한 번 더 필터해
+// stale selection(syncSelectionWithVisible 직전 state)도 안전하게 거른다.
+export function selectedVisiblePNGPaths(visible) {
+  return visible
+    .filter(e => !e.is_dir && e.mime === 'image/png' && selectedPaths.has(e.path))
+    .map(e => e.path);
+}
+
 function updateConvertPNGAllBtn(visible) {
-  const paths = visiblePNGPaths(visible);
+  const useSelection = selectedPaths.size > 0;
+  const paths = useSelection
+    ? selectedVisiblePNGPaths(visible)
+    : visiblePNGPaths(visible);
   if (paths.length === 0) {
     $.convertPNGAllBtn.hidden = true;
     $.convertPNGAllBtn.dataset.paths = '';
     return;
   }
   $.convertPNGAllBtn.hidden = false;
-  $.convertPNGAllBtn.textContent = `모든 PNG 변환 (${paths.length})`;
-  // Stash the current visible PNG list on the button so the convertImage
+  $.convertPNGAllBtn.textContent = useSelection
+    ? `선택 PNG 변환 (${paths.length}개)`
+    : `모든 PNG 변환 (${paths.length}개)`;
+  // Stash the current target PNG list on the button so the convertImage
   // module's click handler can read it without a second filter pass.
   $.convertPNGAllBtn.dataset.paths = JSON.stringify(paths);
 }
