@@ -13,6 +13,7 @@ import {
 import { wireSettings } from './settings.js';
 import { wireConvert } from './convert.js';
 import { wireConvertImage } from './convertImage.js';
+import { wireDragSelect } from './dragSelect.js';
 import { setURLImportDeps, wireURLImport } from './urlImport.js';
 import {
   bootstrapURLJobs,
@@ -36,6 +37,7 @@ wireConvert({ browse });
 wireConvertImage({ browse });
 wireURLImport();
 wireBrowse();
+wireDragSelect();
 
 readViewFromURL();
 syncToolbarUI();
