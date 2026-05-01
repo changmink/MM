@@ -12,6 +12,7 @@ import {
 } from './fileOps.js';
 import { wireSettings } from './settings.js';
 import { wireConvert } from './convert.js';
+import { wireConvertImage } from './convertImage.js';
 import { setURLImportDeps, wireURLImport } from './urlImport.js';
 import {
   bootstrapURLJobs,
@@ -32,6 +33,7 @@ wireToolbar(renderView);
 wireTree({ browse, attachDropHandlers, attachDragHandlers, openRenameModal, deleteFolder });
 wireSettings();
 wireConvert({ browse });
+wireConvertImage({ browse });
 wireURLImport();
 wireBrowse();
 
