@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	maxConvertImagePaths    = 50
+	maxConvertImagePaths    = 500
 	imageConvertFileTimeout = 30 * time.Second
 	imageConvertJPEGQuality = 90
 )

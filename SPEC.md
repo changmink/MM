@@ -526,7 +526,7 @@ PNG 파일을 JPEG로 영구 변환한다. 두 진입점:
 
 ### 2.8.2 수동 변환 API
 
-기존 PNG 파일을 명시적으로 JPEG로 변환. **SSE가 아닌 동기 JSON 응답** — PNG 변환은 일반 사진 크기에서 1초 내외이고, 폴더 일괄 변환(50개)도 수 초 내 종료되어 progress 스트림이 가치보다 복잡도가 큼.
+기존 PNG 파일을 명시적으로 JPEG로 변환. **SSE가 아닌 동기 JSON 응답** — PNG 변환은 일반 사진 크기에서 1초 내외이고, 폴더 일괄 변환(최대 500개)도 단일 사용자 운용에서 수 분 내 종료되어 progress 스트림이 가치보다 복잡도가 큼.
 
 - **API:** `POST /api/convert-image` (§5에 상세).
 - [ ] **개별 변환 트리거:** 이미지 카드가 PNG 파일이면 "JPG로 변환" 버튼 표시. 기존 rename/delete 버튼과 동일 레이아웃. 클릭 시 확인 모달 → 변환 시작.
@@ -869,7 +869,7 @@ Body 형태로 두 동작 분기 (`PATCH /api/file`과 동일 패턴):
 - 4xx 케이스 (요청 자체 거부 — SSE 스트림 시작 전 일반 JSON 에러 응답):
   - `400 {"error": "invalid path"}` — path traversal
   - `400 {"error": "no urls"}` — 빈 배열
-  - `400 {"error": "too many urls"}` — 한 번에 50개 초과
+  - `400 {"error": "too many urls"}` — 한 번에 500개 초과
   - `404 {"error": "path not found"}` — 저장 디렉토리 미존재
   - `429 {"error": "too_many_jobs"}` — 활성 잡 수가 `MaxQueuedJobs=100` 초과 (§2.6 활성 잡 cap)
 
@@ -954,7 +954,7 @@ TS 파일을 MP4로 영구 변환. SSE 스트림으로 진행 상태 전송. 이
     "delete_original": false
   }
   ```
-  - `paths`: 변환할 `.ts` 파일 경로 배열(`/data` 기준 상대). 최소 1개, 최대 **50개** (URL import와 동일 상한).
+  - `paths`: 변환할 `.ts` 파일 경로 배열(`/data` 기준 상대). 최소 1개, 최대 **500개** (URL import와 동일 상한).
   - `delete_original`: 변환 성공 시 원본 `.ts` + 사이드카 삭제 여부(기본 `false`).
 - **응답:** `200 OK`, `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`
 
@@ -998,13 +998,13 @@ TS 파일을 MP4로 영구 변환. SSE 스트림으로 진행 상태 전송. 이
   - `"canceled"` — 클라이언트 연결 끊김/요청 context 취소
 - **4xx 케이스** (SSE 스트림 시작 전 일반 JSON 에러 응답):
   - `400 {"error": "no paths"}` — 빈 배열
-  - `400 {"error": "too many paths"}` — 50개 초과
+  - `400 {"error": "too many paths"}` — 500개 초과
   - `400 {"error": "invalid request"}` — JSON 파싱 실패
   - `405 {"error": "method not allowed"}` — POST 외
 
 #### POST /api/convert-image
 
-PNG 파일을 JPG로 영구 변환 (§2.8.2). **동기 JSON 응답** — SSE가 아니다. PNG 변환은 빠르고 (정상 사진 1초 내외), 일괄 50개도 수 초 내 종료되어 progress 스트림이 가치보다 복잡도가 큼. 항목별 결과는 응답 배열에 한꺼번에 포함된다.
+PNG 파일을 JPG로 영구 변환 (§2.8.2). **동기 JSON 응답** — SSE가 아니다. PNG 변환은 빠르고 (정상 사진 1초 내외), 일괄 500개도 단일 사용자 운용에서 수 분 내 종료되어 progress 스트림이 가치보다 복잡도가 큼. 항목별 결과는 응답 배열에 한꺼번에 포함된다.
 
 - **Body:**
   ```json
@@ -1013,7 +1013,7 @@ PNG 파일을 JPG로 영구 변환 (§2.8.2). **동기 JSON 응답** — SSE가 
     "delete_original": false
   }
   ```
-  - `paths`: 변환할 `.png` 파일 경로 배열(`/data` 기준 상대). 최소 1개, 최대 **50개** (URL import / convert와 동일 상한).
+  - `paths`: 변환할 `.png` 파일 경로 배열(`/data` 기준 상대). 최소 1개, 최대 **500개** (URL import / convert와 동일 상한).
   - `delete_original`: 변환 성공 시 원본 `.png` + 사이드카(`.thumb/{name}.png.jpg`) 삭제 여부 (기본 `false`).
 - **응답:** `200 OK`, `Content-Type: application/json`. 항목별 성공/실패가 섞여도 200 — 항목별 결과 객체로 표현.
 
@@ -1055,7 +1055,7 @@ PNG 파일을 JPG로 영구 변환 (§2.8.2). **동기 JSON 응답** — SSE가 
   - `"canceled"` — 클라이언트 연결 끊김/요청 context 취소
 - **4xx 케이스** (응답 시작 전 일반 JSON 에러):
   - `400 {"error": "no paths"}` — 빈 배열
-  - `400 {"error": "too many paths"}` — 50개 초과
+  - `400 {"error": "too many paths"}` — 500개 초과
   - `400 {"error": "invalid request"}` — JSON 파싱 실패
   - `405 {"error": "method not allowed"}` — POST 외
 
@@ -1275,7 +1275,7 @@ volumes:
   - ffmpeg 미설치 환경: `ffmpeg_missing` 이벤트(PATH lookup 실패)
   - 손상 TS(헤더 truncate 등): `ffmpeg_error` + stderr는 SSE 응답에 노출되지 않음(서버 로그에만)
   - `delete_original_failed` 경고: 원본 `.ts`를 read-only로 설정 후 `delete_original: true` → `done.warnings: ["delete_original_failed"]`
-  - 4xx: 빈 배열 → `400 "no paths"`, 51개 → `400 "too many paths"`, 유효하지 않은 JSON → `400 "invalid request"`
+  - 4xx: 빈 배열 → `400 "no paths"`, 501개 → `400 "too many paths"`, 유효하지 않은 JSON → `400 "invalid request"`
 - 수동 테스트: TS 동영상 카드에 변환 버튼 → 변환 모달 → 진행 바 → 완료 후 `.mp4`로 재생(seek 동작 확인). 폴더에 TS 3개 있을 때 "모든 TS 변환" 버튼 → 순차 변환 → 성공/실패 요약 확인.
 - 단위 테스트 (settings §2.7) — `auto_convert_png_to_jpg` 추가:
   - PATCH `auto_convert_png_to_jpg` 토글: `true→false`, `false→true` 모두 디스크 + 메모리 캐시 동기 반영
@@ -1295,7 +1295,7 @@ volumes:
   - 충돌: 목표 `foo.jpg` 사전 존재 → 해당 항목 `error: "already_exists"` + 임시 파일 미생성 + 원본 `.png` 무영향
   - 부분 실패: 2개 중 1개는 `.png` 아님 (예: `.txt`) → 해당 index만 `error: "not_png"`, 나머지는 정상 `done`
   - `delete_original_failed` 경고: 원본 PNG 또는 사이드카를 read-only 디렉토리에 두고 `delete_original:true` → 결과 항목의 `warnings: ["delete_original_failed"]`, 변환 자체는 성공
-  - 4xx: 빈 배열 → `400 "no paths"`, 51개 → `400 "too many paths"`, 잘못된 JSON → `400 "invalid request"`, GET → `405 "method not allowed"`
+  - 4xx: 빈 배열 → `400 "no paths"`, 501개 → `400 "too many paths"`, 잘못된 JSON → `400 "invalid request"`, GET → `405 "method not allowed"`
   - traversal: `paths: ["../../etc/passwd"]` → 항목 `error: "invalid_path"`
   - 손상 PNG: 헤더 truncate된 PNG → 항목 `error: "decode_failed"`, 임시 파일 정리 확인
 - 통합 테스트 (`POST /api/upload` 자동 변환, §2.8.1):

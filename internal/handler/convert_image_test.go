@@ -233,7 +233,7 @@ func TestConvertImage_TooManyPaths(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
 	Register(mux, root, root, nil)
-	paths := make([]string, 51)
+	paths := make([]string, 501)
 	for i := range paths {
 		paths[i] = "x.png"
 	}
