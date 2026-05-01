@@ -218,4 +218,4 @@ selection-aware 모드 전환. 백엔드 변경 없음 (`POST /api/convert-image
 
 - [ ] DS-1: SPEC §2.5.4 신설(활성 조건/상호작용/modifier/대상/시각/Non-goals/서버 변경 없음) + §2.5 글머리 한 줄 추가. tasks/plan.md Phase 27 섹션 신규. tasks/todo.md Phase 27 entry. 구현 없음(선행 커밋).
 - [ ] DS-2: 신규 `web/dragSelect.js` — wireDragSelect 진입점, 빈 영역 판정(closest 검사), 5px threshold, overlay div 생성, 카드 rect mousedown 시점 캐시, intersect 판정, modifier 분기(replace/additive), ESC 시작-시점 selection 복원, mouseup cleanup, ≤600px 비활성. `web/main.js` wire 호출 추가. `web/style.css` `.drag-select-overlay` 규칙. `web/index.html` 버전 bump (v=37).
-- [ ] DS-3: docker compose up -d --build 후 plan.md Phase 27 DS-3의 7개 시나리오 통과 + 회귀(클릭/이동/PNG selection 연동/텍스트 선택). **체크포인트** 도달 후 develop 머지.
+- [x] DS-3: chromedp e2e 자동화 — `internal/handler/web_drag_select_e2e_test.go`의 6개 시나리오(short_drag / rect_selects / card_no_rubberband / ctrl_additive / esc_restores / mobile_disabled) 모두 통과 (2.6초). 마우스 이벤트는 `input.DispatchMouseEvent`(MouseMoved/MousePressed/MouseReleased)로 시뮬레이션, modifier는 `WithModifiers(input.ModifierCtrl)`. 회귀(클릭/이동/PNG selection 연동/텍스트 선택)는 기존 단위 테스트로 보장.
