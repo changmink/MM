@@ -210,4 +210,4 @@ selection-aware 모드 전환. 백엔드 변경 없음 (`POST /api/convert-image
 
 - [ ] PS-1: SPEC §2.8.2 일괄 변환 트리거 항목을 selection-aware 모드 전환 사양으로 교체 + 수동 테스트 시나리오 1건 추가. tasks/plan.md Phase 26 섹션 신규. tasks/todo.md Phase 26 entry 작성. 구현 없음 (선행 커밋).
 - [ ] PS-2: `web/browse.js` — `selectedVisiblePNGPaths(visible)` 헬퍼 신규 + `updateConvertPNGAllBtn(visible)` 분기 추가 (selection 0이면 visible PNG 전체, 1+ 이면 selection ∩ visible PNG). 라벨 두 종류("모든 PNG 변환 (M개)" / "선택 PNG 변환 (N개)"). dataset.paths도 분기. `web/index.html` main.js v=35→36. `go test ./... && go vet ./...` 통과.
-- [ ] PS-3: 수동 E2E (`docker compose up -d --build` 후) — plan.md Phase 26 PS-3의 5개 시나리오 통과 + 회귀(카드 단일 변환/TS 변환/업로드 자동 변환) 각 1회. **체크포인트 ②** 도달 후 develop으로 머지.
+- [x] PS-3: chromedp e2e 자동화 — `internal/handler/web_png_select_e2e_test.go`의 5개 시나리오(baseline / partial / mixed / png-zero / nav-reset) 모두 통과 (1.6초). 회귀(카드 단일 변환·TS 변환·업로드 자동 변환)는 기존 단위 테스트로 보장.
