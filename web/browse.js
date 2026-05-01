@@ -274,6 +274,7 @@ function buildImageGrid(images) {
   images.forEach((entry, i) => {
     const card = document.createElement('div');
     card.className = 'thumb-card';
+    card.dataset.path = entry.path;
 
     const thumbSrc = entry.thumb_available
       ? '/api/thumb?path=' + encodeURIComponent(entry.path)
@@ -323,6 +324,7 @@ function buildVideoGrid(videos) {
   videos.forEach((entry, i) => {
     const card = document.createElement('div');
     card.className = 'thumb-card';
+    card.dataset.path = entry.path;
 
     const thumbSrc = '/api/thumb?path=' + encodeURIComponent(entry.path);
     const dur = formatDuration(entry.duration_sec);
@@ -379,6 +381,7 @@ function buildTable(entries) {
 
   entries.forEach(entry => {
     const tr = document.createElement('tr');
+    tr.dataset.path = entry.path;
     const icon = iconFor(entry.type, entry.is_dir);
     const size = entry.is_dir ? '—' : formatSize(entry.size);
     tr.innerHTML = `

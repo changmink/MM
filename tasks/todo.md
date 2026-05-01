@@ -211,3 +211,11 @@ selection-aware 모드 전환. 백엔드 변경 없음 (`POST /api/convert-image
 - [ ] PS-1: SPEC §2.8.2 일괄 변환 트리거 항목을 selection-aware 모드 전환 사양으로 교체 + 수동 테스트 시나리오 1건 추가. tasks/plan.md Phase 26 섹션 신규. tasks/todo.md Phase 26 entry 작성. 구현 없음 (선행 커밋).
 - [ ] PS-2: `web/browse.js` — `selectedVisiblePNGPaths(visible)` 헬퍼 신규 + `updateConvertPNGAllBtn(visible)` 분기 추가 (selection 0이면 visible PNG 전체, 1+ 이면 selection ∩ visible PNG). 라벨 두 종류("모든 PNG 변환 (M개)" / "선택 PNG 변환 (N개)"). dataset.paths도 분기. `web/index.html` main.js v=35→36. `go test ./... && go vet ./...` 통과.
 - [x] PS-3: chromedp e2e 자동화 — `internal/handler/web_png_select_e2e_test.go`의 5개 시나리오(baseline / partial / mixed / png-zero / nav-reset) 모두 통과 (1.6초). 회귀(카드 단일 변환·TS 변환·업로드 자동 변환)는 기존 단위 테스트로 보장.
+
+## Phase 27 — Rubber-band 영역 선택 (`feature/drag-select`) — spec [`SPEC.md §2.5.4`](../SPEC.md), plan [`plan.md` Phase 27](./plan.md)
+
+빈 영역 드래그로 사각형을 그려 visible 카드를 일괄 선택. Phase 22 `selectedPaths` 재사용, 백엔드 변경 없음. 데스크톱 (>600px) 한정.
+
+- [ ] DS-1: SPEC §2.5.4 신설(활성 조건/상호작용/modifier/대상/시각/Non-goals/서버 변경 없음) + §2.5 글머리 한 줄 추가. tasks/plan.md Phase 27 섹션 신규. tasks/todo.md Phase 27 entry. 구현 없음(선행 커밋).
+- [ ] DS-2: 신규 `web/dragSelect.js` — wireDragSelect 진입점, 빈 영역 판정(closest 검사), 5px threshold, overlay div 생성, 카드 rect mousedown 시점 캐시, intersect 판정, modifier 분기(replace/additive), ESC 시작-시점 selection 복원, mouseup cleanup, ≤600px 비활성. `web/main.js` wire 호출 추가. `web/style.css` `.drag-select-overlay` 규칙. `web/index.html` 버전 bump (v=37).
+- [x] DS-3: chromedp e2e 자동화 — `internal/handler/web_drag_select_e2e_test.go`의 6개 시나리오(short_drag / rect_selects / card_no_rubberband / ctrl_additive / esc_restores / mobile_disabled) 모두 통과 (2.6초). 마우스 이벤트는 `input.DispatchMouseEvent`(MouseMoved/MousePressed/MouseReleased)로 시뮬레이션, modifier는 `WithModifiers(input.ModifierCtrl)`. 회귀(클릭/이동/PNG selection 연동/텍스트 선택)는 기존 단위 테스트로 보장.

@@ -969,3 +969,16 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   color: var(--text-dim);
   cursor: pointer;
 }
+
+/* Phase 27 — Rubber-band 영역 선택 (§2.5.4) */
+.drag-select-overlay {
+  position: absolute;
+  background: rgba(96, 165, 250, 0.18);
+  border: 1px solid var(--accent);
+  pointer-events: none;
+  z-index: 50;
+}
+body.drag-selecting {
+  user-select: none;
+  cursor: crosshair;
+}
