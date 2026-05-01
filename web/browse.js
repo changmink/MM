@@ -23,6 +23,7 @@ import {
 } from './fileOps.js';
 import { highlightTreeCurrent } from './tree.js';
 import { openConvertModal } from './convert.js';
+import { openConvertImageModal } from './convertImage.js';
 
 export async function browse(path, pushState = true) {
   setCurrentPath(path);
@@ -56,6 +57,7 @@ export function renderView() {
   renderBrowseSummary(visible);
   renderFileList(visible);
   updateConvertAllBtn(visible);
+  updateConvertPNGAllBtn(visible);
   renderSelectionControls();
 }
 
@@ -73,6 +75,26 @@ function updateConvertAllBtn(visible) {
   }
   $.convertAllBtn.hidden = false;
   $.convertAllBtn.textContent = `모든 TS 변환 (${paths.length})`;
+}
+
+export function visiblePNGPaths(visible) {
+  return visible
+    .filter(e => !e.is_dir && e.mime === 'image/png')
+    .map(e => e.path);
+}
+
+function updateConvertPNGAllBtn(visible) {
+  const paths = visiblePNGPaths(visible);
+  if (paths.length === 0) {
+    $.convertPNGAllBtn.hidden = true;
+    $.convertPNGAllBtn.dataset.paths = '';
+    return;
+  }
+  $.convertPNGAllBtn.hidden = false;
+  $.convertPNGAllBtn.textContent = `모든 PNG 변환 (${paths.length})`;
+  // Stash the current visible PNG list on the button so the convertImage
+  // module's click handler can read it without a second filter pass.
+  $.convertPNGAllBtn.dataset.paths = JSON.stringify(paths);
 }
 
 // 움짤 — GIF is always a clip; a video is a clip only when it's small
@@ -244,6 +266,11 @@ function buildImageGrid(images) {
       ? '/api/thumb?path=' + encodeURIComponent(entry.path)
       : '/api/stream?path=' + encodeURIComponent(entry.path);
 
+    const isPNG = entry.mime === 'image/png';
+    const pngConvertBtn = isPNG
+      ? `<button class="png-convert-btn" title="JPG로 변환" aria-label="JPG로 변환">JPG</button>`
+      : '';
+
     card.innerHTML = `
       <label class="select-check" title="선택">
         <input type="checkbox" aria-label="${esc(entry.name)} 선택">
@@ -251,6 +278,7 @@ function buildImageGrid(images) {
       <img src="${esc(thumbSrc)}" alt="${esc(entry.name)}" loading="lazy">
       <div class="thumb-name">${esc(entry.name)}</div>
       <span class="size-badge">${esc(formatSize(entry.size))}</span>
+      ${pngConvertBtn}
       <button class="rename-btn" title="이름 변경" aria-label="이름 변경">✎</button>
       <button class="delete-btn" title="삭제" aria-label="삭제">✕</button>
     `;
@@ -264,6 +292,12 @@ function buildImageGrid(images) {
       ev.stopPropagation();
       deleteFile(entry.path);
     });
+    if (isPNG) {
+      card.querySelector('.png-convert-btn').addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        openConvertImageModal([entry.path]);
+      });
+    }
     attachDragHandlers(card, entry);
     grid.appendChild(card);
   });

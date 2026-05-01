@@ -18,6 +18,7 @@ async function openSettingsModal() {
   $.settingsError.classList.add('hidden');
   $.settingsMaxInput.value = '';
   $.settingsTimeInput.value = '';
+  $.settingsAutoPNG.checked = true; // optimistic — overwritten by GET
   $.settingsMaxHint.textContent = '';
   $.settingsModal.classList.remove('hidden');
   $.settingsMaxInput.focus();
@@ -28,6 +29,7 @@ async function openSettingsModal() {
     const cur = await res.json();
     $.settingsMaxInput.value = Math.round(cur.url_import_max_bytes / (1024 * 1024));
     $.settingsTimeInput.value = Math.round(cur.url_import_timeout_seconds / 60);
+    $.settingsAutoPNG.checked = !!cur.auto_convert_png_to_jpg;
     updateSettingsMaxHint();
   } catch (e) {
     showSettingsError('설정을 불러오지 못했습니다: ' + e.message);
@@ -72,6 +74,7 @@ async function submitSettings() {
     const payload = {
       url_import_max_bytes: mib * 1024 * 1024,
       url_import_timeout_seconds: minutes * 60,
+      auto_convert_png_to_jpg: $.settingsAutoPNG.checked,
     };
     const res = await fetch('/api/settings', {
       method: 'PATCH',

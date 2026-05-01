@@ -3412,3 +3412,281 @@ F1 백엔드 코어 (media.MoveDir + 단위 테스트)
 - **위험: 새 폴더 버튼 이전으로 모바일 드로어 닫힌 상태에선 새 폴더 생성 불가** — 사용자가 햄버거를 먼저 열어야 함. 의도된 동선이라 acceptable. README 한 줄 명시.
 - **위험: `rewritePathAfterFolderRename` 재사용 시 의미 차이** — 폴더 rename은 `/a/old → /a/new`, 폴더 move는 `/a/sub → /b/sub`. 헬퍼가 srcOldPath/destNewPath의 prefix 치환만 하면 둘 다 안전. `web/util.js` 구현 확인 후 재사용 검증.
 - **롤백:** Phase 24 머지 단위로 revert → Phase 23 상태 복귀. SPEC.md §2.1.2/§2.1.3/§10도 동시 revert.
+
+---
+
+## Phase 25 — PNG → JPG 변환 (`feature/png-to-jpg`) — spec [`SPEC.md §2.8`](../SPEC.md)
+
+PNG 업로드 시 자동 JPEG 변환 + 기존 PNG 파일을 명시적으로 변환하는 두 진입점. 기존 `disintegration/imaging` 라이브러리만 재사용하여 신규 의존성 없음. 알파 채널은 흰 배경 합성으로 처리(JPEG 구조적 한계). settings 토글로 자동 변환 ON/OFF.
+
+**의존성:**
+```
+PJ1 (internal/imageconv 패키지 — ConvertPNGToJPG + 흰 배경 합성 + atomic write + 단위 테스트)
+  ├─► PJ3 (handleUpload PNG 자동 변환 분기 + 응답 스키마 확장 + 폴백 로직 + 통합 테스트)
+  │      ↑ PJ2
+  └─► PJ4 (POST /api/convert-image 동기 핸들러 + 라우트 등록 + 통합 테스트)
+              └─► PJ5 (frontend — 카드 버튼 · 툴바 일괄 · 모달 · 자동 변환 응답 처리 + 수동 E2E)
+PJ2 (settings AutoConvertPNGToJPG 필드 + GET/PATCH 통과 + UI 체크박스)
+  └─► PJ3
+```
+
+PJ1과 PJ2는 leaf로 병렬 가능. PJ3는 PJ1+PJ2가 모두 끝나야 시작. PJ4는 PJ1만 의존. PJ5는 PJ3+PJ4 모두 의존(자동 변환 응답 UI 처리 포함).
+
+### PJ1 — `internal/imageconv` 패키지
+
+**파일:** `internal/imageconv/imageconv.go`, `internal/imageconv/imageconv_test.go`
+
+**변경 포인트:**
+- 단일 export `ConvertPNGToJPG(srcPath, destPath string, quality int) error`. 호출 측은 확장자 검증을 끝낸 상태로 호출 — 패키지는 path 검증을 수행하지 않는다(handler 책임).
+- 내부 흐름:
+  1. `imaging.Open(srcPath)` 로 PNG 디코드 (반환은 `*image.NRGBA` — 알파 보존).
+  2. `bounds := src.Bounds()` 로 동일 크기 `*image.RGBA` 생성.
+  3. `draw.Draw(dst, bounds, image.NewUniform(color.White), image.Point{}, draw.Src)` — 흰색 fill.
+  4. `draw.Draw(dst, bounds, src, bounds.Min, draw.Over)` — 합성. 불투명 픽셀은 그대로, 알파는 흰색과 over.
+  5. atomic write — `os.CreateTemp(filepath.Dir(destPath), ".imageconv-*.jpg")` 로 임시 파일 → `jpeg.Encode(tmp, dst, &jpeg.Options{Quality: quality})` → close → `os.Rename(tmp.Name(), destPath)`.
+  6. 모든 에러 경로(decode/encode/write/rename 실패)에서 임시 파일은 `os.Remove`로 정리 — `defer`로 cleanup이 한 번만 실행되도록 변수 플래그(`renamed`) 사용.
+- `quality` 인자: handler에서 항상 90 전달. 0 또는 음수면 `image/jpeg` 스펙대로 75를 쓰지만, 본 패키지는 **0 ≤ q ≤ 100 검증**을 추가해 `fmt.Errorf("imageconv: quality out of range: %d", q)` 반환. 잘못 사용된 경우 조기 발견.
+- **import:** `github.com/disintegration/imaging`(이미 go.mod에 있음), `image`, `image/color`, `image/draw`, `image/jpeg`, `os`, `path/filepath`.
+- **무엇을 하지 않는지(명시):** SafePath 검증 X, 확장자 검증 X, 입력 파일 잠금/원자성 X, 사이드카 처리 X — 모두 호출자(handler) 책임.
+
+**완료 기준:** `go test ./internal/imageconv` 통과 — 8개 케이스:
+1. RGB PNG (알파 없음) → JPEG 디코드 가능 + dimensions 일치
+2. RGBA PNG (반투명/완전투명 픽셀 포함) → 알파였던 위치 RGB가 흰색에 가까움(검사용 픽셀 샘플)
+3. 손상 PNG (헤더 truncate) → decode 에러 + temp 파일 미잔존
+4. src 미존재 → `os.ErrNotExist` 계열 에러 wrap
+5. dest 디렉토리 미존재 → `os.CreateTemp` 에러 wrap + temp 미생성
+6. quality 음수/100 초과 → 인자 검증 에러 (decode 시도 안 함)
+7. atomic 검증: 정상 종료 후 `.imageconv-*.jpg` glob 매치 0개
+8. 출력 확장자는 호출자 결정: `destPath`가 `.jpeg`이든 `.jpg`이든 패키지는 그대로 사용
+
+### PJ2 — `settings` 확장 + UI 체크박스
+
+**파일:** `internal/settings/settings.go`, `internal/settings/settings_test.go`, `internal/handler/settings_test.go`, `web/index.html`, `web/style.css`, `web/settings.js`, `web/main.js` (버전 bump)
+
+**변경 포인트:**
+- `settings.go`:
+  - `Settings` 구조체에 `AutoConvertPNGToJPG bool \`json:"auto_convert_png_to_jpg"\`` 추가.
+  - `Default()` 가 `AutoConvertPNGToJPG: true` 반환.
+  - `Validate(Settings)` 는 boolean이라 추가 검증 불필요(zero value `false`도 유효한 OFF 상태).
+  - **레거시 키 누락 처리** — JSON 디코드는 키 부재 시 zero value `false`가 되므로 SPEC §2.7 기본값(true)과 어긋난다. `New()` 에서 1차 디코드를 `map[string]json.RawMessage` 로 받아 `auto_convert_png_to_jpg` 키 존재 여부를 검사 → 부재 시 `loaded.AutoConvertPNGToJPG = true` 강제 적용. 다음 PATCH 때 디스크에 정식 저장됨. (대안 — `Settings`에 별도 presence flags 도입 — 복잡도 상승. 1차 디코드 패턴이 가벼움.)
+- `settings_test.go` 갱신:
+  - `TestDefault` 에 `AutoConvertPNGToJPG == true` 어서션 추가.
+  - 기존 `TestRoundTrip` 에 `AutoConvertPNGToJPG: false` 케이스 추가(true→false→true 라운드트립).
+  - 신규 `TestNew_LegacyMissingKey`: 디스크에 `{"url_import_max_bytes":..., "url_import_timeout_seconds":...}` (auto_convert 키 없음) 직접 작성 → `New()` 후 `Snapshot().AutoConvertPNGToJPG == true`.
+- `handler/settings_test.go`:
+  - 기존 GET/PATCH round-trip 테스트가 새 필드를 자동으로 직렬화하는지 확인. 필요 시 expected JSON에 `auto_convert_png_to_jpg: true` 추가.
+  - 신규 `TestSettings_PATCH_BooleanTypeMismatch`: `{"auto_convert_png_to_jpg": "yes"}` → `400 invalid request` (JSON unmarshal 자체가 실패).
+- `web/index.html` `#settings-modal` 마크업: 기존 두 필드 아래에 `.settings-field` 추가
+  ```html
+  <div class="settings-field">
+    <label class="settings-label">
+      <input type="checkbox" id="settings-auto-png">
+      PNG 업로드 시 JPG로 자동 변환
+    </label>
+    <p class="settings-hint">알파 채널은 흰 배경에 합성됩니다 (quality 90).</p>
+  </div>
+  ```
+- `web/style.css` 추가:
+  - `.settings-field input[type="checkbox"]` margin-right 8px, vertical-align middle.
+  - 체크박스 라벨은 cursor pointer.
+- `web/settings.js`:
+  - DOM ref 1개 추가 (`settingsAutoPNGEl`).
+  - `openSettingsModal()` 의 GET 응답 처리에 `el.checked = !!data.auto_convert_png_to_jpg` 추가.
+  - `submitSettings()` 의 PATCH payload에 `auto_convert_png_to_jpg: settingsAutoPNGEl.checked` 추가.
+- `web/main.js` 또는 `index.html` `<script>` 태그 버전 v=N → v=N+1 bump.
+
+**완료 기준:** `go test ./internal/settings ./internal/handler -run TestSettings` 통과. 브라우저에서 ⚙ → 모달 → 체크박스 토글 → 저장 → 모달 재오픈 시 상태 유지. settings.json 디스크에 새 키 존재.
+
+### PJ3 — `handleUpload` 자동 PNG → JPG 변환
+
+**파일:** `internal/handler/files.go`, `internal/handler/files_test.go`, `web/fileOps.js` 또는 응답 처리 모듈, `web/main.js`
+
+**변경 포인트:**
+- `files.go` `handleUpload`:
+  - 기존 `createUniqueFile(destPath)` 직전 분기 추가:
+    ```
+    snap := h.settingsSnapshot()
+    isPNG := strings.EqualFold(filepath.Ext(part.FileName()), ".png")
+    autoConvert := isPNG && snap.AutoConvertPNGToJPG
+    ```
+  - `autoConvert == false` (현재 흐름 유지):
+    - `createUniqueFile(destPath)` → `io.Copy` → 응답에 `converted: false, warnings: []` 추가.
+  - `autoConvert == true`:
+    1. `tmpPNG, err := os.CreateTemp(destDir, ".pngconvert-*.png")` (browse 자동 숨김 — `.`-prefix).
+    2. `io.Copy(tmpPNG, part)` → close (defer cleanup wrapper로 모든 경로에서 잔존 안 하도록).
+    3. 목표 경로 계산: `jpgBase := strings.TrimSuffix(filepath.Base(destPath), filepath.Ext(destPath)) + ".jpg"`; `jpgPath := filepath.Join(destDir, jpgBase)`.
+    4. 임시 jpg 경로(`tmpJPGPath := tmpPNG.Name() + ".jpg"`)를 결정 → `imageconv.ConvertPNGToJPG(tmpPNG.Name(), tmpJPGPath, 90)` 호출. `imageconv` 의 atomic write가 `tmpJPGPath` 를 안전하게 만들고, 핸들러는 이후 `tmpJPGPath` → `jpgPath`(unique 처리) 로 한 번 더 rename.
+    5. 변환 성공:
+       - `os.Remove(tmpPNG.Name())`.
+       - `finalPath, suffixApplied, err := renameToUniqueDest(tmpJPGPath, jpgPath)` (신규 헬퍼 — `O_CREATE|O_EXCL` 패턴으로 `_1`, `_2` 후보 생성 후 `os.Rename`).
+       - 응답: `path: finalPath`, `name: filepath.Base(finalPath)`, `size: <stat>`, `type: image`, `converted: true`, `warnings`: `suffixApplied ? ["renamed"] : []`.
+       - 썸네일 풀 제출은 `finalPath` 대상으로.
+    6. 변환 실패 (decode/encode/write 어느 단계든):
+       - `os.Remove(tmpJPGPath)` (있으면).
+       - 폴백: `tmpPNG.Name()` 을 원래 `destPath` 로 rename — `renameToUniqueDest(tmpPNG.Name(), destPath)` 재사용. suffix 발생 시 `warnings: ["renamed", "convert_failed"]`.
+       - `slog.Warn("png auto-convert failed, falling back to original", "src", destPath, "err", err)`.
+       - 응답: `converted: false`, `warnings: ["convert_failed"]` (suffix 있으면 추가).
+- 신규 헬퍼 `renameToUniqueDest(srcPath, destPath string) (finalPath string, suffixed bool, err error)`:
+  - destPath 가 비어있으면 즉시 시도, EEXIST 시 `_1.<ext>`, `_2.<ext>` 등 createUniqueFile 패턴으로 후보 생성.
+  - 각 시도는 `O_CREATE|O_EXCL` 로 빈 파일 만든 뒤 `os.Rename(srcPath, candidate)` — atomic + race-free.
+  - 위치: `files.go` (createUniqueFile 인접).
+- 응답 스키마 확장 (`uploadResponse` 또는 inline map):
+  - `converted bool` + `warnings []string` 필드 추가. Warnings nil이면 `[]`로 직렬화 (SPEC §5에 빈 배열로 명시 — `omitempty` 사용 안 함).
+- `files_test.go` 신규 테스트 케이스 7개:
+  1. `auto_convert=true` + RGB PNG 업로드 → 응답 `converted:true`, 디스크에 `.jpg`만, `.png`/`.pngconvert-*` 미잔존, 썸네일 비동기 생성 트리거됨
+  2. `auto_convert=true` + RGBA PNG 업로드 → 알파 위치가 흰색으로 합성된 JPEG (디코드 후 픽셀 샘플 검사)
+  3. `auto_convert=false` + PNG 업로드 → 원본 `.png` 그대로 저장, `converted:false`
+  4. `auto_convert=true` + 손상 PNG (디코드 실패하는 fixture) → 폴백, 원본 `.png` 저장, `warnings:["convert_failed"]`, 응답 코드 201
+  5. `auto_convert=true` + `foo.jpg` 사전 존재 + `foo.png` 업로드 → 결과 `foo_1.jpg`, `warnings:["renamed"]`
+  6. `auto_convert=true` + 비-PNG (jpg/mp4) 업로드 → 영향 없음, `converted:false`, `warnings:[]`
+  7. `auto_convert=true` + 대문자 `.PNG` 업로드 → 변환됨, 출력 `.jpg`(소문자)
+- `web/fileOps.js` (또는 업로드 응답을 처리하는 모듈) 응답 파서에 `converted`/`warnings` 처리 추가:
+  - 기존 success 알림에 `converted: true` 면 "PNG가 JPG로 변환되어 저장됨" 한 줄 inline 메시지(toast 또는 업로드 영역 아래 하이라이트 1.5초).
+  - `warnings.includes('convert_failed')` 면 "PNG 변환 실패, 원본으로 저장됨" 경고 색.
+  - `warnings.includes('renamed')` 면 "파일명이 자동 변경되었습니다" — 기존 URL import 라벨 재사용.
+- main.js / index.html 버전 bump.
+
+**완료 기준:** `go test ./internal/handler -run TestUpload` 신규 7케이스 + 기존 회귀 통과. 브라우저에서 PNG drag&drop → JPG 카드 노출 + 한국어 inline 메시지 표시.
+
+### PJ4 — `POST /api/convert-image` 동기 핸들러
+
+**파일:** `internal/handler/convert_image.go` (신규), `internal/handler/convert_image_test.go` (신규), `internal/handler/handler.go` (라우트). PJ3에서 만든 `renameToUniqueDest` 헬퍼는 본 핸들러에서는 미사용(충돌 시 `already_exists` 반환이라 unique 회피 불필요).
+
+**변경 포인트:**
+- `convert_image.go`:
+  - 상수 `maxConvertImagePaths = 50`, `imageConvertFileTimeout = 30 * time.Second`, `imageJPEGQuality = 90`.
+  - 요청/응답 타입:
+    ```go
+    type convertImageRequest struct {
+        Paths          []string `json:"paths"`
+        DeleteOriginal bool     `json:"delete_original"`
+    }
+    type convertImageResult struct {
+        Index    int      `json:"index"`
+        Path     string   `json:"path"`
+        Output   string   `json:"output,omitempty"`
+        Name     string   `json:"name,omitempty"`
+        Size     int64    `json:"size,omitempty"`
+        Warnings []string `json:"warnings,omitempty"`
+        Error    string   `json:"error,omitempty"`
+    }
+    type convertImageResponse struct {
+        Succeeded int                  `json:"succeeded"`
+        Failed    int                  `json:"failed"`
+        Results   []convertImageResult `json:"results"`
+    }
+    ```
+  - `handleConvertImage(w, r)`:
+    - POST 외 → 405 method not allowed.
+    - JSON decode → 실패 400 invalid request.
+    - 길이 0 → 400 no paths, > 50 → 400 too many paths.
+    - 각 path 순차 처리:
+      1. `media.SafePath(h.dataDir, p)` → 실패 시 result.Error = `"invalid_path"`.
+      2. `os.Stat` → 미존재 `"not_found"`, 디렉토리 `"not_a_file"`.
+      3. 확장자 `strings.EqualFold(filepath.Ext(abs), ".png") == false` → `"not_png"`.
+      4. 목표 경로 `dst := strings.TrimSuffix(abs, ext) + ".jpg"` (소문자 고정).
+      5. `os.Stat(dst) == nil` → `"already_exists"` (자동 suffix 없음 — SPEC §2.8.2).
+      6. `fctx, cancel := context.WithTimeout(r.Context(), imageConvertFileTimeout)`; `defer cancel()`. 별도 goroutine에서 `imageconv.ConvertPNGToJPG(abs, dst, imageJPEGQuality)` 호출 → channel로 결과 수신. `select { case <-fctx.Done(): error="canceled"|"convert_timeout" case res := <-done: ... }` 분기는 `errors.Is(fctx.Err(), context.DeadlineExceeded)` 으로 결정. ctx done이 먼저 와도 goroutine은 끝까지 실행되며 결과 임시 파일은 `imageconv` 자체 cleanup이 처리.
+      7. 성공: `delete_original == true` 면 원본 PNG + `.thumb/{name}.png.jpg` 삭제 (best-effort, 실패 시 `result.Warnings = append(..., "delete_original_failed")`). 사이드카는 이미지에 `.dur` 없음 — `.jpg` 1개만 처리.
+      8. result 채움: `Output`, `Name`, `Size` (Stat dst).
+    - 각 항목 결과에 따라 `succeeded` / `failed` 누적.
+    - 응답 `200 OK` + JSON.
+- `handler.Register` 라우트 1줄 추가:
+  ```go
+  mux.HandleFunc("/api/convert-image", requireSameOrigin(h.handleConvertImage))
+  ```
+- `convert_image_test.go` — 12개 케이스:
+  1. 정상 PNG 1개 → 200 + succeeded:1 + `.jpg` 디스크 + 원본 유지
+  2. `delete_original:true` → 원본 + 사이드카 삭제 확인
+  3. 배열 2개 → 결과 2건, 둘 다 `.jpg` 존재
+  4. 충돌: `foo.jpg` 사전 존재 → `error: "already_exists"` + 임시 파일 미생성
+  5. 부분 실패: `[good.png, bad.txt]` → 0번 done + 1번 `not_png`
+  6. `delete_original_failed` 경고: 사이드카만 read-only 디렉토리에 두고 `delete_original:true` → 변환 성공 + warning
+  7. 빈 배열 → 400 no paths
+  8. 51개 → 400 too many paths
+  9. 잘못된 JSON → 400 invalid request
+  10. GET → 405 method not allowed
+  11. traversal: `["../../etc/passwd"]` → 항목 `invalid_path`
+  12. 손상 PNG → 항목 `decode_failed` + 임시 파일 정리
+
+**체크포인트 ① (PJ4 종료):** curl 단독 검증 5단계
+1. `curl -X POST localhost:8080/api/convert-image -H 'Origin: http://localhost:8080' -d '{"paths":["test.png"],"delete_original":false}'` → JSON 응답 + 디스크에 test.jpg
+2. 충돌: 같은 호출 반복 → `already_exists`
+3. delete_original=true → 원본 사라짐
+4. traversal: `"../../etc/passwd"` → `invalid_path`
+5. 405: `curl -X GET ...` → method not allowed
+
+**완료 기준:** `go test ./internal/handler -run TestConvertImage` 12 케이스 + 회귀 전부 통과. 위 5단계 curl 모두 기대 동작.
+
+### PJ5 — frontend UI + 수동 E2E
+
+**파일:** `web/convertImage.js` (신규), `web/browse.js`, `web/main.js`, `web/index.html`, `web/style.css`
+
+**변경 포인트:**
+- `web/convertImage.js` 신규 모듈 (Phase 23 모듈화 패턴 일관):
+  - export `openConvertImageModal(paths: string[], onComplete: () => void)`, `setConvertImageDeps({...})` (콜백 주입 — `loadBrowse`).
+  - 모달 마크업은 `index.html` 의 신규 `#convert-image-modal` (TS 변환 모달 스타일 미러). 본문: "{N}개의 PNG를 JPG로 변환하시겠습니까?" + `<input type="checkbox">` "변환 후 원본 PNG 삭제".
+  - `submitConvertImage()`: `fetch('/api/convert-image', {method:'POST', body:JSON.stringify({paths, delete_original})})` → 응답 파싱 → 성공 카운트 + 실패 항목 한국어 메시지(`CONVERT_IMAGE_ERROR_LABELS`) → 알림 → `loadBrowse()` 트리거.
+  - `CONVERT_IMAGE_ERROR_LABELS` (한국어):
+    - `invalid_path: '경로 오류'`
+    - `not_found: '파일 없음'`
+    - `not_a_file: '폴더는 변환 불가'`
+    - `not_png: 'PNG 파일이 아님'`
+    - `already_exists: '대상 JPG 이미 존재'`
+    - `decode_failed: 'PNG 디코드 실패'`
+    - `encode_failed: 'JPEG 인코드 실패'`
+    - `write_failed: '저장 실패'`
+    - `convert_timeout: '변환 시간 초과'`
+    - `canceled: '취소됨'`
+- `web/browse.js`:
+  - `buildImageGrid` 에서 카드 생성 시 `entry.mime === 'image/png'` 면 "JPG로 변환" 버튼 추가 (rename/delete 버튼과 동일 layout, `.png-convert-btn` 클래스). 클릭 → `openConvertImageModal([entry.path], …)` 호출.
+  - `renderView` (또는 툴바 갱신 함수)에서 visible PNG 개수 계산 → ≥1 이면 `#convert-png-all-btn` 표시 + "모든 PNG 변환 (N)". 클릭 → `openConvertImageModal(visiblePNGs.map(e => e.path), …)`.
+- `web/main.js`:
+  - `convertImage` 모듈 import + `setConvertImageDeps({ loadBrowse: _browse })` 주입.
+  - `browse.js` 가 expose하는 콜백 receiver에 `openConvertImageModal` 주입.
+- `web/index.html`:
+  - 툴바에 `<button id="convert-png-all-btn" hidden>` 추가 (TS 일괄 변환 버튼 옆 또는 그룹 내).
+  - `#convert-image-modal` 마크업 (확인 메시지 + 체크박스 + 버튼 2개).
+  - `<script>` 버전 bump.
+- `web/style.css`:
+  - `.png-convert-btn` (entry-button 패턴 — rename/delete와 동일 hover/focus).
+  - `#convert-image-modal` (TS 모달 스타일 재사용 — `.modal` 베이스 활용).
+  - `#convert-png-all-btn` 가 `#convert-all-btn`(TS) 와 시각적으로 구분되게 — 색이나 아이콘 차이.
+
+**수동 E2E 시나리오 (12개):**
+1. ⚙ → 모달에서 "PNG 자동 변환" 체크박스 표시 (기본 ON).
+2. 토글 OFF → 저장 → 새로고침 후 OFF 유지.
+3. PNG drag&drop 업로드 (자동 변환 ON) → 카드는 `.jpg`, inline 메시지 "PNG가 JPG로 변환됨".
+4. PNG drag&drop 업로드 (자동 변환 OFF) → 카드는 `.png` 그대로.
+5. 알파 PNG 업로드 → JPG 다운로드 후 다른 뷰어에서 흰 배경 합성 확인.
+6. 손상 PNG 업로드 → `.png` 저장 + 경고 메시지 "변환 실패, 원본 저장".
+7. `foo.jpg` 사전 존재 + `foo.png` 업로드 → `foo_1.jpg` 생성 + 자동 rename 메시지.
+8. PNG 카드 "JPG로 변환" 버튼 → 모달 → 확인 → 카드가 `.jpg`로 갱신.
+9. PNG 카드 변환 + "원본 PNG 삭제" 체크 → 변환 후 원본 카드 사라짐.
+10. 폴더 PNG 3개 + JPG 2개 → 툴바 "모든 PNG 변환 (3)" 노출, 클릭 → 3개 변환 → 알림 "성공 3 / 실패 0".
+11. 충돌: `foo.jpg` + `foo.png` 동시 존재 + 수동 변환 → 결과 알림 "1건 실패 (대상 JPG 이미 존재)".
+12. 모바일 브라우저(<600px) — 카드 버튼·툴바 버튼·모달 정상 표시.
+
+**완료 기준:** 12개 시나리오 모두 기대 동작. 콘솔 에러 0. 회귀: 기존 업로드/rename/delete/TS 변환 각 1회 스모크.
+
+### Out of scope (Phase 25)
+- JPEG 외 출력 포맷(WEBP, AVIF) 변환.
+- PNG 외 입력 포맷(BMP, TIFF, HEIC) 변환.
+- JPEG quality 사용자 조절(90 고정).
+- 알파 채널 보존 옵션(흰 배경 합성 강제).
+- EXIF/메타데이터 보존.
+- URL import 결과의 자동 변환.
+- 자동 변환 시 원본 PNG 별도 저장(원본을 원하면 자동 변환 OFF).
+- progress 이벤트 / SSE.
+- 동시 변환(배열은 항상 순차).
+- 변환 큐 / 잡 영속화.
+
+### 위험 / 롤백
+- **위험: settings 마이그레이션** — 기존 `settings.json` 에 `auto_convert_png_to_jpg` 키가 없을 때 zero value `false`가 되면 사용자 의도와 어긋난다(SPEC 기본값은 true). PJ2 의 `New()` 후 누락 키를 true로 강제하는 로직이 필수. 검증: `TestNew_LegacyMissingKey` 가 잡는다.
+- **위험: 자동 변환 폴백 시 응답 코드** — 변환 실패해도 업로드는 201로 반환해야 데이터 손실 인식이 안 생긴다. `warnings` 에서만 신호. PJ3 통합 테스트 4번 케이스가 잡는다.
+- **위험: 임시 파일 누출** — `.pngconvert-*.png` / `.imageconv-*.jpg` / `.pngconvert-*.jpg` 가 destDir에 남으면 browse는 dot-prefix로 숨기지만 디스크 공간을 차지한다. PJ1 테스트 7번(atomic glob 검증) + PJ3 테스트 1번(미잔존 검증).
+- **위험: 알파 합성 색이 사용자 기대와 다름** — 검정 배경 PNG 위에 흰 폰트는 흰 배경 합성 시 가시성 무너진다. 본 SPEC는 흰 고정이 명시이므로 사용자 책임이지만, 필요 시 후속에 배경 색 옵션 도입 검토.
+- **위험: 디스크 풀 / 권한** — atomic write 중간 실패는 `imageconv` 에러로 전파 → handler가 `convert_failed` warning 으로 폴백 또는 `write_failed` error로 응답. 임시 파일은 cleanup.
+- **위험: 큰 PNG (수십 MB) 디코드 메모리** — `imaging.Open` 은 전체 이미지를 메모리에 올린다. 단일 사용자 가정 + 일반 사진 크기에서 문제 없음. 4K 스크린샷도 ~50MB RAM. 별도 cap 도입 안 함.
+- **롤백:** Phase 25 머지 단위로 revert → Phase 24 상태 복귀. settings.json 의 `auto_convert_png_to_jpg` 키는 남지만 서버가 무시(미지의 필드는 `DisallowUnknownFields`로 PATCH 거부 — 실제로는 GET/디스크 로드는 허용이라 무해). 기존 사용자 PNG 파일은 변환 안 됨(자동 변환은 신규 업로드부터만 적용된 상태였음). 데이터 손실 없음.
+

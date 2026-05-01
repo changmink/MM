@@ -14,3 +14,6 @@ Thumbs.db
 
 # Local data (never commit the media volume)
 /data/
+file_server.exe
+.test-data/
+.e2e-data/

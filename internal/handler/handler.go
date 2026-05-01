@@ -95,6 +95,7 @@ func Register(mux *http.ServeMux, dataDir, webDir string, settingsStore *setting
 	mux.HandleFunc("/api/import-url/jobs", requireSameOrigin(h.handleJobsRoot))
 	mux.HandleFunc("/api/import-url/jobs/", requireSameOrigin(h.handleJobsByID))
 	mux.HandleFunc("/api/convert", requireSameOrigin(h.handleConvert))
+	mux.HandleFunc("/api/convert-image", requireSameOrigin(h.handleConvertImage))
 	mux.HandleFunc("/api/settings", requireSameOrigin(h.handleSettings))
 
 	mux.Handle("/", http.FileServer(http.Dir(webDir)))

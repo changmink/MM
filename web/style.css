@@ -75,6 +75,9 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .progress-item { margin: 4px 0; font-size: 0.8rem; }
 .progress-item .bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 2px; }
 .progress-item .bar-fill { height: 100%; background: var(--accent); transition: width 0.2s; }
+.progress-note { font-size: 0.75rem; margin-top: 2px; }
+.progress-note-ok { color: var(--accent); }
+.progress-note-warn { color: var(--danger); }
 
 /* App body grid: sidebar + main content */
 .app-body {
@@ -396,7 +399,8 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 }
 .thumb-card .delete-btn,
 .thumb-card .rename-btn,
-.thumb-card .convert-btn {
+.thumb-card .convert-btn,
+.thumb-card .png-convert-btn {
   position: absolute;
   top: 4px;
   background: rgba(0,0,0,0.6);
@@ -433,9 +437,11 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .thumb-card .delete-btn { right: 4px; }
 .thumb-card .rename-btn { right: 30px; }
 .thumb-card .convert-btn { right: 56px; width: auto; padding: 0 6px; font-size: 10px; font-weight: 600; }
+.thumb-card .png-convert-btn { right: 56px; width: auto; padding: 0 6px; font-size: 10px; font-weight: 600; }
 .thumb-card:hover .delete-btn,
 .thumb-card:hover .rename-btn,
-.thumb-card:hover .convert-btn { display: flex; }
+.thumb-card:hover .convert-btn,
+.thumb-card:hover .png-convert-btn { display: flex; }
 .thumb-card .duration-badge {
   position: absolute;
   bottom: 4px;
@@ -634,6 +640,24 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   color: var(--text-dim);
   margin-top: 4px;
   min-height: 1em; /* prevent layout shift when the hint appears */
+}
+.settings-field-checkbox {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 8px;
+  align-items: center;
+  cursor: pointer;
+}
+.settings-field-checkbox input[type="checkbox"] {
+  margin: 0;
+}
+.settings-field-checkbox .settings-label {
+  margin: 0;
+  color: var(--text);
+}
+.settings-field-checkbox .settings-hint {
+  grid-column: 1 / -1;
+  margin-top: 2px;
 }
 
 /* Modal */
@@ -917,6 +941,11 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 }
 .convert-all-btn:hover { filter: brightness(1.1); }
 .convert-all-btn[hidden] { display: none; }
+/* PNG → JPG 일괄 버튼 — TS 변환과 시각적으로 구분(보라 계열) */
+.convert-png-all-btn {
+  background: #7c3aed;
+}
+.convert-png-all-btn:hover { background: #8b5cf6; }
 
 .convert-file-list {
   max-height: 140px;
