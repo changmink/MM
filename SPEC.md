@@ -191,6 +191,7 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
 - [ ] **사이드바 sticky-until-bottom + 업로드 존 sticky**: 사이드바는 콘텐츠 자연 높이로 자라며 `syncSidebarSticky()` 가 sticky `top` 을 동적으로 계산해, 트리가 길어도 페이지 스크롤만으로 마지막 노드까지 닿게 한다(내부 overflow 스크롤 없음). 업로드 존은 헤더 바로 아래에 sticky 로 고정되어 본문 스크롤 중에도 항상 보인다. 모바일(<600px) 드로어 동작은 그대로. 상세: [`tasks/spec-tree-full-visible.md`](tasks/spec-tree-full-visible.md).
 - [ ] **다중 파일 선택 이동**: 파일 카드/테이블 행에서 체크박스로 파일을 선택하고, 툴바에서 현재 필터/검색을 통과한 visible 파일 전체를 선택/해제할 수 있다. 선택된 파일 중 하나를 사이드바 폴더 또는 breadcrumb 경로로 드래그하면 선택 묶음을 기존 `PATCH /api/file {"to": ...}` API로 순차 이동한다. 선택이 없거나 선택되지 않은 파일을 드래그하면 기존 단일 파일 이동 동작을 유지한다. 폴더는 선택 대상에서 제외한다. 상세: [`tasks/spec-multi-file-move-ui.md`](tasks/spec-multi-file-move-ui.md).
 - [ ] **Rubber-band 영역 선택** (§2.5.4)
+- [ ] **라이트박스 내 삭제** (§2.5.5): 원본 이미지·동영상 뷰어 안에서 🗑 버튼 또는 `Delete` 키로 현재 항목 삭제
 
 ### 2.5.1 파일 용량 표시
 
@@ -345,6 +346,36 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
 - 사각형이 줄어들 때 toggle off (additive only 정책 일관).
 
 **서버 변경:** 없음.
+
+### 2.5.5 라이트박스 내 삭제
+
+원본 이미지·동영상을 라이트박스로 열어둔 상태에서 현재 항목을 바로 삭제할 수 있게 한다. 지금은 폴더 뷰의 썸네일 카드에서만 삭제가 가능해, 이미지를 한 장씩 넘기며 정리할 때 라이트박스를 닫고 카드로 돌아가야 하는 마찰이 있다.
+
+- **범위(scope):** 이미지 라이트박스(`openLightboxImage`)와 동영상 라이트박스(`openLightboxVideo`) 둘 다. 음악 재생목록은 별도 UI라 대상 아님.
+- **트리거:**
+  - [ ] 라이트박스 우상단에 새 🗑 버튼(`#lb-delete`). 위치는 close(`✕`) 버튼 **왼쪽**(예: `right: 72px`) — 닫기가 가장 우측이라는 기존 패턴 유지.
+  - [ ] 키보드 `Delete` 키 — 라이트박스가 열려 있을 때만(`!$.lightbox.classList.contains('hidden')`). 기존 `Esc / ←/ →` 핸들러와 같은 `keydown` 리스너에 추가. `Backspace`는 바인딩하지 않음(브라우저 뒤로가기와 충돌 가능).
+- **확인:** `confirm('삭제하시겠습니까?\n${path}')` — 기존 `deleteFile`(`web/fileOps.js:145`)와 동일 문구·동일 모달 도입 안 함. 사용자가 취소하면 라이트박스 상태 그대로 유지.
+- **요청:** 기존 `DELETE /api/file?path=` 그대로 호출. 새 API 추가 없음.
+- [ ] **삭제 후 동작:**
+  - **이미지 라이트박스:**
+    - 성공 시 `imageEntries`에서 해당 항목을 제거하고, 새 길이 기준으로 `lbIndex` 보정 후 다음 이미지 표시(`openLightboxImage(newIndex)`).
+    - **인덱스 보정 규칙:** 삭제 후 `imageEntries`가 비면 라이트박스 닫기. 비지 않으면 `newIndex = oldIndex % imageEntries.length`(끝에서 삭제했으면 자연스럽게 0으로 wrap, 중간이면 다음 항목이 같은 인덱스로 당겨와 그대로 표시).
+    - prev/next 순환 일관성: §2.5.2 "라이트박스/재생목록 연동"에서 `imageEntries`는 visible 결과로 재설정한다고 명시 — 삭제 직후 `_browse()` 새로고침이 끝나면 `applyView`가 다시 `imageEntries`를 채우므로 라이트박스가 닫힌 뒤에는 자동 정합. 라이트박스가 열린 채로는 로컬 mutation으로 즉시 반응성 유지.
+  - **동영상 라이트박스:**
+    - 동영상은 prev/next가 없으므로 성공 시 라이트박스를 닫고 `_browse(currentPath, false)`로 폴더 새로고침.
+- [ ] **목록·트리 갱신:** 모든 성공 케이스에서 마지막에 `_browse(currentPath, false)` 1회 호출(이미지 라이트박스도 닫히든 안 닫히든). 트리 갱신은 폴더 변동 없으므로 호출하지 않음(기존 `deleteFile`도 트리 미호출).
+- [ ] **실패 처리:** `res.ok === false`이면 `alert('삭제 실패')` (기존 패턴). 라이트박스는 열린 채로 유지하고 imageEntries 손대지 않음.
+- [ ] **사이드카 삭제:** 기존 `DELETE /api/file` 핸들러가 이미 `.thumb/{name}.jpg`/`.dur` 사이드카를 함께 정리(§2.3.1·§2.3.2). 클라이언트 추가 작업 없음.
+- [ ] **same-origin 보호:** 기존 `requireSameOrigin` 래핑된 `DELETE /api/file` 그대로 사용 — 새 변경 핸들러 추가 없음.
+- **상호작용 우선순위:** 라이트박스 열린 동안 `Delete` 키는 라이트박스 삭제로만 해석. 파일 카드의 다중 선택 삭제(있다면)와는 라이트박스가 닫혀 있을 때만 동작. 충돌 회피.
+- **Non-goals:**
+  - 다중 선택 일괄 삭제 — 이미 툴바 다른 경로(체크박스 + 삭제 버튼)가 별도로 있다면 그 영역과 분리.
+  - 라이트박스 안에서 rename/move 등 추가 mutation — 이번 범위 밖.
+  - 휴지통(trash) / undo — 기존 삭제와 동일하게 즉시 원본 삭제.
+  - 음악 재생목록의 트랙 삭제 — 별도 phase.
+  - 모바일 long-press 삭제 트리거 — 데스크톱 키보드/버튼에 한정.
+- **서버 변경:** 없음.
 
 ### 2.6 URL 기반 미디어 가져오기 (URL Import)
 

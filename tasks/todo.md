@@ -219,3 +219,13 @@ selection-aware 모드 전환. 백엔드 변경 없음 (`POST /api/convert-image
 - [ ] DS-1: SPEC §2.5.4 신설(활성 조건/상호작용/modifier/대상/시각/Non-goals/서버 변경 없음) + §2.5 글머리 한 줄 추가. tasks/plan.md Phase 27 섹션 신규. tasks/todo.md Phase 27 entry. 구현 없음(선행 커밋).
 - [ ] DS-2: 신규 `web/dragSelect.js` — wireDragSelect 진입점, 빈 영역 판정(closest 검사), 5px threshold, overlay div 생성, 카드 rect mousedown 시점 캐시, intersect 판정, modifier 분기(replace/additive), ESC 시작-시점 selection 복원, mouseup cleanup, ≤600px 비활성. `web/main.js` wire 호출 추가. `web/style.css` `.drag-select-overlay` 규칙. `web/index.html` 버전 bump (v=37).
 - [x] DS-3: chromedp e2e 자동화 — `internal/handler/web_drag_select_e2e_test.go`의 6개 시나리오(short_drag / rect_selects / card_no_rubberband / ctrl_additive / esc_restores / mobile_disabled) 모두 통과 (2.6초). 마우스 이벤트는 `input.DispatchMouseEvent`(MouseMoved/MousePressed/MouseReleased)로 시뮬레이션, modifier는 `WithModifiers(input.ModifierCtrl)`. 회귀(클릭/이동/PNG selection 연동/텍스트 선택)는 기존 단위 테스트로 보장.
+
+## Phase 28 — 라이트박스 내 삭제 (`feature/lightbox-delete`) — spec [`SPEC.md §2.5.5`](../SPEC.md), [`spec-lightbox-delete.md`](./spec-lightbox-delete.md), plan [`plan.md` Phase 28](./plan.md)
+
+원본 이미지·동영상을 라이트박스로 열어둔 상태에서 🗑 버튼 또는 `Delete` 키로 현재 항목을 삭제. 이미지는 다음으로 이동(마지막이면 닫기), 동영상은 닫고 폴더 새로고침. 기존 `DELETE /api/file` 재사용 — 백엔드 변경 없음.
+
+- [x] LD-1: SPEC §2.5.5 신설 + §2.5 글머리 한 줄 추가. tasks/spec-lightbox-delete.md 신규. tasks/plan.md Phase 28 섹션 신규. tasks/todo.md Phase 28 entry. 구현 없음(선행 커밋).
+- [ ] LD-2: `web/index.html` 라이트박스에 `<button class="lb-delete" id="lb-delete">🗑</button>` 추가 + main.js v=37→38. `web/style.css` `.lb-delete` 위치(`top: 16px; right: 72px;`). `web/dom.js` `$.lbDelete` ref. `web/state.js` `lbCurrentVideoPath` mutable export + setter.
+- [ ] LD-3: `web/fileOps.js` `deleteFile(path, opts)` 시그니처 확장(`opts.skipBrowse`, return boolean). `web/browse.js` `openLightboxVideo`에서 `setLbCurrentVideoPath(entry.path)` + close 경로 통합(`closeLightbox()` 추출) + `deleteCurrentLightboxItem()` + 클릭/`Delete` 키 바인딩. 기존 카드 썸네일 삭제 회귀 없음.
+- [ ] LD-4: chromedp e2e 자동화 — `internal/handler/web_lightbox_delete_e2e_test.go` 신규. 시나리오 6개(image_delete_advances / image_delete_last_closes / image_delete_keyboard / video_delete_closes / confirm_cancel / delete_key_inactive). confirm dialog는 `chromedp.HandleDialog`로 accept/dismiss 제어.
+- [ ] LD-5: docker compose --build → 8 시나리오 수동 검증(이미지 advance/close/Delete 키, 동영상 close, confirm 취소, 사이드카 정리, 카드 삭제 회귀, prev/next 회귀). 통과 시 develop 머지.
