@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"file_server/internal/imageconv"
 )
 
 func postConvertImage(t *testing.T, mux *http.ServeMux, paths []string, deleteOriginal bool) *httptest.ResponseRecorder {
@@ -279,6 +281,33 @@ func TestConvertImage_PathTraversal(t *testing.T) {
 	r0 := resp["results"].([]any)[0].(map[string]any)
 	if r0["error"] != "invalid_path" {
 		t.Errorf("error = %v, want invalid_path", r0["error"])
+	}
+}
+
+func TestConvertImage_TooLarge(t *testing.T) {
+	// Override the pixel cap so we can verify the rejection without a real
+	// 8K×8K fixture. Restored at end of test.
+	orig := imageconv.MaxPixels
+	imageconv.MaxPixels = 100
+	defer func() { imageconv.MaxPixels = orig }()
+
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, root, root, nil)
+
+	writePNGFile(t, filepath.Join(root, "huge.png"), 20, 20) // 400 px > 100 cap
+
+	rw := postConvertImage(t, mux, []string{"huge.png"}, false)
+	if rw.Code != http.StatusOK {
+		t.Fatalf("status = %d", rw.Code)
+	}
+	resp := decodeConvertImageResponse(t, rw)
+	r0 := resp["results"].([]any)[0].(map[string]any)
+	if r0["error"] != "image_too_large" {
+		t.Errorf("error = %v, want image_too_large", r0["error"])
+	}
+	if _, err := os.Stat(filepath.Join(root, "huge.jpg")); !os.IsNotExist(err) {
+		t.Error("huge.jpg should not exist after cap rejection")
 	}
 }
 

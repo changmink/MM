@@ -17,6 +17,7 @@ import (
 	"sync"
 	"testing"
 
+	"file_server/internal/imageconv"
 	"file_server/internal/settings"
 )
 
@@ -342,6 +343,42 @@ func TestUpload_NonPNGUnaffected(t *testing.T) {
 				t.Errorf("file missing: %v", err)
 			}
 		})
+	}
+}
+
+func TestUpload_PNGOversizedFallsBackToOriginal(t *testing.T) {
+	// Override the pixel cap so a small fixture trips the rejection. The
+	// upload should still succeed (201) with PNG fallback + convert_failed
+	// warning — same fallback policy as decode failure (SPEC §2.8.1).
+	orig := imageconv.MaxPixels
+	imageconv.MaxPixels = 100
+	defer func() { imageconv.MaxPixels = orig }()
+
+	mux, root := makeAutoConvertSetup(t, true)
+	rw := uploadMultipart(mux, "/", "huge.png", pngBytes(t, 20, 20, false))
+	if rw.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (fallback should preserve upload success)", rw.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(rw.Body).Decode(&resp)
+	if resp["name"] != "huge.png" {
+		t.Errorf("name = %v, want huge.png (fallback)", resp["name"])
+	}
+	if resp["converted"] != false {
+		t.Errorf("converted = %v, want false on fallback", resp["converted"])
+	}
+	warnings, _ := resp["warnings"].([]interface{})
+	hasConvertFailed := false
+	for _, w := range warnings {
+		if w == "convert_failed" {
+			hasConvertFailed = true
+		}
+	}
+	if !hasConvertFailed {
+		t.Errorf("warnings = %v, want to contain convert_failed", warnings)
+	}
+	if _, err := os.Stat(filepath.Join(root, "huge.png")); err != nil {
+		t.Errorf("original PNG missing after fallback: %v", err)
 	}
 }
 

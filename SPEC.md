@@ -460,6 +460,7 @@ PNG 파일을 JPEG로 영구 변환한다. 두 진입점:
 - **라이브러리:** 기존 `github.com/disintegration/imaging`(§3) 재사용. PNG 디코드 + JPEG 인코드 모두 동일 라이브러리. ffmpeg 호출 없음.
 - **JPEG quality:** **90 고정.** 사용자 설정 없음 (단순성 우선; settings에 quality 필드 추가하지 않음).
 - **알파 채널 처리:** 알파가 있는 PNG는 **흰색(#FFFFFF) 배경에 합성**한 뒤 JPEG로 인코드. `image.NewRGBA(bounds)` → 흰색 fill → `draw.Draw(dst, bounds, src, image.Point{}, draw.Over)` 패턴.
+- **메모리 폭주 방어 (decompression bomb):** 디코드 전에 `image.DecodeConfig`로 헤더만 먼저 읽어 `width × height > 64M 픽셀`(≈ 8K×8K, RGBA로 ~256 MiB)인 입력을 거부한다 (`imageconv.MaxPixels`, sentinel `imageconv.ErrImageTooLarge`). 5–60 KB짜리 zlib bomb이 65535×65535 헤더로 16 GiB 할당을 요구하는 시나리오 차단. handler는 wire code `image_too_large`로 매핑(§5), 자동 업로드 변환(§2.8.1)에서는 `convert_failed` 폴백과 동일하게 원본 PNG 보존 + warning.
 - **EXIF/메타데이터:** 보존하지 않음. PNG에는 거의 없고, JPEG 인코더 기본 동작에 맡긴다.
 - **확장자 정책:** 출력은 항상 소문자 `.jpg` (`.jpeg` 아님). 입력 PNG가 `.PNG`/`.Png`이어도 동일.
 - **신규 패키지:** `internal/imageconv/` — 단일 함수 `ConvertPNGToJPG(srcPath, destPath string, quality int) error`. atomic write(`os.CreateTemp` 같은 디렉토리 → 인코드 → `os.Rename`) 포함. handler / upload 양쪽에서 호출.
@@ -1004,6 +1005,7 @@ PNG 파일을 JPG로 영구 변환 (§2.8.2). **동기 JSON 응답** — SSE가 
   - `"not_a_file"` — 경로가 디렉토리
   - `"not_png"` — 파일 확장자가 `.png`가 아님(대소문자 무시)
   - `"already_exists"` — 목표 `foo.jpg`가 이미 존재 (자동 suffix 없음)
+  - `"image_too_large"` — 헤더의 width × height가 cap(64M 픽셀, ≈ 8K×8K) 초과 — 메모리 폭주 방어로 디코드 전 거부
   - `"decode_failed"` — PNG 디코드 실패 (손상/비표준)
   - `"encode_failed"` — JPEG 인코드 실패
   - `"write_failed"` — 디스크 저장 실패 (디스크 풀 등)

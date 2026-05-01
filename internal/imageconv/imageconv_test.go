@@ -1,6 +1,7 @@
 package imageconv
 
 import (
+	"errors"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -150,6 +151,51 @@ func TestConvertPNGToJPG_NoTempFilesAfterSuccess(t *testing.T) {
 	leftover, _ := filepath.Glob(filepath.Join(dir, ".imageconv-*"))
 	if len(leftover) > 0 {
 		t.Errorf("temp files remain after success: %v", leftover)
+	}
+}
+
+func TestConvertPNGToJPG_RejectsOversizedImage(t *testing.T) {
+	// Override the pixel cap for the duration of the test so we can verify
+	// the gate without allocating a real 8K×8K fixture (~256 MiB).
+	orig := MaxPixels
+	MaxPixels = 100
+	defer func() { MaxPixels = orig }()
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "big.png")
+	dst := filepath.Join(dir, "big.jpg")
+	makePNG(t, src, 20, 20, false) // 400 pixels > 100 cap
+
+	err := ConvertPNGToJPG(src, dst, 90)
+	if err == nil {
+		t.Fatal("expected ErrImageTooLarge, got nil")
+	}
+	if !errors.Is(err, ErrImageTooLarge) {
+		t.Errorf("err = %v, want errors.Is(err, ErrImageTooLarge)", err)
+	}
+	// Cap firing must not write anything to dest dir — no temp files, no jpg.
+	if _, statErr := os.Stat(dst); !os.IsNotExist(statErr) {
+		t.Error("dst jpg should not exist after cap rejection")
+	}
+	leftover, _ := filepath.Glob(filepath.Join(dir, ".imageconv-*"))
+	if len(leftover) > 0 {
+		t.Errorf("temp files remain: %v", leftover)
+	}
+}
+
+func TestConvertPNGToJPG_AllowsAtCapBoundary(t *testing.T) {
+	// Boundary check: width*height == MaxPixels must pass.
+	orig := MaxPixels
+	MaxPixels = 100
+	defer func() { MaxPixels = orig }()
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "exact.png")
+	dst := filepath.Join(dir, "exact.jpg")
+	makePNG(t, src, 10, 10, false) // exactly 100 pixels
+
+	if err := ConvertPNGToJPG(src, dst, 90); err != nil {
+		t.Fatalf("at-cap boundary should succeed: %v", err)
 	}
 }
 

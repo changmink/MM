@@ -6,16 +6,33 @@
 package imageconv
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
 	"image/jpeg"
+	_ "image/png" // register PNG decoder for image.DecodeConfig
 	"os"
 	"path/filepath"
 
 	"github.com/disintegration/imaging"
 )
+
+// MaxPixels caps the total pixel count (width × height) we will decode.
+// 64M pixels ≈ 8K×8K, which decodes to ~256 MiB of RGBA + a same-sized
+// composite buffer (~512 MiB peak per concurrent request). A pathological
+// PNG header can claim 65535×65535 ≈ 16 GiB; the gate below rejects such
+// input by reading the IHDR chunk before any pixel allocation.
+//
+// Variable, not const, so tests can override with a small value to exercise
+// the rejection branch without allocating a real oversize fixture.
+var MaxPixels = 64_000_000
+
+// ErrImageTooLarge is returned when the source PNG's declared dimensions
+// would exceed MaxPixels. Callers map this to a stable wire code so
+// clients can distinguish "decode failed" from "we refused to try".
+var ErrImageTooLarge = errors.New("imageconv: image too large")
 
 // ConvertPNGToJPG decodes srcPath as a PNG, composites alpha pixels onto a
 // white background, and writes a JPEG to destPath. The write is atomic — a
@@ -25,6 +42,23 @@ import (
 func ConvertPNGToJPG(srcPath, destPath string, quality int) error {
 	if quality < 0 || quality > 100 {
 		return fmt.Errorf("imageconv: quality out of range: %d", quality)
+	}
+
+	// Header-only inspection first — image.DecodeConfig reads just the IHDR
+	// chunk so the pixel cap fires before any width*height*4 allocation.
+	// This blocks both legitimately huge images and crafted decompression
+	// bombs whose IDAT decompresses to many GiB.
+	cfgFile, err := os.Open(srcPath)
+	if err != nil {
+		return fmt.Errorf("imageconv: decode: %w", err)
+	}
+	cfg, _, err := image.DecodeConfig(cfgFile)
+	cfgFile.Close()
+	if err != nil {
+		return fmt.Errorf("imageconv: decode: %w", err)
+	}
+	if int64(cfg.Width)*int64(cfg.Height) > int64(MaxPixels) {
+		return fmt.Errorf("%w: %dx%d (limit %d pixels)", ErrImageTooLarge, cfg.Width, cfg.Height, MaxPixels)
 	}
 
 	src, err := imaging.Open(srcPath)

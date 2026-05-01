@@ -185,11 +185,15 @@ func (h *Handler) convertImageOne(parentCtx context.Context, index int, relPath 
 }
 
 // classifyConvertImageErr maps the imageconv error chain to public wire codes.
-// imageconv wraps with stable prefixes ("imageconv: decode" / "encode"...) so
-// substring matching is acceptable here without leaking internal detail.
+// Sentinel checks (errors.Is) come first so a future rewording of the wrap
+// prefix doesn't silently downgrade a too-large rejection to write_failed;
+// substring matching covers the remaining wraps that imageconv emits today.
 func classifyConvertImageErr(err error) string {
 	if err == nil {
 		return ""
+	}
+	if errors.Is(err, imageconv.ErrImageTooLarge) {
+		return "image_too_large"
 	}
 	msg := err.Error()
 	switch {
