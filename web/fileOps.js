@@ -142,14 +142,17 @@ function showFolderError(msg) {
 }
 
 // ── Delete ────────────────────────────────────────────────────────────────────
-export async function deleteFile(path) {
-  if (!confirm(`삭제하시겠습니까?\n${path}`)) return;
+// opts.skipBrowse=true면 호출자(라이트박스)가 자체 mutation 후 _browse를
+// 직접 호출하므로 중복 fetch를 피한다. return: 성공 true / 취소·실패 false.
+export async function deleteFile(path, opts = {}) {
+  if (!confirm(`삭제하시겠습니까?\n${path}`)) return false;
   const res = await fetch('/api/file?path=' + encodeURIComponent(path), { method: 'DELETE' });
   if (res.ok) {
-    _browse(currentPath, false);
-  } else {
-    alert('삭제 실패');
+    if (!opts.skipBrowse) _browse(currentPath, false);
+    return true;
   }
+  alert('삭제 실패');
+  return false;
 }
 
 export async function deleteFolder(path) {

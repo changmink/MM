@@ -10,6 +10,7 @@ import {
   videoEntries, setVideoEntries,
   visibleFilePaths, setVisibleFilePaths,
   lbIndex, setLbIndex,
+  lbCurrentVideoPath, setLbCurrentVideoPath,
   playlist, setPlaylist,
   playlistIndex, setPlaylistIndex,
   selectedPaths, view,
@@ -441,18 +442,50 @@ function handleClick(entry) {
 // ── Lightbox ──────────────────────────────────────────────────────────────────
 function openLightboxImage(index) {
   setLbIndex(index);
+  setLbCurrentVideoPath(null);
   const entry = imageEntries[lbIndex];
   $.lbContent.innerHTML = `<img src="/api/stream?path=${encodeURIComponent(entry.path)}" alt="${esc(entry.name)}">`;
   $.lightbox.classList.remove('hidden');
 }
 
 function openLightboxVideo(entry) {
+  setLbCurrentVideoPath(entry.path);
   const mime = entry.path.toLowerCase().endsWith('.ts') ? 'video/mp4' : (entry.mime || 'video/mp4');
   $.lbContent.innerHTML = `
     <video controls autoplay>
       <source src="/api/stream?path=${encodeURIComponent(entry.path)}" type="${esc(mime)}">
     </video>`;
   $.lightbox.classList.remove('hidden');
+}
+
+// 닫기 트리거(✕ / 배경 클릭 / Esc)는 모두 이 함수를 거치게 해서
+// lbCurrentVideoPath 리셋이 한 곳에 모이게 한다 — 누락 시 다음 이미지
+// 라이트박스에서 stale path가 살아남아 삭제 분기가 동영상으로 새는 버그 발생.
+function closeLightbox() {
+  $.lightbox.classList.add('hidden');
+  $.lbContent.innerHTML = '';
+  setLbCurrentVideoPath(null);
+}
+
+async function deleteCurrentLightboxItem() {
+  if (lbCurrentVideoPath) {
+    const ok = await deleteFile(lbCurrentVideoPath, { skipBrowse: true });
+    if (!ok) return;
+    closeLightbox();
+    browse(currentPath, false);
+  } else if (imageEntries.length) {
+    const entry = imageEntries[lbIndex];
+    const ok = await deleteFile(entry.path, { skipBrowse: true });
+    if (!ok) return;
+    imageEntries.splice(lbIndex, 1);
+    if (imageEntries.length === 0) {
+      closeLightbox();
+    } else {
+      setLbIndex(lbIndex % imageEntries.length);
+      openLightboxImage(lbIndex);
+    }
+    browse(currentPath, false);
+  }
 }
 
 // ── Audio Player ──────────────────────────────────────────────────────────────
@@ -502,10 +535,8 @@ export function wireBrowse() {
   });
 
   // Lightbox controls
-  $.lbClose.addEventListener('click', () => {
-    $.lightbox.classList.add('hidden');
-    $.lbContent.innerHTML = '';
-  });
+  $.lbClose.addEventListener('click', closeLightbox);
+  $.lbDelete.addEventListener('click', deleteCurrentLightboxItem);
   $.lbPrev.addEventListener('click', () => {
     if (!imageEntries.length) return;
     setLbIndex((lbIndex - 1 + imageEntries.length) % imageEntries.length);
@@ -517,16 +548,14 @@ export function wireBrowse() {
     openLightboxImage(lbIndex);
   });
   $.lightbox.addEventListener('click', e => {
-    if (e.target === $.lightbox) {
-      $.lightbox.classList.add('hidden');
-      $.lbContent.innerHTML = '';
-    }
+    if (e.target === $.lightbox) closeLightbox();
   });
   document.addEventListener('keydown', e => {
     if ($.lightbox.classList.contains('hidden')) return;
-    if (e.key === 'Escape') $.lbClose.click();
+    if (e.key === 'Escape') closeLightbox();
     if (e.key === 'ArrowLeft') $.lbPrev.click();
     if (e.key === 'ArrowRight') $.lbNext.click();
+    if (e.key === 'Delete') deleteCurrentLightboxItem();
   });
 
   // Audio auto-advance — module mode imports are read-only bindings, so the
