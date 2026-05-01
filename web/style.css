@@ -635,6 +635,24 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   margin-top: 4px;
   min-height: 1em; /* prevent layout shift when the hint appears */
 }
+.settings-field-checkbox {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 8px;
+  align-items: center;
+  cursor: pointer;
+}
+.settings-field-checkbox input[type="checkbox"] {
+  margin: 0;
+}
+.settings-field-checkbox .settings-label {
+  margin: 0;
+  color: var(--text);
+}
+.settings-field-checkbox .settings-hint {
+  grid-column: 1 / -1;
+  margin-top: 2px;
+}
 
 /* Modal */
 .modal-overlay {

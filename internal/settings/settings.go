@@ -41,6 +41,7 @@ const (
 type Settings struct {
 	URLImportMaxBytes       int64 `json:"url_import_max_bytes"`
 	URLImportTimeoutSeconds int   `json:"url_import_timeout_seconds"`
+	AutoConvertPNGToJPG     bool  `json:"auto_convert_png_to_jpg"`
 }
 
 // Default returns fresh-install values. Callers should never mutate the
@@ -49,6 +50,7 @@ func Default() Settings {
 	return Settings{
 		URLImportMaxBytes:       DefaultMaxBytes,
 		URLImportTimeoutSeconds: DefaultTimeoutSeconds,
+		AutoConvertPNGToJPG:     true,
 	}
 }
 
@@ -145,6 +147,18 @@ func loadFile(path string) (Settings, error) {
 	var s Settings
 	if err := json.Unmarshal(data, &s); err != nil {
 		return zero, err
+	}
+	// Legacy migration: pre-Phase-25 settings.json predates the
+	// auto_convert_png_to_jpg key. JSON decode silently fills it with the
+	// boolean zero (false), but SPEC §2.7 documents the default as true.
+	// Inspect the raw map for key presence and apply the documented default
+	// on absence so legacy users get the new behavior on first run; the next
+	// PATCH persists it explicitly.
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(data, &raw) == nil {
+		if _, ok := raw["auto_convert_png_to_jpg"]; !ok {
+			s.AutoConvertPNGToJPG = true
+		}
 	}
 	return s, nil
 }

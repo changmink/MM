@@ -65,6 +65,7 @@ export const $ = {
   settingsMaxInput:     document.getElementById('settings-max-mib'),
   settingsMaxHint:      document.getElementById('settings-max-hint'),
   settingsTimeInput:    document.getElementById('settings-timeout-min'),
+  settingsAutoPNG:      document.getElementById('settings-auto-png'),
   settingsError:        document.getElementById('settings-error'),
   settingsCancelBtn:    document.getElementById('settings-cancel-btn'),
   settingsConfirmBtn:   document.getElementById('settings-confirm-btn'),

@@ -16,6 +16,9 @@ func TestDefaults(t *testing.T) {
 	if d.URLImportTimeoutSeconds != DefaultTimeoutSeconds {
 		t.Errorf("URLImportTimeoutSeconds = %d, want %d", d.URLImportTimeoutSeconds, DefaultTimeoutSeconds)
 	}
+	if !d.AutoConvertPNGToJPG {
+		t.Errorf("AutoConvertPNGToJPG = false, want true (SPEC §2.7 default)")
+	}
 	if err := Validate(d); err != nil {
 		t.Fatalf("Default() produced invalid settings: %v", err)
 	}
@@ -162,6 +165,67 @@ func TestUpdate_RejectsOutOfRange(t *testing.T) {
 	path := filepath.Join(dir, configSubdir, settingsFile)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("rejected update wrote settings.json: err=%v", err)
+	}
+}
+
+func TestNew_LegacyMissingAutoConvertKey(t *testing.T) {
+	// Pre-Phase-25 settings.json files only contain the two URL fields.
+	// New() must treat the missing auto_convert_png_to_jpg key as the default
+	// (true) so existing users get the documented behavior on first run.
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, configSubdir)
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte(`{"url_import_max_bytes": 10737418240, "url_import_timeout_seconds": 1800}`)
+	if err := os.WriteFile(filepath.Join(configDir, settingsFile), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.Snapshot().AutoConvertPNGToJPG {
+		t.Errorf("legacy file: AutoConvertPNGToJPG = false, want true (default migration)")
+	}
+}
+
+func TestUpdate_AutoConvertToggle(t *testing.T) {
+	// Verify true→false→true round-trip including disk persistence.
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.Snapshot().AutoConvertPNGToJPG {
+		t.Fatal("fresh Store should snapshot AutoConvertPNGToJPG=true")
+	}
+
+	off := s.Snapshot()
+	off.AutoConvertPNGToJPG = false
+	if err := s.Update(off); err != nil {
+		t.Fatalf("Update(false): %v", err)
+	}
+	if s.Snapshot().AutoConvertPNGToJPG {
+		t.Fatal("after Update(false), Snapshot still true")
+	}
+
+	// Reload from disk — false must persist.
+	s2, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s2.Snapshot().AutoConvertPNGToJPG {
+		t.Fatal("disk reload: AutoConvertPNGToJPG = true, want false (persisted)")
+	}
+
+	on := s2.Snapshot()
+	on.AutoConvertPNGToJPG = true
+	if err := s2.Update(on); err != nil {
+		t.Fatalf("Update(true): %v", err)
+	}
+	if !s2.Snapshot().AutoConvertPNGToJPG {
+		t.Fatal("after Update(true), Snapshot still false")
 	}
 }
 
