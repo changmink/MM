@@ -3690,3 +3690,97 @@ PJ1과 PJ2는 leaf로 병렬 가능. PJ3는 PJ1+PJ2가 모두 끝나야 시작. 
 - **위험: 큰 PNG (수십 MB) 디코드 메모리** — `imaging.Open` 은 전체 이미지를 메모리에 올린다. 단일 사용자 가정 + 일반 사진 크기에서 문제 없음. 4K 스크린샷도 ~50MB RAM. 별도 cap 도입 안 함.
 - **롤백:** Phase 25 머지 단위로 revert → Phase 24 상태 복귀. settings.json 의 `auto_convert_png_to_jpg` 키는 남지만 서버가 무시(미지의 필드는 `DisallowUnknownFields`로 PATCH 거부 — 실제로는 GET/디스크 로드는 허용이라 무해). 기존 사용자 PNG 파일은 변환 안 됨(자동 변환은 신규 업로드부터만 적용된 상태였음). 데이터 손실 없음.
 
+## Phase 26 — 선택한 PNG만 변환 (`feature/png-selected-convert`)
+
+**Spec:** [SPEC.md §2.8.2](../SPEC.md) (일괄 변환 트리거 selection-aware 모드 전환)
+
+기존 Phase 25 PJ5에서 도입한 "모든 PNG 변환 (M개)" 툴바 버튼을 **selection-aware 모드 전환**으로 확장한다. 선택이 있으면 "선택 PNG 변환 (N개)"로 라벨이 자동 바뀌고, `selectedPaths` ∩ visible 중 PNG만 추려서 보낸다. 비-PNG는 자동 제외(차단/경고 없음). 카드별 단일 변환 버튼은 그대로.
+
+**의존 그래프**
+
+```
+  state.js (selectedPaths) ─┐
+                            ├→ browse.js (updateConvertPNGAllBtn) ─→ convertImage.js (변경 없음)
+  applyView (visible)      ─┘                                      └→ POST /api/convert-image (변경 없음)
+```
+
+selection 변경 → `setSelected()` → `renderView()` → `syncSelectionWithVisible()` → `updateConvertPNGAllBtn(visible)` → 라벨/dataset 자동 갱신.
+
+**범위**
+- 변경 파일: `web/browse.js` (updateConvertPNGAllBtn 본체) + `web/index.html` (script 버전 bump).
+- 변경 없음: 백엔드 전부 / convertImage.js / dom.js / state.js / settings / CSS.
+
+### PS-1 — SPEC + plan + todo (선행 커밋, 구현 없음)
+
+**파일:** `SPEC.md`, `tasks/plan.md`, `tasks/todo.md`
+
+- SPEC.md §2.8.2 일괄 변환 트리거 항목을 selection-aware 모드 전환 사양으로 교체.
+- SPEC.md §2.8.2 수동 테스트 시나리오 1건 추가.
+- tasks/plan.md에 본 Phase 26 섹션 추가.
+- tasks/todo.md Phase 26 entry 추가.
+
+**완료 기준:** 문서만 변경, `go test ./... && go vet ./...` 회귀 통과.
+
+**검증:** SPEC §2.8.2 라인 diff 리뷰. todo entry 형식 Phase 25와 일관.
+
+### PS-2 — `web/browse.js` selection-aware 분기
+
+**파일:** `web/browse.js`, `web/index.html`
+
+- `selectedVisiblePNGPaths(visible)` 헬퍼 신규 — `selectedPaths` ∩ `visible` 중 `mime === 'image/png'`인 path만.
+- `updateConvertPNGAllBtn(visible)` 본체 수정:
+  ```js
+  const allPNG = visiblePNGPaths(visible);
+  const selectedPNG = selectedVisiblePNGPaths(visible);
+  const useSelection = selectedPaths.size > 0;
+  const targets = useSelection ? selectedPNG : allPNG;
+  if (targets.length === 0) {
+    $.convertPNGAllBtn.hidden = true;
+    $.convertPNGAllBtn.dataset.paths = '';
+    return;
+  }
+  $.convertPNGAllBtn.hidden = false;
+  $.convertPNGAllBtn.textContent = useSelection
+    ? `선택 PNG 변환 (${targets.length}개)`
+    : `모든 PNG 변환 (${targets.length}개)`;
+  $.convertPNGAllBtn.dataset.paths = JSON.stringify(targets);
+  ```
+- `index.html` `<script type="module" src="/main.js?v=35">` → `?v=36`.
+
+**완료 기준:**
+- 선택 0개 + visible PNG ≥ 1 → "모든 PNG 변환 (M개)" (기존 동작).
+- 선택 ≥ 1 + 그중 PNG ≥ 1 → "선택 PNG 변환 (N개)", dataset.paths가 PNG만 포함.
+- 선택 ≥ 1인데 PNG 0개 → 버튼 숨김, dataset.paths 비움.
+- 선택 0개 + visible PNG 0개 → 버튼 숨김 (기존 동작).
+- 선택 변경 후 라벨 즉시 갱신 (renderView 자동 호출 경로 활용).
+- 모달 진입 후 버튼 클릭 핸들러는 변경 없이 dataset.paths를 그대로 사용.
+
+**검증:**
+- `go test ./... && go vet ./...` (백엔드 무영향이라 무조건 pass).
+- 코드 리뷰: `selectedVisiblePNGPaths`도 `visible` 인자로 한 번 더 필터해 이중 방어.
+
+### PS-3 — Docker 재빌드 + 수동 E2E
+
+**`docker compose up -d --build`** 후 브라우저 시나리오 5개:
+
+1. **기존 동작 회귀**: 선택 0개 + visible PNG 3개 → "모든 PNG 변환 (3개)" 표시 → 클릭 → 모달에 PNG 3개 → 변환 후 3개 .jpg 갱신.
+2. **선택 모드**: PNG 5개 중 2개 체크박스 선택 → 라벨 "선택 PNG 변환 (2개)"로 즉시 전환 → 클릭 → 모달 파일 목록에 PNG 2개만 → 변환 후 2개만 .jpg, 나머지 3개 PNG 무영향.
+3. **혼합 선택**: PNG 3개 + 비-PNG 2개 같이 체크박스 선택 → 라벨 "선택 PNG 변환 (3개)" → 모달에 PNG 3개만 → 변환 후 PNG만 .jpg, 비-PNG는 무영향.
+4. **선택에 PNG 없음**: JPG 2개만 체크박스 선택 → 버튼 숨김 (선택 해제 시 다시 "모든 PNG").
+5. **폴더 이동 후 selection 비워짐**: PNG 선택 → 다른 폴더 클릭 → 라벨 "모든 PNG 변환"으로 복귀, 새 폴더의 visible PNG 기준 카운트.
+
+**완료 기준:** 5개 시나리오 모두 기대 동작. 콘솔 에러 0. 모바일(<600px) 1회 스모크.
+
+**체크포인트 ②:** 위 5개 통과 + 회귀(카드별 단일 변환 / TS 변환 / 업로드 자동 변환) 각 1회 스모크.
+
+### Out of scope (Phase 26)
+- 선택에 비-PNG가 섞여 있을 때 "PNG만 변환됨" 알림 토스트 (자동 제외로 일관, 모달이 결과를 보여줌).
+- 카드별 PNG 변환 버튼을 selection 기반으로 묶기 (단일 동선 유지).
+- 선택 항목이 다른 폴더에 걸친 경우 처리 (기존 selection 정책상 발생 불가).
+- 선택 가능한 batch size cap (백엔드 50개 cap 그대로 적용 — 51개 선택 시 `400 too many paths` 그대로 노출).
+
+### 위험 / 롤백
+- **위험: 선택 50개 초과** — 백엔드가 51개부터 `400 too many paths`. 사용자 경험상 안내가 필요할 수 있으나 단일 사용자 운용에서 PNG 50개 초과 동시 변환은 드물다고 판단, 본 phase에서는 별도 가드 없이 기존 4xx 메시지 그대로 노출. 후속 phase에서 toast 안내 검토.
+- **위험: selection이 stale** — `syncSelectionWithVisible`이 매 renderView마다 정리하므로 실질적으로 발생 불가. `selectedVisiblePNGPaths`에서도 visible 인자로 다시 한 번 필터해 이중 방어.
+- **롤백:** `web/browse.js` `updateConvertPNGAllBtn` 본체 1개 함수 revert + main.js 버전 번호 되돌리기. 백엔드 무변경이라 데이터 영향 없음.
+
