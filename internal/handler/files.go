@@ -13,9 +13,15 @@ import (
 	"path/filepath"
 	"strings"
 
+	"file_server/internal/imageconv"
 	"file_server/internal/media"
 	"file_server/internal/thumb"
 )
+
+// pngAutoConvertQuality is the JPEG quality used for upload-time PNG → JPG
+// conversion (SPEC §2.8). 90 balances visible quality against file size for
+// typical photo / screenshot content; not user-configurable on purpose.
+const pngAutoConvertQuality = 90
 
 func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -68,47 +74,153 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// filepath.Base strips any directory component from the client-supplied filename
-	destPath := filepath.Join(destDir, filepath.Base(part.FileName()))
-	dst, err := createUniqueFile(destPath)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "create file failed", err)
-		return
-	}
-	destPath = dst.Name()
-	defer dst.Close()
+	// filepath.Base strips any directory component from the client-supplied filename.
+	clientName := filepath.Base(part.FileName())
+	destPath := filepath.Join(destDir, clientName)
 
-	size, err := io.Copy(dst, part)
-	if err != nil {
-		os.Remove(destPath)
-		writeError(w, r, http.StatusInternalServerError, "write file failed", err)
-		return
+	// Decide whether to take the PNG → JPG branch BEFORE touching disk so we
+	// can stream the upload into a temp PNG (rather than the user-visible
+	// destination) and only commit to a final name after the conversion result
+	// is known. SPEC §2.8.1: branch fires only for .png (case-insensitive)
+	// AND when the snapshot has the toggle on.
+	autoConvert := strings.EqualFold(filepath.Ext(clientName), ".png") &&
+		h.settingsSnapshot().AutoConvertPNGToJPG
+
+	var (
+		finalPath string
+		finalSize int64
+		converted bool
+		warnings  = []string{}
+	)
+
+	if autoConvert {
+		var err error
+		finalPath, finalSize, converted, warnings, err = h.uploadPNGAutoConvert(destDir, destPath, part)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "write file failed", err)
+			return
+		}
+	} else {
+		dst, err := createUniqueFile(destPath)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "create file failed", err)
+			return
+		}
+		finalPath = dst.Name()
+		size, copyErr := io.Copy(dst, part)
+		dst.Close()
+		if copyErr != nil {
+			os.Remove(finalPath)
+			writeError(w, r, http.StatusInternalServerError, "write file failed", copyErr)
+			return
+		}
+		finalSize = size
 	}
 
-	fileType := media.DetectType(part.FileName())
+	fileType := media.DetectType(filepath.Base(finalPath))
 
 	// generate thumbnail asynchronously for images and videos via the bounded
 	// worker pool. If the pool queue is full we log and skip — handleThumb
 	// generates lazily on first view, so the user still gets a thumbnail.
 	if fileType == media.TypeImage || fileType == media.TypeVideo {
 		thumbDir := filepath.Join(destDir, ".thumb")
-		thumbPath := filepath.Join(thumbDir, filepath.Base(destPath)+".jpg")
-		if !h.thumbPool.Submit(destPath, thumbPath) {
+		thumbPath := filepath.Join(thumbDir, filepath.Base(finalPath)+".jpg")
+		if !h.thumbPool.Submit(finalPath, thumbPath) {
 			slog.Warn("thumb pool full, deferring to lazy generation",
-				"src", destPath,
+				"src", finalPath,
 			)
 		}
 	}
 
-	relResult := filepath.ToSlash(filepath.Join(rel, filepath.Base(destPath)))
+	relResult := filepath.ToSlash(filepath.Join(rel, filepath.Base(finalPath)))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"path": relResult,
-		"name": filepath.Base(destPath),
-		"size": size,
-		"type": string(fileType),
+		"path":      relResult,
+		"name":      filepath.Base(finalPath),
+		"size":      finalSize,
+		"type":      string(fileType),
+		"converted": converted,
+		"warnings":  warnings,
 	})
+}
+
+// uploadPNGAutoConvert streams the multipart part into a hidden temp PNG,
+// converts it to JPEG via imageconv, and renames the result to <basename>.jpg
+// in destDir. On any conversion failure the original PNG is preserved at the
+// originally-requested destPath instead — the upload still succeeds (201)
+// with a "convert_failed" warning so the client can surface the fallback
+// without treating it as data loss (SPEC §2.8.1).
+func (h *Handler) uploadPNGAutoConvert(destDir, destPath string, part io.Reader) (finalPath string, size int64, converted bool, warnings []string, err error) {
+	warnings = []string{}
+
+	// Both temp files go in destDir so the final rename is same-volume. The
+	// dot prefix hides them from /api/browse during the brief write window.
+	tmpPNG, err := os.CreateTemp(destDir, ".pngconvert-*.png")
+	if err != nil {
+		return "", 0, false, warnings, fmt.Errorf("create temp png: %w", err)
+	}
+	tmpPNGPath := tmpPNG.Name()
+	pngConsumed := false
+	defer func() {
+		if !pngConsumed {
+			_ = os.Remove(tmpPNGPath)
+		}
+	}()
+
+	size, copyErr := io.Copy(tmpPNG, part)
+	closeErr := tmpPNG.Close()
+	if copyErr != nil {
+		return "", 0, false, warnings, copyErr
+	}
+	if closeErr != nil {
+		return "", 0, false, warnings, closeErr
+	}
+
+	// Convert into a sibling temp file rather than the visible jpgPath so we
+	// don't claim the user-facing name until rename time.
+	tmpJPGPath := tmpPNGPath + ".jpg"
+	convErr := imageconv.ConvertPNGToJPG(tmpPNGPath, tmpJPGPath, pngAutoConvertQuality)
+
+	// jpgPath is the human-friendly target — original base name with .jpg
+	// (lowercased, so SHOT.PNG → SHOT.jpg).
+	ext := filepath.Ext(destPath)
+	jpgPath := destPath[:len(destPath)-len(ext)] + ".jpg"
+
+	if convErr == nil {
+		// Conversion succeeded — rename the JPG into place; PNG temp can go.
+		final, suffixed, renameErr := renameToUniqueDest(tmpJPGPath, jpgPath)
+		if renameErr != nil {
+			_ = os.Remove(tmpJPGPath)
+			return "", 0, false, warnings, fmt.Errorf("rename converted jpg: %w", renameErr)
+		}
+		_ = os.Remove(tmpPNGPath)
+		pngConsumed = true
+		if suffixed {
+			warnings = append(warnings, "renamed")
+		}
+		st, statErr := os.Stat(final)
+		if statErr != nil {
+			return "", 0, false, warnings, fmt.Errorf("stat converted jpg: %w", statErr)
+		}
+		return final, st.Size(), true, warnings, nil
+	}
+
+	// Conversion failed — fall back to saving the original PNG.
+	slog.Warn("png auto-convert failed, falling back to original",
+		"dest", destPath, "err", convErr,
+	)
+	_ = os.Remove(tmpJPGPath) // imageconv cleans its own temp, this is best-effort
+	warnings = append(warnings, "convert_failed")
+	final, suffixed, renameErr := renameToUniqueDest(tmpPNGPath, destPath)
+	if renameErr != nil {
+		return "", 0, false, warnings, fmt.Errorf("rename fallback png: %w", renameErr)
+	}
+	pngConsumed = true
+	if suffixed {
+		warnings = append(warnings, "renamed")
+	}
+	return final, size, false, warnings, nil
 }
 
 func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
@@ -694,6 +806,34 @@ func validateName(name string) error {
 		}
 	}
 	return nil
+}
+
+// renameToUniqueDest moves srcPath to destPath, falling back to <base>_N.<ext>
+// suffixes if the target slot is taken. Uses os.Link + os.Remove so EEXIST is
+// detected race-free (matches atomicRenameFile) — a parallel uploader cannot
+// claim the same free slot between our existence check and our rename. The
+// suffixed return reports whether a suffix was applied so the caller can
+// surface a "renamed" warning.
+func renameToUniqueDest(srcPath, destPath string) (finalPath string, suffixed bool, err error) {
+	const maxAttempts = 10000
+	if linkErr := os.Link(srcPath, destPath); linkErr == nil {
+		_ = os.Remove(srcPath)
+		return destPath, false, nil
+	} else if !os.IsExist(linkErr) {
+		return "", false, linkErr
+	}
+	ext := filepath.Ext(destPath)
+	base := destPath[:len(destPath)-len(ext)]
+	for i := 1; i < maxAttempts; i++ {
+		candidate := fmt.Sprintf("%s_%d%s", base, i, ext)
+		if linkErr := os.Link(srcPath, candidate); linkErr == nil {
+			_ = os.Remove(srcPath)
+			return candidate, true, nil
+		} else if !os.IsExist(linkErr) {
+			return "", false, linkErr
+		}
+	}
+	return "", false, fmt.Errorf("renameToUniqueDest: exhausted attempts for %s", destPath)
 }
 
 // createUniqueFile atomically creates path (or path with _N suffix if taken)

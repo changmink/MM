@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +16,67 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"file_server/internal/settings"
 )
+
+// makeAutoConvertSetup wires a mux with a real settings store so the upload
+// PNG → JPG branch (§2.8.1) can be toggled per test.
+func makeAutoConvertSetup(t *testing.T, autoConvert bool) (*http.ServeMux, string) {
+	t.Helper()
+	root := t.TempDir()
+	store, err := settings.New(root)
+	if err != nil {
+		t.Fatalf("settings.New: %v", err)
+	}
+	if !autoConvert {
+		next := store.Snapshot()
+		next.AutoConvertPNGToJPG = false
+		if err := store.Update(next); err != nil {
+			t.Fatalf("settings.Update: %v", err)
+		}
+	}
+	mux := http.NewServeMux()
+	Register(mux, root, root, store)
+	return mux, root
+}
+
+// pngBytes builds an in-memory PNG. If withAlpha is true the top-left
+// quadrant is fully transparent so callers can verify white compositing.
+func pngBytes(t *testing.T, w, h int, withAlpha bool) []byte {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			switch {
+			case withAlpha && x < w/2 && y < h/2:
+				img.Set(x, y, color.NRGBA{R: 255, G: 0, B: 0, A: 0})
+			default:
+				img.Set(x, y, color.NRGBA{R: 255, G: 0, B: 0, A: 255})
+			}
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// uploadMultipart sends one form field "file" with the given filename + body
+// and returns the response recorder. Path is the dataDir-relative target.
+func uploadMultipart(mux *http.ServeMux, path, filename string, content []byte) *httptest.ResponseRecorder {
+	body := &bytes.Buffer{}
+	w := multipart.NewWriter(body)
+	fw, _ := w.CreateFormFile("file", filename)
+	fw.Write(content)
+	w.Close()
+	req := httptest.NewRequest("POST", "/api/upload?path="+path, body)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	rw := httptest.NewRecorder()
+	mux.ServeHTTP(rw, req)
+	return rw
+}
 
 func TestUpload(t *testing.T) {
 	root := t.TempDir()
@@ -107,6 +171,197 @@ func TestUploadResponseFields(t *testing.T) {
 			t.Errorf("type = %v, want audio", resp["type"])
 		}
 	})
+}
+
+func TestUpload_PNGAutoConvertOn(t *testing.T) {
+	mux, root := makeAutoConvertSetup(t, true)
+	rw := uploadMultipart(mux, "/", "photo.png", pngBytes(t, 32, 32, false))
+	if rw.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", rw.Code, rw.Body.String())
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(rw.Body).Decode(&resp)
+	if resp["name"] != "photo.jpg" {
+		t.Errorf("name = %v, want photo.jpg", resp["name"])
+	}
+	if resp["converted"] != true {
+		t.Errorf("converted = %v, want true", resp["converted"])
+	}
+	warnings, _ := resp["warnings"].([]interface{})
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %v, want []", warnings)
+	}
+	// Disk: only the .jpg should exist; PNG and temps are gone.
+	if _, err := os.Stat(filepath.Join(root, "photo.jpg")); err != nil {
+		t.Errorf("expected photo.jpg on disk: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "photo.png")); !os.IsNotExist(err) {
+		t.Error("photo.png should not exist after auto-convert")
+	}
+	leftover, _ := filepath.Glob(filepath.Join(root, ".pngconvert-*"))
+	if len(leftover) > 0 {
+		t.Errorf("temp files remain: %v", leftover)
+	}
+	leftover, _ = filepath.Glob(filepath.Join(root, ".imageconv-*"))
+	if len(leftover) > 0 {
+		t.Errorf("imageconv temps remain: %v", leftover)
+	}
+}
+
+func TestUpload_PNGAlphaCompositesWhite(t *testing.T) {
+	mux, root := makeAutoConvertSetup(t, true)
+	rw := uploadMultipart(mux, "/", "alpha.png", pngBytes(t, 40, 40, true))
+	if rw.Code != http.StatusCreated {
+		t.Fatalf("status = %d", rw.Code)
+	}
+	jpgPath := filepath.Join(root, "alpha.jpg")
+	f, err := os.Open(jpgPath)
+	if err != nil {
+		t.Fatalf("open jpg: %v", err)
+	}
+	defer f.Close()
+	img, err := jpeg.Decode(f)
+	if err != nil {
+		t.Fatalf("jpeg decode: %v", err)
+	}
+	// Top-left quadrant was fully transparent — should look white.
+	r, g, b, _ := img.At(5, 5).RGBA()
+	if r>>8 < 240 || g>>8 < 240 || b>>8 < 240 {
+		t.Errorf("alpha=0 sample = (%d,%d,%d), want ~white", r>>8, g>>8, b>>8)
+	}
+}
+
+func TestUpload_PNGAutoConvertOff(t *testing.T) {
+	mux, root := makeAutoConvertSetup(t, false)
+	rw := uploadMultipart(mux, "/", "photo.png", pngBytes(t, 16, 16, false))
+	if rw.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", rw.Code, rw.Body.String())
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(rw.Body).Decode(&resp)
+	if resp["name"] != "photo.png" {
+		t.Errorf("name = %v, want photo.png", resp["name"])
+	}
+	if resp["converted"] != false {
+		t.Errorf("converted = %v, want false", resp["converted"])
+	}
+	if _, err := os.Stat(filepath.Join(root, "photo.png")); err != nil {
+		t.Errorf("expected photo.png on disk: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "photo.jpg")); !os.IsNotExist(err) {
+		t.Error("photo.jpg should not exist when auto-convert is off")
+	}
+}
+
+func TestUpload_PNGCorruptFallsBackToOriginal(t *testing.T) {
+	mux, root := makeAutoConvertSetup(t, true)
+	// Truncated PNG signature — decode will fail.
+	rw := uploadMultipart(mux, "/", "broken.png", []byte("\x89PNG\r\n\x1a\nGARBAGE"))
+	if rw.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (fallback should preserve upload success)", rw.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(rw.Body).Decode(&resp)
+	if resp["name"] != "broken.png" {
+		t.Errorf("name = %v, want broken.png (fallback to original)", resp["name"])
+	}
+	if resp["converted"] != false {
+		t.Errorf("converted = %v, want false on fallback", resp["converted"])
+	}
+	warnings, _ := resp["warnings"].([]interface{})
+	hasConvertFailed := false
+	for _, w := range warnings {
+		if w == "convert_failed" {
+			hasConvertFailed = true
+		}
+	}
+	if !hasConvertFailed {
+		t.Errorf("warnings = %v, want to contain convert_failed", warnings)
+	}
+	if _, err := os.Stat(filepath.Join(root, "broken.png")); err != nil {
+		t.Errorf("original PNG missing after fallback: %v", err)
+	}
+	leftover, _ := filepath.Glob(filepath.Join(root, ".pngconvert-*"))
+	if len(leftover) > 0 {
+		t.Errorf("temp files remain: %v", leftover)
+	}
+}
+
+func TestUpload_PNGCollisionGetsSuffix(t *testing.T) {
+	mux, root := makeAutoConvertSetup(t, true)
+	// Pre-place a foo.jpg so the converted output collides.
+	os.WriteFile(filepath.Join(root, "foo.jpg"), []byte("existing"), 0644)
+	rw := uploadMultipart(mux, "/", "foo.png", pngBytes(t, 8, 8, false))
+	if rw.Code != http.StatusCreated {
+		t.Fatalf("status = %d", rw.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(rw.Body).Decode(&resp)
+	if resp["name"] != "foo_1.jpg" {
+		t.Errorf("name = %v, want foo_1.jpg", resp["name"])
+	}
+	if resp["converted"] != true {
+		t.Errorf("converted = %v, want true", resp["converted"])
+	}
+	warnings, _ := resp["warnings"].([]interface{})
+	hasRenamed := false
+	for _, w := range warnings {
+		if w == "renamed" {
+			hasRenamed = true
+		}
+	}
+	if !hasRenamed {
+		t.Errorf("warnings = %v, want to contain renamed", warnings)
+	}
+	// Both files exist on disk.
+	if _, err := os.Stat(filepath.Join(root, "foo.jpg")); err != nil {
+		t.Errorf("original foo.jpg missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "foo_1.jpg")); err != nil {
+		t.Errorf("foo_1.jpg missing: %v", err)
+	}
+}
+
+func TestUpload_NonPNGUnaffected(t *testing.T) {
+	mux, root := makeAutoConvertSetup(t, true)
+	for _, fn := range []string{"clip.mp4", "song.mp3", "doc.txt", "pic.jpg"} {
+		t.Run(fn, func(t *testing.T) {
+			rw := uploadMultipart(mux, "/", fn, []byte("placeholder content"))
+			if rw.Code != http.StatusCreated {
+				t.Fatalf("status = %d", rw.Code)
+			}
+			var resp map[string]interface{}
+			json.NewDecoder(rw.Body).Decode(&resp)
+			if resp["name"] != fn {
+				t.Errorf("name = %v, want %s", resp["name"], fn)
+			}
+			if resp["converted"] != false {
+				t.Errorf("converted = %v, want false for %s", resp["converted"], fn)
+			}
+			if _, err := os.Stat(filepath.Join(root, fn)); err != nil {
+				t.Errorf("file missing: %v", err)
+			}
+		})
+	}
+}
+
+func TestUpload_UppercasePNGAlsoConverts(t *testing.T) {
+	mux, root := makeAutoConvertSetup(t, true)
+	rw := uploadMultipart(mux, "/", "SHOT.PNG", pngBytes(t, 12, 12, false))
+	if rw.Code != http.StatusCreated {
+		t.Fatalf("status = %d", rw.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(rw.Body).Decode(&resp)
+	if resp["name"] != "SHOT.jpg" {
+		t.Errorf("name = %v, want SHOT.jpg (lowercase ext)", resp["name"])
+	}
+	if resp["converted"] != true {
+		t.Errorf("converted = %v, want true", resp["converted"])
+	}
+	if _, err := os.Stat(filepath.Join(root, "SHOT.jpg")); err != nil {
+		t.Errorf("SHOT.jpg missing: %v", err)
+	}
 }
 
 func TestDeleteImageCleansThumbnail(t *testing.T) {
