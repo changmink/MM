@@ -10,6 +10,7 @@
 
 import { currentPath } from './state.js';
 import { esc, formatSize, consumeSSE } from './util.js';
+import { wireModalDismiss } from './modalDismiss.js';
 
 export function createConvertModal({
   endpoint,
@@ -189,13 +190,7 @@ export function createConvertModal({
     _browse = deps.browse;
     dom.cancelBtn.addEventListener('click', close);
     dom.confirmBtn.addEventListener('click', submit);
-    dom.modal.addEventListener('click', e => {
-      if (e.target === dom.modal) close();
-    });
-    document.addEventListener('keydown', e => {
-      if (dom.modal.classList.contains('hidden')) return;
-      if (e.key === 'Escape') close();
-    });
+    wireModalDismiss(dom.modal, close);
     if (dom.allBtn) {
       // 툴바 일괄 버튼 — browse.js 가 dataset.paths 에 현재 대상 목록을
       // 직렬화해 둔다. 클릭은 그걸 파싱해 모달 열기.

@@ -7,6 +7,7 @@
 import { $ } from './dom.js';
 import { currentPath } from './state.js';
 import { esc } from './util.js';
+import { wireModalDismiss } from './modalDismiss.js';
 
 const CONVERT_IMAGE_ERROR_LABELS = {
   invalid_path:  '잘못된 경로',
@@ -158,13 +159,7 @@ export function wireConvertImage(deps) {
 
   $.convertImageCancelBtn.addEventListener('click', closeConvertImageModal);
   $.convertImageConfirmBtn.addEventListener('click', onConfirmClick);
-  $.convertImageModal.addEventListener('click', e => {
-    if (e.target === $.convertImageModal) closeConvertImageModal();
-  });
-  document.addEventListener('keydown', e => {
-    if ($.convertImageModal.classList.contains('hidden')) return;
-    if (e.key === 'Escape') closeConvertImageModal();
-  });
+  wireModalDismiss($.convertImageModal, closeConvertImageModal);
 
   // Toolbar batch trigger — populated by browse.js's renderView via the
   // hidden #convert-png-all-btn data attribute.

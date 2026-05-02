@@ -6,6 +6,7 @@
 import { $ } from './dom.js';
 import { currentPath } from './state.js';
 import { esc, formatSize, consumeSSE } from './util.js';
+import { wireModalDismiss } from './modalDismiss.js';
 
 // Labels intentionally omit specific byte/time limits because those are
 // configurable at runtime via /api/settings — hardcoding numbers here made
@@ -682,12 +683,6 @@ export function wireURLImport() {
   $.urlCancelBtn.addEventListener('click', closeURLModal);
   $.urlConfirmBtn.addEventListener('click', submitURLImport);
   $.urlClearFinishedBtn.addEventListener('click', () => _dismissAllFinishedBatches());
-  $.urlModal.addEventListener('click', e => {
-    if (e.target === $.urlModal) closeURLModal();
-  });
   $.urlBadge.addEventListener('click', openURLModal);
-  document.addEventListener('keydown', e => {
-    if ($.urlModal.classList.contains('hidden')) return;
-    if (e.key === 'Escape') closeURLModal();
-  });
+  wireModalDismiss($.urlModal, closeURLModal);
 }
