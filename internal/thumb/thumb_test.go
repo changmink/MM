@@ -130,6 +130,64 @@ func TestGenerateFromVideo(t *testing.T) {
 	})
 }
 
+func requireWebPMux(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("webpmux"); err != nil {
+		t.Skip("webpmux not found in PATH (libwebp-tools)")
+	}
+}
+
+func makeAnimatedWebP(t *testing.T, dir string) string {
+	t.Helper()
+	requireFFmpeg(t)
+	out := filepath.Join(dir, "anim.webp")
+	cmd := exec.Command("ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "color=red:size=64x64:rate=10",
+		"-t", "1",
+		"-c:v", "libwebp", "-loop", "0", "-lossless", "0",
+		"-q:v", "80", "-an",
+		out,
+	)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("makeAnimatedWebP: %v", err)
+	}
+	return out
+}
+
+func TestGenerateAnimatedWebP(t *testing.T) {
+	requireFFmpeg(t)
+	requireWebPMux(t)
+	dir := t.TempDir()
+	src := makeAnimatedWebP(t, dir)
+	dst := filepath.Join(dir, ".thumb", "anim.webp.jpg")
+
+	if err := Generate(src, dst); err != nil {
+		t.Fatalf("Generate(animated webp): %v", err)
+	}
+	fi, err := os.Stat(dst)
+	if err != nil {
+		t.Fatalf("thumbnail not created: %v", err)
+	}
+	if fi.Size() == 0 {
+		t.Error("thumbnail is empty")
+	}
+	// First frame is solid red — decoding the result jpg back should yield
+	// pixels in roughly the red range. We just sanity-check decode succeeds
+	// here; pixel-level color checks are brittle across jpeg quality levels.
+	f, err := os.Open(dst)
+	if err != nil {
+		t.Fatalf("open thumb: %v", err)
+	}
+	defer f.Close()
+	cfg, _, err := image.DecodeConfig(f)
+	if err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	if cfg.Width > thumbWidth || cfg.Height > thumbHeight {
+		t.Errorf("thumbnail %dx%d exceeds %dx%d", cfg.Width, cfg.Height, thumbWidth, thumbHeight)
+	}
+}
+
 func TestProbeDuration(t *testing.T) {
 	dir := t.TempDir()
 	src := makeTestMP4(t, dir) // 4-second clip

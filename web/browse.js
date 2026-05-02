@@ -113,6 +113,51 @@ function updateConvertPNGAllBtn(visible) {
   $.convertPNGAllBtn.dataset.paths = JSON.stringify(paths);
 }
 
+// SPEC §2.5.6 — GIF/WebP 카드 자동재생 throttle. hover-capable 디바이스는
+// hover 시만 stream src 부착, 그 외(모바일 등)는 IntersectionObserver 로
+// viewport 안에서만 활성. 모듈 lifetime 동안 IO 인스턴스 1개를 공유한다.
+const HOVER_CAPABLE = typeof window !== 'undefined'
+  && window.matchMedia
+  && window.matchMedia('(hover: hover)').matches;
+
+let _clipIO = null;
+function clipIOInstance() {
+  if (_clipIO) return _clipIO;
+  _clipIO = new IntersectionObserver(entries => {
+    for (const ent of entries) {
+      const card = ent.target;
+      const img = card.querySelector('img');
+      if (!img) continue;
+      const desired = ent.isIntersecting ? 'stream' : 'thumb';
+      if (card.dataset.clipState === desired) continue;
+      card.dataset.clipState = desired;
+      img.src = desired === 'stream' ? img.dataset.streamSrc : img.dataset.thumbSrc;
+    }
+  }, { rootMargin: '0px', threshold: 0.1 });
+  return _clipIO;
+}
+
+function attachClipHoverPlayback(card) {
+  const img = card.querySelector('img');
+  if (!img || !img.dataset.streamSrc) return;
+  if (HOVER_CAPABLE) {
+    let current = 'thumb';
+    card.addEventListener('mouseenter', () => {
+      if (current === 'stream') return;
+      current = 'stream';
+      img.src = img.dataset.streamSrc;
+    });
+    card.addEventListener('mouseleave', () => {
+      if (current === 'thumb') return;
+      current = 'thumb';
+      img.src = img.dataset.thumbSrc;
+    });
+  } else {
+    card.dataset.clipState = 'thumb';
+    clipIOInstance().observe(card);
+  }
+}
+
 // 움짤 분류 — GIF·WebP 는 무조건 움짤(SPEC §2.5.3); video 는 짧고 작을
 // 때만 (null duration 제외 — 길이를 모르면 보수적으로 비-움짤).
 // 분류와 변환 입력 자격은 다르다: webp 는 §2.9 변환 결과물이므로 입력
@@ -261,7 +306,9 @@ function renderFileList(entries) {
 
   if (images.length) {
     $.fileList.appendChild(sectionTitle('이미지'));
-    $.fileList.appendChild(buildImageGrid(images));
+    const grid = buildImageGrid(images);
+    if (view.type === 'clip') grid.classList.add('image-grid-clip');
+    $.fileList.appendChild(grid);
   }
   if (videos.length) {
     $.fileList.appendChild(sectionTitle('동영상'));
@@ -326,12 +373,22 @@ function buildImageGrid(images) {
     card.className = 'thumb-card';
     card.dataset.path = entry.path;
 
-    const thumbSrc = entry.thumb_available
-      ? '/api/thumb?path=' + encodeURIComponent(entry.path)
-      : '/api/stream?path=' + encodeURIComponent(entry.path);
-
+    const thumbURL = '/api/thumb?path=' + encodeURIComponent(entry.path);
+    const streamURL = '/api/stream?path=' + encodeURIComponent(entry.path);
     const isPNG = entry.mime === 'image/png';
     const isGIF = entry.mime === 'image/gif';
+    const isWebP = entry.mime === 'image/webp';
+    // GIF/WebP 카드는 평시 정적 첫 프레임(/api/thumb, lazy 생성 backstop)
+    // 을 표시하고 hover/IntersectionObserver 시에만 stream URL 로 토글한다
+    // (§2.5.6). 비-움짤 이미지는 기존 thumb_available 폴백 유지.
+    const isAnimatedClip = isGIF || isWebP;
+    const initialSrc = isAnimatedClip
+      ? thumbURL
+      : (entry.thumb_available ? thumbURL : streamURL);
+    const clipDataAttrs = isAnimatedClip
+      ? `data-thumb-src="${esc(thumbURL)}" data-stream-src="${esc(streamURL)}" data-clip-card="true"`
+      : '';
+
     const pngConvertBtn = isPNG
       ? `<button class="png-convert-btn" title="JPG로 변환" aria-label="JPG로 변환">JPG</button>`
       : '';
@@ -343,7 +400,7 @@ function buildImageGrid(images) {
       <label class="select-check" title="선택">
         <input type="checkbox" aria-label="${esc(entry.name)} 선택">
       </label>
-      <img src="${esc(thumbSrc)}" alt="${esc(entry.name)}" loading="lazy">
+      <img src="${esc(initialSrc)}" alt="${esc(entry.name)}" loading="lazy" ${clipDataAttrs}>
       <div class="thumb-name">${esc(entry.name)}</div>
       <span class="size-badge">${esc(formatSize(entry.size))}</span>
       ${pngConvertBtn}
@@ -373,6 +430,7 @@ function buildImageGrid(images) {
         openConvertWebPModal([entry.path]);
       });
     }
+    if (isAnimatedClip) attachClipHoverPlayback(card);
     attachDragHandlers(card, entry);
     grid.appendChild(card);
   });

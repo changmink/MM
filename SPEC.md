@@ -192,6 +192,7 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
 - [ ] **다중 파일 선택 이동**: 파일 카드/테이블 행에서 체크박스로 파일을 선택하고, 툴바에서 현재 필터/검색을 통과한 visible 파일 전체를 선택/해제할 수 있다. 선택된 파일 중 하나를 사이드바 폴더 또는 breadcrumb 경로로 드래그하면 선택 묶음을 기존 `PATCH /api/file {"to": ...}` API로 순차 이동한다. 선택이 없거나 선택되지 않은 파일을 드래그하면 기존 단일 파일 이동 동작을 유지한다. 폴더는 선택 대상에서 제외한다. 상세: [`tasks/spec-multi-file-move-ui.md`](tasks/spec-multi-file-move-ui.md).
 - [ ] **Rubber-band 영역 선택** (§2.5.4)
 - [ ] **라이트박스 내 삭제** (§2.5.5): 원본 이미지·동영상 뷰어 안에서 🗑 버튼 또는 `Delete` 키로 현재 항목 삭제
+- [ ] **움짤 카드 자동재생 부담 완화** (§2.5.6): GIF/WebP 카드는 평시 정적 placeholder, hover/viewport 진입 시만 재생 + 움짤 탭 카드 크기 확대
 
 ### 2.5.1 파일 용량 표시
 
@@ -377,6 +378,56 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
   - 음악 재생목록의 트랙 삭제 — 별도 phase.
   - 모바일 long-press 삭제 트리거 — 데스크톱 키보드/버튼에 한정.
 - **서버 변경:** 없음.
+
+### 2.5.6 움짤 카드 자동재생 부담 완화
+
+움짤(GIF / WebP)은 카드 thumb 사이드카가 없으면 `<img src="/api/stream?...">` 로 원본 자체를 그려 자동재생된다. 폴더에 움짤이 100+ 있으면 visible 여부와 무관하게 모두 디코드되어 저사양 PC에서 부담이 크다. 이 기능은 클라이언트만 변경해 동시 재생되는 카드 수를 줄인다 — **서버 변경 없음**. 평시에는 정적 첫 프레임 jpg(`/api/thumb`) 를 보여주고, hover/viewport 진입 시에만 원본 stream 으로 src 를 토글한다.
+
+**기반 가정 (서버 동작):**
+- `thumb.Generate` 는 GIF 첫 프레임(`decodeGIFFirstFrame`) / 정적 WebP(`imaging.Open`) / **animated WebP** (`webpmux -get frame 1` → `dwebp` → imaging) 모두 처리해 정적 jpg 사이드카(`.thumb/{name}.jpg`) 를 만든다. animated WebP 폴백은 `imaging` 의 `golang.org/x/image/webp` 디코더가 정적 frame 만 지원하는 한계 때문에 필요. **Dockerfile 에 `libwebp-tools` 패키지 추가**(webpmux + dwebp).
+- `serveImageThumb` 는 사이드카가 없으면 즉시 lazy 생성. 즉 클라이언트가 `/api/thumb?path=...` 를 요청하면 GIF/WebP 라도 항상 정적 jpg 가 돌아온다. 첫 호출은 디코드 비용이 있고 두 번째부터는 OS file cache 에서 즉시.
+- browse 응답의 `thumb_available` 은 사이드카 디스크 존재 여부 — 첫 browse 시점에는 GIF/WebP 의 경우 false 일 수 있지만, 클라이언트는 그 값을 무시하고 항상 `/api/thumb` URL 을 사용하는 정책으로 가도 안전(lazy 생성이 backstop).
+
+**대상:**
+- `mime === 'image/gif'` 또는 `mime === 'image/webp'` 카드만. 짧은 동영상 카드는 이미 정적 jpg 썸네일이라 부담 원인 아님.
+- `image-grid` 안의 카드(`buildImageGrid`로 렌더되는 항목). 라이트박스/오디오 등 다른 경로는 무관.
+
+**데스크톱 동작 (`hover` 가능):**
+- [ ] **평시 정적**: GIF/WebP 카드 `<img>` 의 `src` 는 `/api/thumb?path=...` (정적 첫 프레임 jpg). `data-stream-src` 에 `/api/stream?path=...` 원본 URL 을 둔다.
+- [ ] **`mouseenter` 시 재생**: `img.src = img.dataset.streamSrc` 로 교체 → 브라우저가 GIF/animated WebP 디코드 시작 → 자동재생.
+- [ ] **`mouseleave` 시 정지**: `img.src = img.dataset.thumbSrc` (= 정적 jpg URL) → 디코더 해제, 첫 프레임 정지.
+- [ ] hover 가 빠르게 들락날락할 때마다 src 가 토글되는 비용은 작다 — jpg 와 GIF/webp 모두 OS/브라우저 캐시에서 즉시. 별도 디바운스 없음.
+
+**모바일 동작 (`hover` 불가, `< 600px` 또는 `(hover: none)`):**
+- [ ] **IntersectionObserver 한정 재생**: 카드 viewport 진입 시 `img.src = streamSrc` 로 활성화, 이탈 시 `img.src = thumbSrc` 로 정적 복귀. `rootMargin: 0px`, `threshold: 0.1` (10% 이상 보이면 활성).
+- [ ] 데스크톱은 `(hover: hover)` media query 가 true 이면 hover 정책 우선, IntersectionObserver 미사용.
+- [ ] 모바일도 카드 tap 으로 라이트박스 진입하는 기존 동작 유지 — 본 기능과 무관.
+
+**카드 크기 변경 (움짤 탭 한정):**
+- [ ] `view.type === 'clip'` 일 때 `image-grid` 의 grid template 을 더 넓게 — `minmax(240px, 1fr)`. 다른 탭(전체/이미지/동영상)은 기존 `minmax(160px, 1fr)` 유지.
+- [ ] 1920px 데스크톱 기준 한 행 카드 수가 ~10 → ~6 로 줄어 시야에 보이는 동시 재생 후보가 자연스레 감소. 데스크톱은 hover 정책이 주된 부담 감소책이고 이 변경은 보조.
+- [ ] 모바일(<600px)은 grid 가 이미 1~2 열이라 추가 변경 없음.
+
+**구현 위치:**
+- `web/browse.js` `buildImageGrid` — GIF/WebP 카드 마크업에 `src=thumbURL` (정적 첫 프레임) + `data-stream-src=streamURL` + `data-thumb-src=thumbURL`. `attachClipHoverPlayback(card)` 헬퍼 호출.
+- `web/browse.js` 신규 헬퍼 `attachClipHoverPlayback(card)`:
+  - `matchMedia('(hover: hover)').matches` 분기 — 데스크톱이면 hover handler 만, 모바일이면 IntersectionObserver 만.
+  - 카드 DOM 제거(re-render) 시 cleanup 자동(리스너는 element 와 함께 GC, observer 는 element 가 사라지면 자동 정리되지만 명시적으로 `unobserve` 도 호출).
+- `web/browse.js` `renderFileList` — 움짤 탭(`view.type === 'clip'`) 활성 시 `image-grid` 에 `image-grid-clip` 클래스 추가.
+- `web/style.css`:
+  - `.image-grid.image-grid-clip { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }`. 모바일 분기는 기존 미디어 쿼리가 처리.
+  - 별도 placeholder 스타일 불필요 — `<img>` 가 항상 정적 jpg 든 stream 이든 src 가 채워져 있어 빈 카드 없음.
+
+**Non-goals:**
+- 서버측 동기 첫 프레임 추출 (browse 응답에서 즉시 사이드카 생성) — lazy 생성으로 충분. 처음 browse 시 첫 프레임이 없는 카드는 `/api/thumb` 첫 호출에서 생성되고 사용자에게는 약간의 latency 만 보인다.
+- `prefers-reduced-motion` 사용자 옵션 — 본 기능이 이미 hover 시만 재생이라 별도 toggle 불필요. 필요해지면 settings 추가.
+- 모바일에서도 hover 같은 동작(long-press 시 재생) — IntersectionObserver 단순 정책 유지.
+- viewport 안 카드 수 cap (예: "최대 6개만 동시 재생") — IntersectionObserver 정책으로는 보이는 모든 카드가 활성. 더 엄격한 cap 이 필요하면 후속 검토.
+- 라이트박스/오디오 플레이어 — 본 기능 무관.
+- 이전 phase 결정(움짤 필터 §2.5.3, 변환 §2.9) 변경 — 분류·변환 정책 그대로.
+- thumb 사이드카 사전 일괄 생성 (예: 폴더 내 모든 움짤 미리 워밍) — lazy 메커니즘에 위임. 첫 진입 시 latency 가 체감되면 후속 검토.
+
+**서버 변경:** 최소 — `thumb.Generate` 에 animated WebP 폴백(webpmux + dwebp) + Dockerfile `libwebp-tools` 패키지 추가. handler/browse 등 그 외 경로 무변경.
 
 ### 2.6 URL 기반 미디어 가져오기 (URL Import)
 
@@ -650,6 +701,7 @@ PNG 파일을 JPEG로 영구 변환한다. 두 진입점:
 |-------|--------|--------|
 | Backend | Go (net/http stdlib) | 성능, 단일 바이너리 |
 | Image processing | `github.com/disintegration/imaging` | 순수 Go, CGo 불필요. 썸네일 + PNG → JPG 변환(§2.8)에서 공유 |
+| WebP first-frame | `libwebp-tools` (alpine apk: webpmux + dwebp) | animated WebP 의 thumbnail 첫 프레임 추출(§2.5.6) — Go imaging 의 정적 webp 디코더 한계 보완 |
 | Transcoding | ffmpeg (alpine apk) | TS → MP4 실시간 트랜스코딩, 움짤 → animated WebP 인코딩(`libwebp` + multi-frame 자동 promote, §2.9) |
 | Frontend | Vanilla HTML + CSS + JS | 의존성 없음 |
 | Container | Docker + Docker Compose | 배포 단순화 |
