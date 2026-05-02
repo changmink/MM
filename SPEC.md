@@ -47,11 +47,11 @@
 
 기존 파일 이동(`PATCH /api/file {"to": "..."}`, §5)은 `media.MoveFile`이 디렉토리를 명시적으로 거부(`ErrSrcIsDir`)하여 폴더에 대해서는 사용할 수 없다. 본 기능은 폴더에도 동일한 PATCH 의미론을 부여한다 — `PATCH /api/folder`에 `{"to": "..."}` body를 받으면 폴더 자체를 destDir 안으로 이동.
 
-- **API 형태:** `PATCH /api/folder?path=<src>` body가 `{"name":"..."}`이면 기존 rename, `{"to":"..."}`이면 이동. `PATCH /api/file`이 `patchFile`에서 body를 한 번 읽고 분기하는 것과 동일 패턴(`files.go:133` 참고).
+- **API 형태:** `PATCH /api/folder?path=<src>` body가 `{"name":"..."}`이면 기존 rename, `{"to":"..."}`이면 이동. `PATCH /api/file`이 `patchFile`에서 body를 한 번 읽고 분기하는 것과 동일 패턴(`files.go`의 `patchFile` 참고).
 - **이동 의미:** `srcAbs`(폴더)의 base name이 그대로 유지된 채 `destDir` 아래로 옮긴다. 결과 경로는 `destDir/<srcBaseName>`. 이름 변경은 동시에 수행하지 않음(이동과 rename은 별도 호출).
 - **충돌 처리:** `destDir/<srcBaseName>`이 이미 존재(파일이든 폴더든)하면 `409 {"error": "already exists"}`. **자동 `_N` suffix 부여 없음** — 폴더는 파일과 달리 자동 suffix가 사용자 의도와 어긋나기 쉬워 명시적 거부가 안전. rename 정책과 일관.
 - **자기 자손 이동 방지:** `destDir`이 `srcAbs`와 동일하거나 `srcAbs`의 자손이면 `400 {"error": "invalid destination"}`. 비교는 `filepath.Clean` 후 prefix 검사 + 경계가 path separator로 끝나는지 확인 (예: `/a/b`는 `/a/bc`의 prefix가 아님).
-- **동일 부모 거부:** `filepath.Dir(srcAbs) == destDir`이면 `400 {"error": "same directory"}` — 기존 파일 이동(`files.go:227`)과 동일. 의미 없는 이동을 노이즈로 만들지 않음.
+- **동일 부모 거부:** `filepath.Dir(srcAbs) == destDir`이면 `400 {"error": "same directory"}` — 기존 파일 이동(`files.go`의 `moveFile`)과 동일. 의미 없는 이동을 노이즈로 만들지 않음.
 - **루트 이동 방지:** `srcAbs == h.dataDir`이면 `400 {"error": "cannot move root"}`. rename 가드와 동일.
 - **원자성:** 단일 `os.Rename` 호출(폴더 전체 + 내부 `.thumb/` + 하위 모든 파일이 함께 이동). 사이드카 별도 처리 불필요(폴더 rename과 동일 원리, §2.1.1).
 - **Cross-volume 처리:** `os.Rename`이 `EXDEV` 반환 시 **재귀 copy+remove 폴백 없이** `500 {"error": "cross_device"}` 반환. 단일 데이터 볼륨이 전제이며(SPEC §1, Docker volume 단일 마운트), 폴더 재귀 복사는 race·디스크 공간·중간 실패 처리 비용이 크므로 의도적 out-of-scope. 파일 이동은 EXDEV 시 copy+remove 폴백을 유지(`media/move.go:93`) — 단일 파일 단위라 안전.
@@ -719,9 +719,13 @@ file_server/
 ├── internal/
 │   ├── handler/                # HTTP 엔드포인트 (각 파일이 라우트군 하나)
 │   │   ├── handler.go          # Handler 구조체, Register, writeError, requireSameOrigin
+│   │   ├── sse.go              # SSE bootstrap 헬퍼 (assertFlusher / writeSSEHeaders / sseEmitter)
+│   │   ├── names.go            # file/folder/upload 공유 유틸 (validateName, atomicRenameFile, ...)
 │   │   ├── browse.go           # GET /api/browse — 디렉터리 조회
 │   │   ├── tree.go             # GET /api/tree — 사이드바 트리
-│   │   ├── files.go            # 업로드/리네임/삭제/폴더 CRUD
+│   │   ├── files.go            # PATCH/DELETE /api/file — 파일 rename/delete/move + 사이드카 정리
+│   │   ├── folders.go          # POST/PATCH/DELETE /api/folder — 폴더 create/rename/delete/move
+│   │   ├── upload.go           # POST /api/upload + PNG → JPG 자동 변환 헬퍼
 │   │   ├── stream.go           # Range 스트리밍 + TS 실시간 remux (.cache/streams/)
 │   │   ├── thumb.go            # /api/thumb (lazy 생성 fallback 포함)
 │   │   ├── import_url.go       # URL/HLS 다운로드 SSE 핸들러
