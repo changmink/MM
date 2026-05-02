@@ -144,9 +144,8 @@ func (h *Handler) handleImportURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, r, http.StatusInternalServerError, "streaming unsupported", nil)
+	flusher := assertFlusher(w, r)
+	if flusher == nil {
 		return
 	}
 
@@ -176,10 +175,7 @@ func (h *Handler) handleImportURL(w http.ResponseWriter, r *http.Request) {
 	// closes its tab or refreshes.
 	go h.runImportJob(job, snap, destAbs)
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
+	writeSSEHeaders(w)
 
 	// Hand the jobId to the client straight away so a refresh can rebind to
 	// this job via GET /api/import-url/jobs/{id}/events (added in J4).
@@ -556,16 +552,6 @@ func redactErr(err error) string {
 		return copy.Error()
 	}
 	return err.Error()
-}
-
-func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, payload any) {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		slog.Error("sse marshal", "err", err)
-		return
-	}
-	fmt.Fprintf(w, "data: %s\n\n", data)
-	flusher.Flush()
 }
 
 // summarizeURLs folds URLState entries into a Summary by terminal status.

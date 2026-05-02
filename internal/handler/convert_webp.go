@@ -54,25 +54,12 @@ func (h *Handler) handleConvertWebP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, r, http.StatusInternalServerError, "streaming unsupported", nil)
+	flusher := assertFlusher(w, r)
+	if flusher == nil {
 		return
 	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-
-	// emit serializes SSE writes between the handler goroutine (start/done/
-	// error/summary) and the per-file progress writer goroutine.
-	var writeMu sync.Mutex
-	emit := func(payload any) {
-		writeMu.Lock()
-		defer writeMu.Unlock()
-		writeSSEEvent(w, flusher, payload)
-	}
+	writeSSEHeaders(w)
+	emit := sseEmitter(w, flusher)
 
 	succeeded, failed := 0, 0
 	for i, p := range body.Paths {

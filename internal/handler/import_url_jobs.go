@@ -237,9 +237,8 @@ func (h *Handler) handleSubscribeJob(w http.ResponseWriter, r *http.Request, job
 		return
 	}
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, r, http.StatusInternalServerError, "streaming unsupported", nil)
+	flusher := assertFlusher(w, r)
+	if flusher == nil {
 		return
 	}
 
@@ -250,10 +249,7 @@ func (h *Handler) handleSubscribeJob(w http.ResponseWriter, r *http.Request, job
 	snapshot, events, unsubscribe := job.SubscribeWithSnapshot()
 	defer unsubscribe()
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
+	writeSSEHeaders(w)
 
 	writeSSEEvent(w, flusher, snapshotEnvelope{Phase: "snapshot", Job: snapshot})
 
