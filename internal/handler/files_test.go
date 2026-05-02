@@ -38,7 +38,11 @@ func makeAutoConvertSetup(t *testing.T, autoConvert bool) (*http.ServeMux, strin
 		}
 	}
 	mux := http.NewServeMux()
-	Register(mux, root, root, store)
+	h := Register(mux, root, root, store)
+	// Drain the thumbnail pool before t.TempDir cleans up so background
+	// workers don't race the .thumb/ directory removal on Windows (where an
+	// open handle prevents unlink).
+	t.Cleanup(h.Close)
 	return mux, root
 }
 
