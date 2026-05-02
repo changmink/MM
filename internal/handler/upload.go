@@ -33,6 +33,12 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cap the multipart body before MultipartReader hooks into it. MaxBytesReader
+	// fires *http.MaxBytesError mid-Copy once the limit is exceeded, so the part
+	// loop below maps it to 413 instead of letting a stuck/malicious client fill
+	// the disk.
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+
 	// Stream the multipart body directly to disk instead of letting
 	// ParseMultipartForm buffer the whole upload (32MB in RAM, rest spilled
 	// to temp files). MultipartReader skips that buffering entirely.
@@ -50,6 +56,10 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err != nil {
+			if isMaxBytesErr(err) {
+				writeError(w, r, http.StatusRequestEntityTooLarge, "too_large", nil)
+				return
+			}
 			writeError(w, r, http.StatusBadRequest, "read part failed", err)
 			return
 		}
@@ -94,6 +104,10 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		var err error
 		finalPath, finalSize, converted, warnings, err = h.uploadPNGAutoConvert(destDir, destPath, part)
 		if err != nil {
+			if isMaxBytesErr(err) {
+				writeError(w, r, http.StatusRequestEntityTooLarge, "too_large", nil)
+				return
+			}
 			writeError(w, r, http.StatusInternalServerError, "write file failed", err)
 			return
 		}
@@ -108,6 +122,10 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		dst.Close()
 		if copyErr != nil {
 			os.Remove(finalPath)
+			if isMaxBytesErr(copyErr) {
+				writeError(w, r, http.StatusRequestEntityTooLarge, "too_large", nil)
+				return
+			}
 			writeError(w, r, http.StatusInternalServerError, "write file failed", copyErr)
 			return
 		}

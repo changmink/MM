@@ -33,8 +33,13 @@ func (h *Handler) handleFolder(w http.ResponseWriter, r *http.Request) {
 //
 // Mirrors patchFile so the API surface for files and folders stays symmetric.
 func (h *Handler) patchFolder(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
+		if isMaxBytesErr(err) {
+			writeError(w, r, http.StatusRequestEntityTooLarge, "too_large", nil)
+			return
+		}
 		writeError(w, r, http.StatusBadRequest, "read body failed", err)
 		return
 	}

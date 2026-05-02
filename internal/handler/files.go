@@ -35,8 +35,13 @@ func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 // re-attached so each downstream handler can decode it normally — neither
 // renameFile nor moveFile knows it was inspected first.
 func (h *Handler) patchFile(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
+		if isMaxBytesErr(err) {
+			writeError(w, r, http.StatusRequestEntityTooLarge, "too_large", nil)
+			return
+		}
 		writeError(w, r, http.StatusBadRequest, "read body failed", err)
 		return
 	}
