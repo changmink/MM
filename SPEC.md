@@ -602,9 +602,9 @@ PNG 파일을 JPEG로 영구 변환한다. 두 진입점:
 - **그 외**: `unsupported_input`로 거부 — PNG/JPG 정적 이미지, 오디오, 기타. 클라이언트 UI는 자격 없는 카드에 버튼을 노출하지 않지만 직접 호출 방어로 서버에서 한 번 더 차단.
 
 **구현 공통 규약:**
-- **인코더:** ffmpeg `libwebp_anim` 우선, 부재 시 `libwebp` + multi-frame 자동 promote 폴백. alpine apk `ffmpeg` 빌드는 일반적으로 `libwebp_anim`을 포함하지만 일부 minimal 빌드는 `libwebp`만 노출한다. ffmpeg 6+에서는 `-c:v libwebp -loop 0` + multi-frame 입력이 자동으로 animated webp로 인코드되므로 폴백 동작은 본질적으로 동일. Dockerfile 영향 없음 — 두 인코더 모두 alpine apk 기본 빌드에 들어 있다.
+- **인코더:** ffmpeg `libwebp` (multi-frame 입력을 자동으로 animated webp로 promote, ffmpeg 6+). 등록된 `libwebp_anim` 별칭은 alpine apk ffmpeg 6.1 빌드에서 single-frame 출력만 만드는 회귀가 있어 사용하지 않는다 — `libwebp` + multi-frame 입력 경로가 결과 webp의 RIFF 컨테이너에 VP8X chunk + animation flag를 정상 기록한다. Dockerfile 영향 없음 — 기본 alpine apk `ffmpeg` 패키지에 포함.
 - **인코딩 파라미터 (고정값, 사용자 설정 없음):**
-  - `-c:v libwebp_anim`(가능하면) 또는 `-c:v libwebp`(폴백) / `-loop 0` (무한 반복) / `-lossless 0` / `-q:v 80` (화질 우선) / `-compression_level 4`
+  - `-c:v libwebp` / `-loop 0` (무한 반복) / `-lossless 0` / `-q:v 80` (화질 우선) / `-compression_level 4`
   - **fps·해상도 원본 유지** — 자연스러움 우선. 입력이 극단 해상도여도 별도 다운스케일 안 함 (50 MiB 게이트가 이미 상한).
   - **음성 제거**: `-an`. 입력에 audio stream이 있었다면 결과 `warnings`에 `"audio_dropped"` 추가. audio 존재 여부는 ffprobe 1회 호출로 검출(duration 조회와 동일 호출에서 stream 정보 함께 추출 — GIF는 audio 검사 생략).
 - **출력 파일명:** `<basename>.webp` — 확장자만 교체, base name 유지. 대소문자 정규화: 출력은 항상 소문자 `.webp`. `foo.MP4` / `foo.gif` / `foo.GIF` 모두 → `foo.webp`.
@@ -649,7 +649,7 @@ PNG 파일을 JPEG로 영구 변환한다. 두 진입점:
 |-------|--------|--------|
 | Backend | Go (net/http stdlib) | 성능, 단일 바이너리 |
 | Image processing | `github.com/disintegration/imaging` | 순수 Go, CGo 불필요. 썸네일 + PNG → JPG 변환(§2.8)에서 공유 |
-| Transcoding | ffmpeg (alpine apk) | TS → MP4 실시간 트랜스코딩, 움짤 → animated WebP 인코딩(`libwebp_anim` 우선 / `libwebp` 폴백, §2.9) |
+| Transcoding | ffmpeg (alpine apk) | TS → MP4 실시간 트랜스코딩, 움짤 → animated WebP 인코딩(`libwebp` + multi-frame 자동 promote, §2.9) |
 | Frontend | Vanilla HTML + CSS + JS | 의존성 없음 |
 | Container | Docker + Docker Compose | 배포 단순화 |
 | Storage | Docker named volume → `/data` | 영속성 |
