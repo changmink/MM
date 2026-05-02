@@ -385,9 +385,6 @@ function buildImageGrid(images) {
     const initialSrc = isAnimatedClip
       ? thumbURL
       : (entry.thumb_available ? thumbURL : streamURL);
-    const clipDataAttrs = isAnimatedClip
-      ? `data-thumb-src="${esc(thumbURL)}" data-stream-src="${esc(streamURL)}" data-clip-card="true"`
-      : '';
 
     const pngConvertBtn = isPNG
       ? `<button class="png-convert-btn" title="JPG로 변환" aria-label="JPG로 변환">JPG</button>`
@@ -400,7 +397,7 @@ function buildImageGrid(images) {
       <label class="select-check" title="선택">
         <input type="checkbox" aria-label="${esc(entry.name)} 선택">
       </label>
-      <img src="${esc(initialSrc)}" alt="${esc(entry.name)}" loading="lazy" ${clipDataAttrs}>
+      <img src="${esc(initialSrc)}" alt="${esc(entry.name)}" loading="lazy">
       <div class="thumb-name">${esc(entry.name)}</div>
       <span class="size-badge">${esc(formatSize(entry.size))}</span>
       ${pngConvertBtn}
@@ -430,7 +427,12 @@ function buildImageGrid(images) {
         openConvertWebPModal([entry.path]);
       });
     }
-    if (isAnimatedClip) attachClipHoverPlayback(card);
+    if (isAnimatedClip) {
+      const img = card.querySelector('img');
+      img.dataset.thumbSrc = thumbURL;
+      img.dataset.streamSrc = streamURL;
+      attachClipHoverPlayback(card);
+    }
     attachDragHandlers(card, entry);
     grid.appendChild(card);
   });
