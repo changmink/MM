@@ -35,6 +35,13 @@ func writeSSEHeaders(w http.ResponseWriter) {
 // internal mutex. Required when the writer is shared between the handler
 // goroutine (start/done/error/summary) and per-task progress writers — the
 // raw http.ResponseWriter is not safe for concurrent Write/Flush.
+//
+// When NOT to use: handlers whose events all funnel through a single
+// goroutine (e.g. a Job.Publish channel that the handler drains in one
+// for-range loop — see handleImportURL / handleSubscribeJob) are already
+// serialized; use writeSSEEvent directly to avoid taking a redundant lock
+// on every frame. Reach for sseEmitter only when more than one goroutine
+// in the handler can call emit concurrently.
 func sseEmitter(w http.ResponseWriter, flusher http.Flusher) func(any) {
 	var mu sync.Mutex
 	return func(payload any) {
