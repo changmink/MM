@@ -25,6 +25,7 @@ import {
 import { highlightTreeCurrent } from './tree.js';
 import { openConvertModal } from './convert.js';
 import { openConvertImageModal } from './convertImage.js';
+import { openConvertWebPModal } from './convertWebp.js';
 
 export async function browse(path, pushState = true) {
   setCurrentPath(path);
@@ -59,6 +60,7 @@ export function renderView() {
   renderFileList(visible);
   updateConvertAllBtn(visible);
   updateConvertPNGAllBtn(visible);
+  updateConvertWebPAllBtn(visible);
   renderSelectionControls();
 }
 
@@ -113,7 +115,7 @@ function updateConvertPNGAllBtn(visible) {
 
 // 움짤 — GIF is always a clip; a video is a clip only when it's small
 // AND short (null duration excludes — we can't prove it's short).
-function isClip(e) {
+export function isClip(e) {
   if (e.mime === 'image/gif') return true;
   if (e.type === 'video') {
     return e.size <= CLIP_MAX_BYTES
@@ -121,6 +123,44 @@ function isClip(e) {
       && e.duration_sec <= CLIP_MAX_DURATION_SEC;
   }
   return false;
+}
+
+export function visibleClipPaths(visible) {
+  return visible
+    .filter(e => !e.is_dir && isClip(e))
+    .map(e => e.path);
+}
+
+// selectedPaths ∩ visible 중 움짤만. visible 인자로 stale selection 방어
+// — PNG 일괄 패턴(selectedVisiblePNGPaths) 미러.
+export function selectedVisibleClipPaths(visible) {
+  return visible
+    .filter(e => !e.is_dir && isClip(e) && selectedPaths.has(e.path))
+    .map(e => e.path);
+}
+
+// 일괄 버튼은 움짤 탭 활성 시에만 노출 — SPEC §2.9. 다른 탭에서는
+// visible 에 움짤이 섞여 있어도 버튼을 띄우지 않는다 (의도 모호함 방지).
+function updateConvertWebPAllBtn(visible) {
+  if (view.type !== 'clip') {
+    $.convertWebpAllBtn.hidden = true;
+    $.convertWebpAllBtn.dataset.paths = '';
+    return;
+  }
+  const useSelection = selectedPaths.size > 0;
+  const paths = useSelection
+    ? selectedVisibleClipPaths(visible)
+    : visibleClipPaths(visible);
+  if (paths.length === 0) {
+    $.convertWebpAllBtn.hidden = true;
+    $.convertWebpAllBtn.dataset.paths = '';
+    return;
+  }
+  $.convertWebpAllBtn.hidden = false;
+  $.convertWebpAllBtn.textContent = useSelection
+    ? `선택 움짤 WebP로 변환 (${paths.length}개)`
+    : `모든 움짤 WebP로 변환 (${paths.length}개)`;
+  $.convertWebpAllBtn.dataset.paths = JSON.stringify(paths);
 }
 
 export function applyView(entries) {
@@ -282,8 +322,12 @@ function buildImageGrid(images) {
       : '/api/stream?path=' + encodeURIComponent(entry.path);
 
     const isPNG = entry.mime === 'image/png';
+    const isGIF = entry.mime === 'image/gif';
     const pngConvertBtn = isPNG
       ? `<button class="png-convert-btn" title="JPG로 변환" aria-label="JPG로 변환">JPG</button>`
+      : '';
+    const webpConvertBtn = isGIF
+      ? `<button class="webp-convert-btn" title="WebP로 변환" aria-label="WebP로 변환">WEBP</button>`
       : '';
 
     card.innerHTML = `
@@ -294,6 +338,7 @@ function buildImageGrid(images) {
       <div class="thumb-name">${esc(entry.name)}</div>
       <span class="size-badge">${esc(formatSize(entry.size))}</span>
       ${pngConvertBtn}
+      ${webpConvertBtn}
       <button class="rename-btn" title="이름 변경" aria-label="이름 변경">✎</button>
       <button class="delete-btn" title="삭제" aria-label="삭제">✕</button>
     `;
@@ -311,6 +356,12 @@ function buildImageGrid(images) {
       card.querySelector('.png-convert-btn').addEventListener('click', (ev) => {
         ev.stopPropagation();
         openConvertImageModal([entry.path]);
+      });
+    }
+    if (isGIF) {
+      card.querySelector('.webp-convert-btn').addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        openConvertWebPModal([entry.path]);
       });
     }
     attachDragHandlers(card, entry);
@@ -334,6 +385,10 @@ function buildVideoGrid(videos) {
     const convertBtn = isTS
       ? `<button class="convert-btn" title="MP4로 변환" aria-label="MP4로 변환">MP4</button>`
       : '';
+    const isClipVideo = isClip(entry);
+    const webpConvertBtn = isClipVideo
+      ? `<button class="webp-convert-btn" title="WebP로 변환" aria-label="WebP로 변환">WEBP</button>`
+      : '';
 
     card.innerHTML = `
       <label class="select-check" title="선택">
@@ -344,6 +399,7 @@ function buildVideoGrid(videos) {
       <span class="size-badge">${esc(formatSize(entry.size))}</span>
       ${durBadge}
       ${convertBtn}
+      ${webpConvertBtn}
       <button class="rename-btn" title="이름 변경" aria-label="이름 변경">✎</button>
       <button class="delete-btn" title="삭제" aria-label="삭제">✕</button>
     `;
@@ -361,6 +417,12 @@ function buildVideoGrid(videos) {
       card.querySelector('.convert-btn').addEventListener('click', (ev) => {
         ev.stopPropagation();
         openConvertModal([entry.path]);
+      });
+    }
+    if (isClipVideo) {
+      card.querySelector('.webp-convert-btn').addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        openConvertWebPModal([entry.path]);
       });
     }
     attachDragHandlers(card, entry);
