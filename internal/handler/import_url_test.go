@@ -468,7 +468,7 @@ func TestImportURL_TooMany(t *testing.T) {
 	mux := http.NewServeMux()
 	registerImportTest(mux, root)
 
-	urls := make([]string, 51)
+	urls := make([]string, 501)
 	for i := range urls {
 		urls[i] = fmt.Sprintf("https://example.com/%d.jpg", i)
 	}

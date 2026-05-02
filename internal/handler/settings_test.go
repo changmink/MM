@@ -146,6 +146,53 @@ func TestSettings_PATCH_UnknownField(t *testing.T) {
 	}
 }
 
+func TestSettings_PATCH_BooleanTypeMismatch(t *testing.T) {
+	// auto_convert_png_to_jpg is a bool. Sending a string (or any non-bool)
+	// must fail at JSON decode → 400 invalid request, not silently coerce.
+	mux, store, _ := newSettingsMux(t)
+	body := []byte(`{"url_import_max_bytes": 10737418240, "url_import_timeout_seconds": 1800, "auto_convert_png_to_jpg": "yes"}`)
+	req := httptest.NewRequest("PATCH", "/api/settings", bytes.NewReader(body))
+	rw := httptest.NewRecorder()
+	mux.ServeHTTP(rw, req)
+	if rw.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", rw.Code, rw.Body.String())
+	}
+	// Rejected PATCH must not mutate the store.
+	if store.Snapshot() != settings.Default() {
+		t.Errorf("rejected PATCH mutated store: %+v", store.Snapshot())
+	}
+}
+
+func TestSettings_PATCH_AutoConvertToggle(t *testing.T) {
+	// End-to-end: PATCH a false → GET echoes false → PATCH back true → GET echoes true.
+	mux, store, _ := newSettingsMux(t)
+
+	off := settings.Default()
+	off.AutoConvertPNGToJPG = false
+	body, _ := json.Marshal(off)
+	req := httptest.NewRequest("PATCH", "/api/settings", bytes.NewReader(body))
+	rw := httptest.NewRecorder()
+	mux.ServeHTTP(rw, req)
+	if rw.Code != http.StatusOK {
+		t.Fatalf("PATCH off: %d %s", rw.Code, rw.Body.String())
+	}
+	if store.Snapshot().AutoConvertPNGToJPG {
+		t.Fatal("after PATCH false, store still true")
+	}
+
+	on := settings.Default() // true
+	body, _ = json.Marshal(on)
+	req = httptest.NewRequest("PATCH", "/api/settings", bytes.NewReader(body))
+	rw = httptest.NewRecorder()
+	mux.ServeHTTP(rw, req)
+	if rw.Code != http.StatusOK {
+		t.Fatalf("PATCH on: %d %s", rw.Code, rw.Body.String())
+	}
+	if !store.Snapshot().AutoConvertPNGToJPG {
+		t.Fatal("after PATCH true, store still false")
+	}
+}
+
 func TestSettings_PATCH_LandsInImportURL(t *testing.T) {
 	// Verify the patched value is actually used by the next URL import —
 	// the request-path read must hit the updated cache (not a stale

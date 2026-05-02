@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	maxImportURLs = 50
+	maxImportURLs = 500
 	// maxImportURLLength bounds individual URL strings so the registry cannot
 	// be force-fed arbitrarily large blobs that later surface verbatim through
 	// GET /api/import-url/jobs. 2 KB is well above any legitimate signed-URL

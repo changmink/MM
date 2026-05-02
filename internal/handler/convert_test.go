@@ -102,7 +102,7 @@ func TestHandleConvert_TooManyPaths(t *testing.T) {
 	mux := http.NewServeMux()
 	Register(mux, root, root, nil)
 
-	paths := make([]string, 51)
+	paths := make([]string, 501)
 	for i := range paths {
 		paths[i] = "/x.ts"
 	}

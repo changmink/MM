@@ -10,6 +10,7 @@ import {
   videoEntries, setVideoEntries,
   visibleFilePaths, setVisibleFilePaths,
   lbIndex, setLbIndex,
+  lbCurrentVideoPath, setLbCurrentVideoPath,
   playlist, setPlaylist,
   playlistIndex, setPlaylistIndex,
   selectedPaths, view,
@@ -23,6 +24,8 @@ import {
 } from './fileOps.js';
 import { highlightTreeCurrent } from './tree.js';
 import { openConvertModal } from './convert.js';
+import { openConvertImageModal } from './convertImage.js';
+import { openConvertWebPModal } from './convertWebp.js';
 
 export async function browse(path, pushState = true) {
   setCurrentPath(path);
@@ -56,6 +59,8 @@ export function renderView() {
   renderBrowseSummary(visible);
   renderFileList(visible);
   updateConvertAllBtn(visible);
+  updateConvertPNGAllBtn(visible);
+  updateConvertWebPAllBtn(visible);
   renderSelectionControls();
 }
 
@@ -75,16 +80,141 @@ function updateConvertAllBtn(visible) {
   $.convertAllBtn.textContent = `모든 TS 변환 (${paths.length})`;
 }
 
-// 움짤 — GIF is always a clip; a video is a clip only when it's small
-// AND short (null duration excludes — we can't prove it's short).
-function isClip(e) {
-  if (e.mime === 'image/gif') return true;
+export function visiblePNGPaths(visible) {
+  return visible
+    .filter(e => !e.is_dir && e.mime === 'image/png')
+    .map(e => e.path);
+}
+
+// selectedPaths ∩ visible 중 PNG만. visible 인자로 한 번 더 필터해
+// stale selection(syncSelectionWithVisible 직전 state)도 안전하게 거른다.
+export function selectedVisiblePNGPaths(visible) {
+  return visible
+    .filter(e => !e.is_dir && e.mime === 'image/png' && selectedPaths.has(e.path))
+    .map(e => e.path);
+}
+
+function updateConvertPNGAllBtn(visible) {
+  const useSelection = selectedPaths.size > 0;
+  const paths = useSelection
+    ? selectedVisiblePNGPaths(visible)
+    : visiblePNGPaths(visible);
+  if (paths.length === 0) {
+    $.convertPNGAllBtn.hidden = true;
+    $.convertPNGAllBtn.dataset.paths = '';
+    return;
+  }
+  $.convertPNGAllBtn.hidden = false;
+  $.convertPNGAllBtn.textContent = useSelection
+    ? `선택 PNG 변환 (${paths.length}개)`
+    : `모든 PNG 변환 (${paths.length}개)`;
+  // Stash the current target PNG list on the button so the convertImage
+  // module's click handler can read it without a second filter pass.
+  $.convertPNGAllBtn.dataset.paths = JSON.stringify(paths);
+}
+
+// SPEC §2.5.6 — GIF/WebP 카드 자동재생 throttle. hover-capable 디바이스는
+// hover 시만 stream src 부착, 그 외(모바일 등)는 IntersectionObserver 로
+// viewport 안에서만 활성. 모듈 lifetime 동안 IO 인스턴스 1개를 공유한다.
+const HOVER_CAPABLE = typeof window !== 'undefined'
+  && window.matchMedia
+  && window.matchMedia('(hover: hover)').matches;
+
+let _clipIO = null;
+function clipIOInstance() {
+  if (_clipIO) return _clipIO;
+  _clipIO = new IntersectionObserver(entries => {
+    for (const ent of entries) {
+      const card = ent.target;
+      const img = card.querySelector('img');
+      if (!img) continue;
+      const desired = ent.isIntersecting ? 'stream' : 'thumb';
+      if (card.dataset.clipState === desired) continue;
+      card.dataset.clipState = desired;
+      img.src = desired === 'stream' ? img.dataset.streamSrc : img.dataset.thumbSrc;
+    }
+  }, { rootMargin: '0px', threshold: 0.1 });
+  return _clipIO;
+}
+
+function attachClipHoverPlayback(card) {
+  const img = card.querySelector('img');
+  if (!img || !img.dataset.streamSrc) return;
+  if (HOVER_CAPABLE) {
+    let current = 'thumb';
+    card.addEventListener('mouseenter', () => {
+      if (current === 'stream') return;
+      current = 'stream';
+      img.src = img.dataset.streamSrc;
+    });
+    card.addEventListener('mouseleave', () => {
+      if (current === 'thumb') return;
+      current = 'thumb';
+      img.src = img.dataset.thumbSrc;
+    });
+  } else {
+    card.dataset.clipState = 'thumb';
+    clipIOInstance().observe(card);
+  }
+}
+
+// 움짤 분류 — GIF·WebP 는 무조건 움짤(SPEC §2.5.3); video 는 짧고 작을
+// 때만 (null duration 제외 — 길이를 모르면 보수적으로 비-움짤).
+// 분류와 변환 입력 자격은 다르다: webp 는 §2.9 변환 결과물이므로 입력
+// 자격에서 빠진다 (isClipConvertable).
+export function isClip(e) {
+  if (e.mime === 'image/gif' || e.mime === 'image/webp') return true;
   if (e.type === 'video') {
     return e.size <= CLIP_MAX_BYTES
       && e.duration_sec != null
       && e.duration_sec <= CLIP_MAX_DURATION_SEC;
   }
   return false;
+}
+
+// isClipConvertable — §2.9 변환 입력 자격. isClip 의 부분집합으로 webp 를
+// 제외한다 (변환 결과물이라 재변환 의도 없음). 서버도 동일 결정 — webp
+// 입력은 unsupported_input 으로 거부.
+function isClipConvertable(e) {
+  return isClip(e) && e.mime !== 'image/webp';
+}
+
+export function visibleClipPaths(visible) {
+  return visible
+    .filter(e => !e.is_dir && isClipConvertable(e))
+    .map(e => e.path);
+}
+
+// selectedPaths ∩ visible 중 변환가능 움짤만. visible 인자로 stale selection
+// 방어 — PNG 일괄 패턴(selectedVisiblePNGPaths) 미러.
+export function selectedVisibleClipPaths(visible) {
+  return visible
+    .filter(e => !e.is_dir && isClipConvertable(e) && selectedPaths.has(e.path))
+    .map(e => e.path);
+}
+
+// 일괄 버튼은 움짤 탭 활성 시에만 노출 — SPEC §2.9. 다른 탭에서는
+// visible 에 움짤이 섞여 있어도 버튼을 띄우지 않는다 (의도 모호함 방지).
+function updateConvertWebPAllBtn(visible) {
+  if (view.type !== 'clip') {
+    $.convertWebpAllBtn.hidden = true;
+    $.convertWebpAllBtn.dataset.paths = '';
+    return;
+  }
+  const useSelection = selectedPaths.size > 0;
+  const paths = useSelection
+    ? selectedVisibleClipPaths(visible)
+    : visibleClipPaths(visible);
+  if (paths.length === 0) {
+    $.convertWebpAllBtn.hidden = true;
+    $.convertWebpAllBtn.dataset.paths = '';
+    return;
+  }
+  $.convertWebpAllBtn.hidden = false;
+  $.convertWebpAllBtn.textContent = useSelection
+    ? `선택 움짤 WebP로 변환 (${paths.length}개)`
+    : `모든 움짤 WebP로 변환 (${paths.length}개)`;
+  $.convertWebpAllBtn.dataset.paths = JSON.stringify(paths);
 }
 
 export function applyView(entries) {
@@ -176,7 +306,9 @@ function renderFileList(entries) {
 
   if (images.length) {
     $.fileList.appendChild(sectionTitle('이미지'));
-    $.fileList.appendChild(buildImageGrid(images));
+    const grid = buildImageGrid(images);
+    if (view.type === 'clip') grid.classList.add('image-grid-clip');
+    $.fileList.appendChild(grid);
   }
   if (videos.length) {
     $.fileList.appendChild(sectionTitle('동영상'));
@@ -239,18 +371,40 @@ function buildImageGrid(images) {
   images.forEach((entry, i) => {
     const card = document.createElement('div');
     card.className = 'thumb-card';
+    card.dataset.path = entry.path;
 
-    const thumbSrc = entry.thumb_available
-      ? '/api/thumb?path=' + encodeURIComponent(entry.path)
-      : '/api/stream?path=' + encodeURIComponent(entry.path);
+    const thumbURL = '/api/thumb?path=' + encodeURIComponent(entry.path);
+    const streamURL = '/api/stream?path=' + encodeURIComponent(entry.path);
+    const isPNG = entry.mime === 'image/png';
+    const isGIF = entry.mime === 'image/gif';
+    const isWebP = entry.mime === 'image/webp';
+    // GIF/WebP 카드는 평시 정적 첫 프레임(/api/thumb, lazy 생성 backstop)
+    // 을 표시하고 hover/IntersectionObserver 시에만 stream URL 로 토글한다
+    // (§2.5.6). 비-움짤 이미지는 기존 thumb_available 폴백 유지.
+    const isAnimatedClip = isGIF || isWebP;
+    const initialSrc = isAnimatedClip
+      ? thumbURL
+      : (entry.thumb_available ? thumbURL : streamURL);
+    const clipDataAttrs = isAnimatedClip
+      ? `data-thumb-src="${esc(thumbURL)}" data-stream-src="${esc(streamURL)}" data-clip-card="true"`
+      : '';
+
+    const pngConvertBtn = isPNG
+      ? `<button class="png-convert-btn" title="JPG로 변환" aria-label="JPG로 변환">JPG</button>`
+      : '';
+    const webpConvertBtn = isGIF
+      ? `<button class="webp-convert-btn" title="WebP로 변환" aria-label="WebP로 변환">WEBP</button>`
+      : '';
 
     card.innerHTML = `
       <label class="select-check" title="선택">
         <input type="checkbox" aria-label="${esc(entry.name)} 선택">
       </label>
-      <img src="${esc(thumbSrc)}" alt="${esc(entry.name)}" loading="lazy">
+      <img src="${esc(initialSrc)}" alt="${esc(entry.name)}" loading="lazy" ${clipDataAttrs}>
       <div class="thumb-name">${esc(entry.name)}</div>
       <span class="size-badge">${esc(formatSize(entry.size))}</span>
+      ${pngConvertBtn}
+      ${webpConvertBtn}
       <button class="rename-btn" title="이름 변경" aria-label="이름 변경">✎</button>
       <button class="delete-btn" title="삭제" aria-label="삭제">✕</button>
     `;
@@ -264,6 +418,19 @@ function buildImageGrid(images) {
       ev.stopPropagation();
       deleteFile(entry.path);
     });
+    if (isPNG) {
+      card.querySelector('.png-convert-btn').addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        openConvertImageModal([entry.path]);
+      });
+    }
+    if (isGIF) {
+      card.querySelector('.webp-convert-btn').addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        openConvertWebPModal([entry.path]);
+      });
+    }
+    if (isAnimatedClip) attachClipHoverPlayback(card);
     attachDragHandlers(card, entry);
     grid.appendChild(card);
   });
@@ -276,6 +443,7 @@ function buildVideoGrid(videos) {
   videos.forEach((entry, i) => {
     const card = document.createElement('div');
     card.className = 'thumb-card';
+    card.dataset.path = entry.path;
 
     const thumbSrc = '/api/thumb?path=' + encodeURIComponent(entry.path);
     const dur = formatDuration(entry.duration_sec);
@@ -283,6 +451,10 @@ function buildVideoGrid(videos) {
     const isTS = entry.name.toLowerCase().endsWith('.ts');
     const convertBtn = isTS
       ? `<button class="convert-btn" title="MP4로 변환" aria-label="MP4로 변환">MP4</button>`
+      : '';
+    const isClipVideo = isClip(entry);
+    const webpConvertBtn = isClipVideo
+      ? `<button class="webp-convert-btn" title="WebP로 변환" aria-label="WebP로 변환">WEBP</button>`
       : '';
 
     card.innerHTML = `
@@ -294,6 +466,7 @@ function buildVideoGrid(videos) {
       <span class="size-badge">${esc(formatSize(entry.size))}</span>
       ${durBadge}
       ${convertBtn}
+      ${webpConvertBtn}
       <button class="rename-btn" title="이름 변경" aria-label="이름 변경">✎</button>
       <button class="delete-btn" title="삭제" aria-label="삭제">✕</button>
     `;
@@ -311,6 +484,12 @@ function buildVideoGrid(videos) {
       card.querySelector('.convert-btn').addEventListener('click', (ev) => {
         ev.stopPropagation();
         openConvertModal([entry.path]);
+      });
+    }
+    if (isClipVideo) {
+      card.querySelector('.webp-convert-btn').addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        openConvertWebPModal([entry.path]);
       });
     }
     attachDragHandlers(card, entry);
@@ -332,6 +511,7 @@ function buildTable(entries) {
 
   entries.forEach(entry => {
     const tr = document.createElement('tr');
+    tr.dataset.path = entry.path;
     const icon = iconFor(entry.type, entry.is_dir);
     const size = entry.is_dir ? '—' : formatSize(entry.size);
     tr.innerHTML = `
@@ -391,18 +571,50 @@ function handleClick(entry) {
 // ── Lightbox ──────────────────────────────────────────────────────────────────
 function openLightboxImage(index) {
   setLbIndex(index);
+  setLbCurrentVideoPath(null);
   const entry = imageEntries[lbIndex];
   $.lbContent.innerHTML = `<img src="/api/stream?path=${encodeURIComponent(entry.path)}" alt="${esc(entry.name)}">`;
   $.lightbox.classList.remove('hidden');
 }
 
 function openLightboxVideo(entry) {
+  setLbCurrentVideoPath(entry.path);
   const mime = entry.path.toLowerCase().endsWith('.ts') ? 'video/mp4' : (entry.mime || 'video/mp4');
   $.lbContent.innerHTML = `
     <video controls autoplay>
       <source src="/api/stream?path=${encodeURIComponent(entry.path)}" type="${esc(mime)}">
     </video>`;
   $.lightbox.classList.remove('hidden');
+}
+
+// 닫기 트리거(✕ / 배경 클릭 / Esc)는 모두 이 함수를 거치게 해서
+// lbCurrentVideoPath 리셋이 한 곳에 모이게 한다 — 누락 시 다음 이미지
+// 라이트박스에서 stale path가 살아남아 삭제 분기가 동영상으로 새는 버그 발생.
+function closeLightbox() {
+  $.lightbox.classList.add('hidden');
+  $.lbContent.innerHTML = '';
+  setLbCurrentVideoPath(null);
+}
+
+async function deleteCurrentLightboxItem() {
+  if (lbCurrentVideoPath) {
+    const ok = await deleteFile(lbCurrentVideoPath, { skipBrowse: true });
+    if (!ok) return;
+    closeLightbox();
+    browse(currentPath, false);
+  } else if (imageEntries.length) {
+    const entry = imageEntries[lbIndex];
+    const ok = await deleteFile(entry.path, { skipBrowse: true });
+    if (!ok) return;
+    imageEntries.splice(lbIndex, 1);
+    if (imageEntries.length === 0) {
+      closeLightbox();
+    } else {
+      setLbIndex(lbIndex % imageEntries.length);
+      openLightboxImage(lbIndex);
+    }
+    browse(currentPath, false);
+  }
 }
 
 // ── Audio Player ──────────────────────────────────────────────────────────────
@@ -452,10 +664,8 @@ export function wireBrowse() {
   });
 
   // Lightbox controls
-  $.lbClose.addEventListener('click', () => {
-    $.lightbox.classList.add('hidden');
-    $.lbContent.innerHTML = '';
-  });
+  $.lbClose.addEventListener('click', closeLightbox);
+  $.lbDelete.addEventListener('click', deleteCurrentLightboxItem);
   $.lbPrev.addEventListener('click', () => {
     if (!imageEntries.length) return;
     setLbIndex((lbIndex - 1 + imageEntries.length) % imageEntries.length);
@@ -467,16 +677,14 @@ export function wireBrowse() {
     openLightboxImage(lbIndex);
   });
   $.lightbox.addEventListener('click', e => {
-    if (e.target === $.lightbox) {
-      $.lightbox.classList.add('hidden');
-      $.lbContent.innerHTML = '';
-    }
+    if (e.target === $.lightbox) closeLightbox();
   });
   document.addEventListener('keydown', e => {
     if ($.lightbox.classList.contains('hidden')) return;
-    if (e.key === 'Escape') $.lbClose.click();
+    if (e.key === 'Escape') closeLightbox();
     if (e.key === 'ArrowLeft') $.lbPrev.click();
     if (e.key === 'ArrowRight') $.lbNext.click();
+    if (e.key === 'Delete') deleteCurrentLightboxItem();
   });
 
   // Audio auto-advance — module mode imports are read-only bindings, so the

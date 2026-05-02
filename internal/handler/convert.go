@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	maxConvertPaths    = 50
+	maxConvertPaths    = 500
 	convertFileTimeout = 10 * time.Minute
 )
 

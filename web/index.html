@@ -57,6 +57,8 @@
         </label>
         <button id="clear-selection-btn" class="clear-selection-btn" type="button" hidden>선택 해제</button>
         <button id="convert-all-btn" class="convert-all-btn" type="button" hidden></button>
+        <button id="convert-png-all-btn" class="convert-all-btn convert-png-all-btn" type="button" hidden></button>
+        <button id="convert-webp-all-btn" class="convert-all-btn convert-webp-all-btn" type="button" hidden></button>
       </div>
 
       <section id="file-list"></section>
@@ -68,6 +70,7 @@
   <!-- 라이트박스 -->
   <div id="lightbox" class="lightbox hidden">
     <button class="lb-close" id="lb-close" aria-label="닫기">✕</button>
+    <button class="lb-delete" id="lb-delete" aria-label="삭제">🗑</button>
     <button class="lb-prev" id="lb-prev" aria-label="이전">‹</button>
     <button class="lb-next" id="lb-next" aria-label="다음">›</button>
     <div class="lb-content" id="lb-content"></div>
@@ -151,6 +154,50 @@
     </div>
   </div>
 
+  <!-- PNG → JPG 변환 모달 (동기 응답, SSE 아님) -->
+  <div id="convert-image-modal" class="modal-overlay hidden">
+    <div class="modal modal-wide">
+      <h3>PNG → JPG 변환</h3>
+      <p class="modal-hint">알파 채널은 흰 배경에 합성됩니다 (quality 90).</p>
+      <ul id="convert-image-file-list" class="convert-file-list"></ul>
+      <label class="convert-option">
+        <input type="checkbox" id="convert-image-delete-original">
+        변환 후 원본 PNG 삭제
+      </label>
+      <p id="convert-image-error" class="modal-error hidden"></p>
+      <div id="convert-image-result" class="url-result hidden">
+        <div id="convert-image-summary" class="url-summary"></div>
+        <ul id="convert-image-rows" class="url-rows"></ul>
+      </div>
+      <div class="modal-actions">
+        <button id="convert-image-cancel-btn">취소</button>
+        <button id="convert-image-confirm-btn" class="btn-primary">시작</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 움짤 → animated WebP 변환 모달 (SSE) -->
+  <div id="convert-webp-modal" class="modal-overlay hidden">
+    <div class="modal modal-wide">
+      <h3>움짤 → WebP 변환</h3>
+      <p class="modal-hint">자동재생 친화 단일 포맷으로 변환합니다. 음성은 항상 제거됩니다.</p>
+      <ul id="convert-webp-file-list" class="convert-file-list"></ul>
+      <label class="convert-option">
+        <input type="checkbox" id="convert-webp-delete-original">
+        변환 후 원본 삭제
+      </label>
+      <p id="convert-webp-error" class="modal-error hidden"></p>
+      <div id="convert-webp-result" class="url-result hidden">
+        <div id="convert-webp-rows" class="url-rows"></div>
+        <div id="convert-webp-summary" class="url-summary hidden"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="convert-webp-cancel-btn">닫기</button>
+        <button id="convert-webp-confirm-btn" class="btn-primary">시작</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 다운로드 설정 모달 -->
   <div id="settings-modal" class="modal-overlay hidden">
     <div class="modal">
@@ -165,6 +212,11 @@
         <span class="settings-label">다운로드 타임아웃 (분)</span>
         <input id="settings-timeout-min" type="number" min="1" max="240" step="1" inputmode="numeric">
       </label>
+      <label class="settings-field settings-field-checkbox">
+        <input id="settings-auto-png" type="checkbox">
+        <span class="settings-label">PNG 업로드 시 JPG로 자동 변환</span>
+        <span class="settings-hint">알파 채널은 흰 배경에 합성됩니다 (quality 90).</span>
+      </label>
       <p id="settings-error" class="modal-error hidden"></p>
       <div class="modal-actions">
         <button id="settings-cancel-btn">취소</button>
@@ -173,6 +225,6 @@
     </div>
   </div>
 
-  <script type="module" src="/main.js?v=32"></script>
+  <script type="module" src="/main.js?v=41"></script>
 </body>
 </html>

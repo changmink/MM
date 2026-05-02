@@ -3412,3 +3412,1074 @@ F1 백엔드 코어 (media.MoveDir + 단위 테스트)
 - **위험: 새 폴더 버튼 이전으로 모바일 드로어 닫힌 상태에선 새 폴더 생성 불가** — 사용자가 햄버거를 먼저 열어야 함. 의도된 동선이라 acceptable. README 한 줄 명시.
 - **위험: `rewritePathAfterFolderRename` 재사용 시 의미 차이** — 폴더 rename은 `/a/old → /a/new`, 폴더 move는 `/a/sub → /b/sub`. 헬퍼가 srcOldPath/destNewPath의 prefix 치환만 하면 둘 다 안전. `web/util.js` 구현 확인 후 재사용 검증.
 - **롤백:** Phase 24 머지 단위로 revert → Phase 23 상태 복귀. SPEC.md §2.1.2/§2.1.3/§10도 동시 revert.
+
+---
+
+## Phase 25 — PNG → JPG 변환 (`feature/png-to-jpg`) — spec [`SPEC.md §2.8`](../SPEC.md)
+
+PNG 업로드 시 자동 JPEG 변환 + 기존 PNG 파일을 명시적으로 변환하는 두 진입점. 기존 `disintegration/imaging` 라이브러리만 재사용하여 신규 의존성 없음. 알파 채널은 흰 배경 합성으로 처리(JPEG 구조적 한계). settings 토글로 자동 변환 ON/OFF.
+
+**의존성:**
+```
+PJ1 (internal/imageconv 패키지 — ConvertPNGToJPG + 흰 배경 합성 + atomic write + 단위 테스트)
+  ├─► PJ3 (handleUpload PNG 자동 변환 분기 + 응답 스키마 확장 + 폴백 로직 + 통합 테스트)
+  │      ↑ PJ2
+  └─► PJ4 (POST /api/convert-image 동기 핸들러 + 라우트 등록 + 통합 테스트)
+              └─► PJ5 (frontend — 카드 버튼 · 툴바 일괄 · 모달 · 자동 변환 응답 처리 + 수동 E2E)
+PJ2 (settings AutoConvertPNGToJPG 필드 + GET/PATCH 통과 + UI 체크박스)
+  └─► PJ3
+```
+
+PJ1과 PJ2는 leaf로 병렬 가능. PJ3는 PJ1+PJ2가 모두 끝나야 시작. PJ4는 PJ1만 의존. PJ5는 PJ3+PJ4 모두 의존(자동 변환 응답 UI 처리 포함).
+
+### PJ1 — `internal/imageconv` 패키지
+
+**파일:** `internal/imageconv/imageconv.go`, `internal/imageconv/imageconv_test.go`
+
+**변경 포인트:**
+- 단일 export `ConvertPNGToJPG(srcPath, destPath string, quality int) error`. 호출 측은 확장자 검증을 끝낸 상태로 호출 — 패키지는 path 검증을 수행하지 않는다(handler 책임).
+- 내부 흐름:
+  1. `imaging.Open(srcPath)` 로 PNG 디코드 (반환은 `*image.NRGBA` — 알파 보존).
+  2. `bounds := src.Bounds()` 로 동일 크기 `*image.RGBA` 생성.
+  3. `draw.Draw(dst, bounds, image.NewUniform(color.White), image.Point{}, draw.Src)` — 흰색 fill.
+  4. `draw.Draw(dst, bounds, src, bounds.Min, draw.Over)` — 합성. 불투명 픽셀은 그대로, 알파는 흰색과 over.
+  5. atomic write — `os.CreateTemp(filepath.Dir(destPath), ".imageconv-*.jpg")` 로 임시 파일 → `jpeg.Encode(tmp, dst, &jpeg.Options{Quality: quality})` → close → `os.Rename(tmp.Name(), destPath)`.
+  6. 모든 에러 경로(decode/encode/write/rename 실패)에서 임시 파일은 `os.Remove`로 정리 — `defer`로 cleanup이 한 번만 실행되도록 변수 플래그(`renamed`) 사용.
+- `quality` 인자: handler에서 항상 90 전달. 0 또는 음수면 `image/jpeg` 스펙대로 75를 쓰지만, 본 패키지는 **0 ≤ q ≤ 100 검증**을 추가해 `fmt.Errorf("imageconv: quality out of range: %d", q)` 반환. 잘못 사용된 경우 조기 발견.
+- **import:** `github.com/disintegration/imaging`(이미 go.mod에 있음), `image`, `image/color`, `image/draw`, `image/jpeg`, `os`, `path/filepath`.
+- **무엇을 하지 않는지(명시):** SafePath 검증 X, 확장자 검증 X, 입력 파일 잠금/원자성 X, 사이드카 처리 X — 모두 호출자(handler) 책임.
+
+**완료 기준:** `go test ./internal/imageconv` 통과 — 8개 케이스:
+1. RGB PNG (알파 없음) → JPEG 디코드 가능 + dimensions 일치
+2. RGBA PNG (반투명/완전투명 픽셀 포함) → 알파였던 위치 RGB가 흰색에 가까움(검사용 픽셀 샘플)
+3. 손상 PNG (헤더 truncate) → decode 에러 + temp 파일 미잔존
+4. src 미존재 → `os.ErrNotExist` 계열 에러 wrap
+5. dest 디렉토리 미존재 → `os.CreateTemp` 에러 wrap + temp 미생성
+6. quality 음수/100 초과 → 인자 검증 에러 (decode 시도 안 함)
+7. atomic 검증: 정상 종료 후 `.imageconv-*.jpg` glob 매치 0개
+8. 출력 확장자는 호출자 결정: `destPath`가 `.jpeg`이든 `.jpg`이든 패키지는 그대로 사용
+
+### PJ2 — `settings` 확장 + UI 체크박스
+
+**파일:** `internal/settings/settings.go`, `internal/settings/settings_test.go`, `internal/handler/settings_test.go`, `web/index.html`, `web/style.css`, `web/settings.js`, `web/main.js` (버전 bump)
+
+**변경 포인트:**
+- `settings.go`:
+  - `Settings` 구조체에 `AutoConvertPNGToJPG bool \`json:"auto_convert_png_to_jpg"\`` 추가.
+  - `Default()` 가 `AutoConvertPNGToJPG: true` 반환.
+  - `Validate(Settings)` 는 boolean이라 추가 검증 불필요(zero value `false`도 유효한 OFF 상태).
+  - **레거시 키 누락 처리** — JSON 디코드는 키 부재 시 zero value `false`가 되므로 SPEC §2.7 기본값(true)과 어긋난다. `New()` 에서 1차 디코드를 `map[string]json.RawMessage` 로 받아 `auto_convert_png_to_jpg` 키 존재 여부를 검사 → 부재 시 `loaded.AutoConvertPNGToJPG = true` 강제 적용. 다음 PATCH 때 디스크에 정식 저장됨. (대안 — `Settings`에 별도 presence flags 도입 — 복잡도 상승. 1차 디코드 패턴이 가벼움.)
+- `settings_test.go` 갱신:
+  - `TestDefault` 에 `AutoConvertPNGToJPG == true` 어서션 추가.
+  - 기존 `TestRoundTrip` 에 `AutoConvertPNGToJPG: false` 케이스 추가(true→false→true 라운드트립).
+  - 신규 `TestNew_LegacyMissingKey`: 디스크에 `{"url_import_max_bytes":..., "url_import_timeout_seconds":...}` (auto_convert 키 없음) 직접 작성 → `New()` 후 `Snapshot().AutoConvertPNGToJPG == true`.
+- `handler/settings_test.go`:
+  - 기존 GET/PATCH round-trip 테스트가 새 필드를 자동으로 직렬화하는지 확인. 필요 시 expected JSON에 `auto_convert_png_to_jpg: true` 추가.
+  - 신규 `TestSettings_PATCH_BooleanTypeMismatch`: `{"auto_convert_png_to_jpg": "yes"}` → `400 invalid request` (JSON unmarshal 자체가 실패).
+- `web/index.html` `#settings-modal` 마크업: 기존 두 필드 아래에 `.settings-field` 추가
+  ```html
+  <div class="settings-field">
+    <label class="settings-label">
+      <input type="checkbox" id="settings-auto-png">
+      PNG 업로드 시 JPG로 자동 변환
+    </label>
+    <p class="settings-hint">알파 채널은 흰 배경에 합성됩니다 (quality 90).</p>
+  </div>
+  ```
+- `web/style.css` 추가:
+  - `.settings-field input[type="checkbox"]` margin-right 8px, vertical-align middle.
+  - 체크박스 라벨은 cursor pointer.
+- `web/settings.js`:
+  - DOM ref 1개 추가 (`settingsAutoPNGEl`).
+  - `openSettingsModal()` 의 GET 응답 처리에 `el.checked = !!data.auto_convert_png_to_jpg` 추가.
+  - `submitSettings()` 의 PATCH payload에 `auto_convert_png_to_jpg: settingsAutoPNGEl.checked` 추가.
+- `web/main.js` 또는 `index.html` `<script>` 태그 버전 v=N → v=N+1 bump.
+
+**완료 기준:** `go test ./internal/settings ./internal/handler -run TestSettings` 통과. 브라우저에서 ⚙ → 모달 → 체크박스 토글 → 저장 → 모달 재오픈 시 상태 유지. settings.json 디스크에 새 키 존재.
+
+### PJ3 — `handleUpload` 자동 PNG → JPG 변환
+
+**파일:** `internal/handler/files.go`, `internal/handler/files_test.go`, `web/fileOps.js` 또는 응답 처리 모듈, `web/main.js`
+
+**변경 포인트:**
+- `files.go` `handleUpload`:
+  - 기존 `createUniqueFile(destPath)` 직전 분기 추가:
+    ```
+    snap := h.settingsSnapshot()
+    isPNG := strings.EqualFold(filepath.Ext(part.FileName()), ".png")
+    autoConvert := isPNG && snap.AutoConvertPNGToJPG
+    ```
+  - `autoConvert == false` (현재 흐름 유지):
+    - `createUniqueFile(destPath)` → `io.Copy` → 응답에 `converted: false, warnings: []` 추가.
+  - `autoConvert == true`:
+    1. `tmpPNG, err := os.CreateTemp(destDir, ".pngconvert-*.png")` (browse 자동 숨김 — `.`-prefix).
+    2. `io.Copy(tmpPNG, part)` → close (defer cleanup wrapper로 모든 경로에서 잔존 안 하도록).
+    3. 목표 경로 계산: `jpgBase := strings.TrimSuffix(filepath.Base(destPath), filepath.Ext(destPath)) + ".jpg"`; `jpgPath := filepath.Join(destDir, jpgBase)`.
+    4. 임시 jpg 경로(`tmpJPGPath := tmpPNG.Name() + ".jpg"`)를 결정 → `imageconv.ConvertPNGToJPG(tmpPNG.Name(), tmpJPGPath, 90)` 호출. `imageconv` 의 atomic write가 `tmpJPGPath` 를 안전하게 만들고, 핸들러는 이후 `tmpJPGPath` → `jpgPath`(unique 처리) 로 한 번 더 rename.
+    5. 변환 성공:
+       - `os.Remove(tmpPNG.Name())`.
+       - `finalPath, suffixApplied, err := renameToUniqueDest(tmpJPGPath, jpgPath)` (신규 헬퍼 — `O_CREATE|O_EXCL` 패턴으로 `_1`, `_2` 후보 생성 후 `os.Rename`).
+       - 응답: `path: finalPath`, `name: filepath.Base(finalPath)`, `size: <stat>`, `type: image`, `converted: true`, `warnings`: `suffixApplied ? ["renamed"] : []`.
+       - 썸네일 풀 제출은 `finalPath` 대상으로.
+    6. 변환 실패 (decode/encode/write 어느 단계든):
+       - `os.Remove(tmpJPGPath)` (있으면).
+       - 폴백: `tmpPNG.Name()` 을 원래 `destPath` 로 rename — `renameToUniqueDest(tmpPNG.Name(), destPath)` 재사용. suffix 발생 시 `warnings: ["renamed", "convert_failed"]`.
+       - `slog.Warn("png auto-convert failed, falling back to original", "src", destPath, "err", err)`.
+       - 응답: `converted: false`, `warnings: ["convert_failed"]` (suffix 있으면 추가).
+- 신규 헬퍼 `renameToUniqueDest(srcPath, destPath string) (finalPath string, suffixed bool, err error)`:
+  - destPath 가 비어있으면 즉시 시도, EEXIST 시 `_1.<ext>`, `_2.<ext>` 등 createUniqueFile 패턴으로 후보 생성.
+  - 각 시도는 `O_CREATE|O_EXCL` 로 빈 파일 만든 뒤 `os.Rename(srcPath, candidate)` — atomic + race-free.
+  - 위치: `files.go` (createUniqueFile 인접).
+- 응답 스키마 확장 (`uploadResponse` 또는 inline map):
+  - `converted bool` + `warnings []string` 필드 추가. Warnings nil이면 `[]`로 직렬화 (SPEC §5에 빈 배열로 명시 — `omitempty` 사용 안 함).
+- `files_test.go` 신규 테스트 케이스 7개:
+  1. `auto_convert=true` + RGB PNG 업로드 → 응답 `converted:true`, 디스크에 `.jpg`만, `.png`/`.pngconvert-*` 미잔존, 썸네일 비동기 생성 트리거됨
+  2. `auto_convert=true` + RGBA PNG 업로드 → 알파 위치가 흰색으로 합성된 JPEG (디코드 후 픽셀 샘플 검사)
+  3. `auto_convert=false` + PNG 업로드 → 원본 `.png` 그대로 저장, `converted:false`
+  4. `auto_convert=true` + 손상 PNG (디코드 실패하는 fixture) → 폴백, 원본 `.png` 저장, `warnings:["convert_failed"]`, 응답 코드 201
+  5. `auto_convert=true` + `foo.jpg` 사전 존재 + `foo.png` 업로드 → 결과 `foo_1.jpg`, `warnings:["renamed"]`
+  6. `auto_convert=true` + 비-PNG (jpg/mp4) 업로드 → 영향 없음, `converted:false`, `warnings:[]`
+  7. `auto_convert=true` + 대문자 `.PNG` 업로드 → 변환됨, 출력 `.jpg`(소문자)
+- `web/fileOps.js` (또는 업로드 응답을 처리하는 모듈) 응답 파서에 `converted`/`warnings` 처리 추가:
+  - 기존 success 알림에 `converted: true` 면 "PNG가 JPG로 변환되어 저장됨" 한 줄 inline 메시지(toast 또는 업로드 영역 아래 하이라이트 1.5초).
+  - `warnings.includes('convert_failed')` 면 "PNG 변환 실패, 원본으로 저장됨" 경고 색.
+  - `warnings.includes('renamed')` 면 "파일명이 자동 변경되었습니다" — 기존 URL import 라벨 재사용.
+- main.js / index.html 버전 bump.
+
+**완료 기준:** `go test ./internal/handler -run TestUpload` 신규 7케이스 + 기존 회귀 통과. 브라우저에서 PNG drag&drop → JPG 카드 노출 + 한국어 inline 메시지 표시.
+
+### PJ4 — `POST /api/convert-image` 동기 핸들러
+
+**파일:** `internal/handler/convert_image.go` (신규), `internal/handler/convert_image_test.go` (신규), `internal/handler/handler.go` (라우트). PJ3에서 만든 `renameToUniqueDest` 헬퍼는 본 핸들러에서는 미사용(충돌 시 `already_exists` 반환이라 unique 회피 불필요).
+
+**변경 포인트:**
+- `convert_image.go`:
+  - 상수 `maxConvertImagePaths = 50`, `imageConvertFileTimeout = 30 * time.Second`, `imageJPEGQuality = 90`.
+  - 요청/응답 타입:
+    ```go
+    type convertImageRequest struct {
+        Paths          []string `json:"paths"`
+        DeleteOriginal bool     `json:"delete_original"`
+    }
+    type convertImageResult struct {
+        Index    int      `json:"index"`
+        Path     string   `json:"path"`
+        Output   string   `json:"output,omitempty"`
+        Name     string   `json:"name,omitempty"`
+        Size     int64    `json:"size,omitempty"`
+        Warnings []string `json:"warnings,omitempty"`
+        Error    string   `json:"error,omitempty"`
+    }
+    type convertImageResponse struct {
+        Succeeded int                  `json:"succeeded"`
+        Failed    int                  `json:"failed"`
+        Results   []convertImageResult `json:"results"`
+    }
+    ```
+  - `handleConvertImage(w, r)`:
+    - POST 외 → 405 method not allowed.
+    - JSON decode → 실패 400 invalid request.
+    - 길이 0 → 400 no paths, > 50 → 400 too many paths.
+    - 각 path 순차 처리:
+      1. `media.SafePath(h.dataDir, p)` → 실패 시 result.Error = `"invalid_path"`.
+      2. `os.Stat` → 미존재 `"not_found"`, 디렉토리 `"not_a_file"`.
+      3. 확장자 `strings.EqualFold(filepath.Ext(abs), ".png") == false` → `"not_png"`.
+      4. 목표 경로 `dst := strings.TrimSuffix(abs, ext) + ".jpg"` (소문자 고정).
+      5. `os.Stat(dst) == nil` → `"already_exists"` (자동 suffix 없음 — SPEC §2.8.2).
+      6. `fctx, cancel := context.WithTimeout(r.Context(), imageConvertFileTimeout)`; `defer cancel()`. 별도 goroutine에서 `imageconv.ConvertPNGToJPG(abs, dst, imageJPEGQuality)` 호출 → channel로 결과 수신. `select { case <-fctx.Done(): error="canceled"|"convert_timeout" case res := <-done: ... }` 분기는 `errors.Is(fctx.Err(), context.DeadlineExceeded)` 으로 결정. ctx done이 먼저 와도 goroutine은 끝까지 실행되며 결과 임시 파일은 `imageconv` 자체 cleanup이 처리.
+      7. 성공: `delete_original == true` 면 원본 PNG + `.thumb/{name}.png.jpg` 삭제 (best-effort, 실패 시 `result.Warnings = append(..., "delete_original_failed")`). 사이드카는 이미지에 `.dur` 없음 — `.jpg` 1개만 처리.
+      8. result 채움: `Output`, `Name`, `Size` (Stat dst).
+    - 각 항목 결과에 따라 `succeeded` / `failed` 누적.
+    - 응답 `200 OK` + JSON.
+- `handler.Register` 라우트 1줄 추가:
+  ```go
+  mux.HandleFunc("/api/convert-image", requireSameOrigin(h.handleConvertImage))
+  ```
+- `convert_image_test.go` — 12개 케이스:
+  1. 정상 PNG 1개 → 200 + succeeded:1 + `.jpg` 디스크 + 원본 유지
+  2. `delete_original:true` → 원본 + 사이드카 삭제 확인
+  3. 배열 2개 → 결과 2건, 둘 다 `.jpg` 존재
+  4. 충돌: `foo.jpg` 사전 존재 → `error: "already_exists"` + 임시 파일 미생성
+  5. 부분 실패: `[good.png, bad.txt]` → 0번 done + 1번 `not_png`
+  6. `delete_original_failed` 경고: 사이드카만 read-only 디렉토리에 두고 `delete_original:true` → 변환 성공 + warning
+  7. 빈 배열 → 400 no paths
+  8. 51개 → 400 too many paths
+  9. 잘못된 JSON → 400 invalid request
+  10. GET → 405 method not allowed
+  11. traversal: `["../../etc/passwd"]` → 항목 `invalid_path`
+  12. 손상 PNG → 항목 `decode_failed` + 임시 파일 정리
+
+**체크포인트 ① (PJ4 종료):** curl 단독 검증 5단계
+1. `curl -X POST localhost:8080/api/convert-image -H 'Origin: http://localhost:8080' -d '{"paths":["test.png"],"delete_original":false}'` → JSON 응답 + 디스크에 test.jpg
+2. 충돌: 같은 호출 반복 → `already_exists`
+3. delete_original=true → 원본 사라짐
+4. traversal: `"../../etc/passwd"` → `invalid_path`
+5. 405: `curl -X GET ...` → method not allowed
+
+**완료 기준:** `go test ./internal/handler -run TestConvertImage` 12 케이스 + 회귀 전부 통과. 위 5단계 curl 모두 기대 동작.
+
+### PJ5 — frontend UI + 수동 E2E
+
+**파일:** `web/convertImage.js` (신규), `web/browse.js`, `web/main.js`, `web/index.html`, `web/style.css`
+
+**변경 포인트:**
+- `web/convertImage.js` 신규 모듈 (Phase 23 모듈화 패턴 일관):
+  - export `openConvertImageModal(paths: string[], onComplete: () => void)`, `setConvertImageDeps({...})` (콜백 주입 — `loadBrowse`).
+  - 모달 마크업은 `index.html` 의 신규 `#convert-image-modal` (TS 변환 모달 스타일 미러). 본문: "{N}개의 PNG를 JPG로 변환하시겠습니까?" + `<input type="checkbox">` "변환 후 원본 PNG 삭제".
+  - `submitConvertImage()`: `fetch('/api/convert-image', {method:'POST', body:JSON.stringify({paths, delete_original})})` → 응답 파싱 → 성공 카운트 + 실패 항목 한국어 메시지(`CONVERT_IMAGE_ERROR_LABELS`) → 알림 → `loadBrowse()` 트리거.
+  - `CONVERT_IMAGE_ERROR_LABELS` (한국어):
+    - `invalid_path: '경로 오류'`
+    - `not_found: '파일 없음'`
+    - `not_a_file: '폴더는 변환 불가'`
+    - `not_png: 'PNG 파일이 아님'`
+    - `already_exists: '대상 JPG 이미 존재'`
+    - `decode_failed: 'PNG 디코드 실패'`
+    - `encode_failed: 'JPEG 인코드 실패'`
+    - `write_failed: '저장 실패'`
+    - `convert_timeout: '변환 시간 초과'`
+    - `canceled: '취소됨'`
+- `web/browse.js`:
+  - `buildImageGrid` 에서 카드 생성 시 `entry.mime === 'image/png'` 면 "JPG로 변환" 버튼 추가 (rename/delete 버튼과 동일 layout, `.png-convert-btn` 클래스). 클릭 → `openConvertImageModal([entry.path], …)` 호출.
+  - `renderView` (또는 툴바 갱신 함수)에서 visible PNG 개수 계산 → ≥1 이면 `#convert-png-all-btn` 표시 + "모든 PNG 변환 (N)". 클릭 → `openConvertImageModal(visiblePNGs.map(e => e.path), …)`.
+- `web/main.js`:
+  - `convertImage` 모듈 import + `setConvertImageDeps({ loadBrowse: _browse })` 주입.
+  - `browse.js` 가 expose하는 콜백 receiver에 `openConvertImageModal` 주입.
+- `web/index.html`:
+  - 툴바에 `<button id="convert-png-all-btn" hidden>` 추가 (TS 일괄 변환 버튼 옆 또는 그룹 내).
+  - `#convert-image-modal` 마크업 (확인 메시지 + 체크박스 + 버튼 2개).
+  - `<script>` 버전 bump.
+- `web/style.css`:
+  - `.png-convert-btn` (entry-button 패턴 — rename/delete와 동일 hover/focus).
+  - `#convert-image-modal` (TS 모달 스타일 재사용 — `.modal` 베이스 활용).
+  - `#convert-png-all-btn` 가 `#convert-all-btn`(TS) 와 시각적으로 구분되게 — 색이나 아이콘 차이.
+
+**수동 E2E 시나리오 (12개):**
+1. ⚙ → 모달에서 "PNG 자동 변환" 체크박스 표시 (기본 ON).
+2. 토글 OFF → 저장 → 새로고침 후 OFF 유지.
+3. PNG drag&drop 업로드 (자동 변환 ON) → 카드는 `.jpg`, inline 메시지 "PNG가 JPG로 변환됨".
+4. PNG drag&drop 업로드 (자동 변환 OFF) → 카드는 `.png` 그대로.
+5. 알파 PNG 업로드 → JPG 다운로드 후 다른 뷰어에서 흰 배경 합성 확인.
+6. 손상 PNG 업로드 → `.png` 저장 + 경고 메시지 "변환 실패, 원본 저장".
+7. `foo.jpg` 사전 존재 + `foo.png` 업로드 → `foo_1.jpg` 생성 + 자동 rename 메시지.
+8. PNG 카드 "JPG로 변환" 버튼 → 모달 → 확인 → 카드가 `.jpg`로 갱신.
+9. PNG 카드 변환 + "원본 PNG 삭제" 체크 → 변환 후 원본 카드 사라짐.
+10. 폴더 PNG 3개 + JPG 2개 → 툴바 "모든 PNG 변환 (3)" 노출, 클릭 → 3개 변환 → 알림 "성공 3 / 실패 0".
+11. 충돌: `foo.jpg` + `foo.png` 동시 존재 + 수동 변환 → 결과 알림 "1건 실패 (대상 JPG 이미 존재)".
+12. 모바일 브라우저(<600px) — 카드 버튼·툴바 버튼·모달 정상 표시.
+
+**완료 기준:** 12개 시나리오 모두 기대 동작. 콘솔 에러 0. 회귀: 기존 업로드/rename/delete/TS 변환 각 1회 스모크.
+
+### Out of scope (Phase 25)
+- JPEG 외 출력 포맷(WEBP, AVIF) 변환.
+- PNG 외 입력 포맷(BMP, TIFF, HEIC) 변환.
+- JPEG quality 사용자 조절(90 고정).
+- 알파 채널 보존 옵션(흰 배경 합성 강제).
+- EXIF/메타데이터 보존.
+- URL import 결과의 자동 변환.
+- 자동 변환 시 원본 PNG 별도 저장(원본을 원하면 자동 변환 OFF).
+- progress 이벤트 / SSE.
+- 동시 변환(배열은 항상 순차).
+- 변환 큐 / 잡 영속화.
+
+### 위험 / 롤백
+- **위험: settings 마이그레이션** — 기존 `settings.json` 에 `auto_convert_png_to_jpg` 키가 없을 때 zero value `false`가 되면 사용자 의도와 어긋난다(SPEC 기본값은 true). PJ2 의 `New()` 후 누락 키를 true로 강제하는 로직이 필수. 검증: `TestNew_LegacyMissingKey` 가 잡는다.
+- **위험: 자동 변환 폴백 시 응답 코드** — 변환 실패해도 업로드는 201로 반환해야 데이터 손실 인식이 안 생긴다. `warnings` 에서만 신호. PJ3 통합 테스트 4번 케이스가 잡는다.
+- **위험: 임시 파일 누출** — `.pngconvert-*.png` / `.imageconv-*.jpg` / `.pngconvert-*.jpg` 가 destDir에 남으면 browse는 dot-prefix로 숨기지만 디스크 공간을 차지한다. PJ1 테스트 7번(atomic glob 검증) + PJ3 테스트 1번(미잔존 검증).
+- **위험: 알파 합성 색이 사용자 기대와 다름** — 검정 배경 PNG 위에 흰 폰트는 흰 배경 합성 시 가시성 무너진다. 본 SPEC는 흰 고정이 명시이므로 사용자 책임이지만, 필요 시 후속에 배경 색 옵션 도입 검토.
+- **위험: 디스크 풀 / 권한** — atomic write 중간 실패는 `imageconv` 에러로 전파 → handler가 `convert_failed` warning 으로 폴백 또는 `write_failed` error로 응답. 임시 파일은 cleanup.
+- **위험: 큰 PNG (수십 MB) 디코드 메모리** — `imaging.Open` 은 전체 이미지를 메모리에 올린다. 단일 사용자 가정 + 일반 사진 크기에서 문제 없음. 4K 스크린샷도 ~50MB RAM. 별도 cap 도입 안 함.
+- **롤백:** Phase 25 머지 단위로 revert → Phase 24 상태 복귀. settings.json 의 `auto_convert_png_to_jpg` 키는 남지만 서버가 무시(미지의 필드는 `DisallowUnknownFields`로 PATCH 거부 — 실제로는 GET/디스크 로드는 허용이라 무해). 기존 사용자 PNG 파일은 변환 안 됨(자동 변환은 신규 업로드부터만 적용된 상태였음). 데이터 손실 없음.
+
+## Phase 26 — 선택한 PNG만 변환 (`feature/png-selected-convert`)
+
+**Spec:** [SPEC.md §2.8.2](../SPEC.md) (일괄 변환 트리거 selection-aware 모드 전환)
+
+기존 Phase 25 PJ5에서 도입한 "모든 PNG 변환 (M개)" 툴바 버튼을 **selection-aware 모드 전환**으로 확장한다. 선택이 있으면 "선택 PNG 변환 (N개)"로 라벨이 자동 바뀌고, `selectedPaths` ∩ visible 중 PNG만 추려서 보낸다. 비-PNG는 자동 제외(차단/경고 없음). 카드별 단일 변환 버튼은 그대로.
+
+**의존 그래프**
+
+```
+  state.js (selectedPaths) ─┐
+                            ├→ browse.js (updateConvertPNGAllBtn) ─→ convertImage.js (변경 없음)
+  applyView (visible)      ─┘                                      └→ POST /api/convert-image (변경 없음)
+```
+
+selection 변경 → `setSelected()` → `renderView()` → `syncSelectionWithVisible()` → `updateConvertPNGAllBtn(visible)` → 라벨/dataset 자동 갱신.
+
+**범위**
+- 변경 파일: `web/browse.js` (updateConvertPNGAllBtn 본체) + `web/index.html` (script 버전 bump).
+- 변경 없음: 백엔드 전부 / convertImage.js / dom.js / state.js / settings / CSS.
+
+### PS-1 — SPEC + plan + todo (선행 커밋, 구현 없음)
+
+**파일:** `SPEC.md`, `tasks/plan.md`, `tasks/todo.md`
+
+- SPEC.md §2.8.2 일괄 변환 트리거 항목을 selection-aware 모드 전환 사양으로 교체.
+- SPEC.md §2.8.2 수동 테스트 시나리오 1건 추가.
+- tasks/plan.md에 본 Phase 26 섹션 추가.
+- tasks/todo.md Phase 26 entry 추가.
+
+**완료 기준:** 문서만 변경, `go test ./... && go vet ./...` 회귀 통과.
+
+**검증:** SPEC §2.8.2 라인 diff 리뷰. todo entry 형식 Phase 25와 일관.
+
+### PS-2 — `web/browse.js` selection-aware 분기
+
+**파일:** `web/browse.js`, `web/index.html`
+
+- `selectedVisiblePNGPaths(visible)` 헬퍼 신규 — `selectedPaths` ∩ `visible` 중 `mime === 'image/png'`인 path만.
+- `updateConvertPNGAllBtn(visible)` 본체 수정:
+  ```js
+  const allPNG = visiblePNGPaths(visible);
+  const selectedPNG = selectedVisiblePNGPaths(visible);
+  const useSelection = selectedPaths.size > 0;
+  const targets = useSelection ? selectedPNG : allPNG;
+  if (targets.length === 0) {
+    $.convertPNGAllBtn.hidden = true;
+    $.convertPNGAllBtn.dataset.paths = '';
+    return;
+  }
+  $.convertPNGAllBtn.hidden = false;
+  $.convertPNGAllBtn.textContent = useSelection
+    ? `선택 PNG 변환 (${targets.length}개)`
+    : `모든 PNG 변환 (${targets.length}개)`;
+  $.convertPNGAllBtn.dataset.paths = JSON.stringify(targets);
+  ```
+- `index.html` `<script type="module" src="/main.js?v=35">` → `?v=36`.
+
+**완료 기준:**
+- 선택 0개 + visible PNG ≥ 1 → "모든 PNG 변환 (M개)" (기존 동작).
+- 선택 ≥ 1 + 그중 PNG ≥ 1 → "선택 PNG 변환 (N개)", dataset.paths가 PNG만 포함.
+- 선택 ≥ 1인데 PNG 0개 → 버튼 숨김, dataset.paths 비움.
+- 선택 0개 + visible PNG 0개 → 버튼 숨김 (기존 동작).
+- 선택 변경 후 라벨 즉시 갱신 (renderView 자동 호출 경로 활용).
+- 모달 진입 후 버튼 클릭 핸들러는 변경 없이 dataset.paths를 그대로 사용.
+
+**검증:**
+- `go test ./... && go vet ./...` (백엔드 무영향이라 무조건 pass).
+- 코드 리뷰: `selectedVisiblePNGPaths`도 `visible` 인자로 한 번 더 필터해 이중 방어.
+
+### PS-3 — Docker 재빌드 + 수동 E2E
+
+**`docker compose up -d --build`** 후 브라우저 시나리오 5개:
+
+1. **기존 동작 회귀**: 선택 0개 + visible PNG 3개 → "모든 PNG 변환 (3개)" 표시 → 클릭 → 모달에 PNG 3개 → 변환 후 3개 .jpg 갱신.
+2. **선택 모드**: PNG 5개 중 2개 체크박스 선택 → 라벨 "선택 PNG 변환 (2개)"로 즉시 전환 → 클릭 → 모달 파일 목록에 PNG 2개만 → 변환 후 2개만 .jpg, 나머지 3개 PNG 무영향.
+3. **혼합 선택**: PNG 3개 + 비-PNG 2개 같이 체크박스 선택 → 라벨 "선택 PNG 변환 (3개)" → 모달에 PNG 3개만 → 변환 후 PNG만 .jpg, 비-PNG는 무영향.
+4. **선택에 PNG 없음**: JPG 2개만 체크박스 선택 → 버튼 숨김 (선택 해제 시 다시 "모든 PNG").
+5. **폴더 이동 후 selection 비워짐**: PNG 선택 → 다른 폴더 클릭 → 라벨 "모든 PNG 변환"으로 복귀, 새 폴더의 visible PNG 기준 카운트.
+
+**완료 기준:** 5개 시나리오 모두 기대 동작. 콘솔 에러 0. 모바일(<600px) 1회 스모크.
+
+**체크포인트 ②:** 위 5개 통과 + 회귀(카드별 단일 변환 / TS 변환 / 업로드 자동 변환) 각 1회 스모크.
+
+### Out of scope (Phase 26)
+- 선택에 비-PNG가 섞여 있을 때 "PNG만 변환됨" 알림 토스트 (자동 제외로 일관, 모달이 결과를 보여줌).
+- 카드별 PNG 변환 버튼을 selection 기반으로 묶기 (단일 동선 유지).
+- 선택 항목이 다른 폴더에 걸친 경우 처리 (기존 selection 정책상 발생 불가).
+- 선택 가능한 batch size cap (백엔드 50개 cap 그대로 적용 — 51개 선택 시 `400 too many paths` 그대로 노출).
+
+### 위험 / 롤백
+- **위험: 선택 50개 초과** — 백엔드가 51개부터 `400 too many paths`. 사용자 경험상 안내가 필요할 수 있으나 단일 사용자 운용에서 PNG 50개 초과 동시 변환은 드물다고 판단, 본 phase에서는 별도 가드 없이 기존 4xx 메시지 그대로 노출. 후속 phase에서 toast 안내 검토.
+- **위험: selection이 stale** — `syncSelectionWithVisible`이 매 renderView마다 정리하므로 실질적으로 발생 불가. `selectedVisiblePNGPaths`에서도 visible 인자로 다시 한 번 필터해 이중 방어.
+- **롤백:** `web/browse.js` `updateConvertPNGAllBtn` 본체 1개 함수 revert + main.js 버전 번호 되돌리기. 백엔드 무변경이라 데이터 영향 없음.
+
+## Phase 27 — Rubber-band 영역 선택 (`feature/drag-select`)
+
+**Spec:** [SPEC.md §2.5.4](../SPEC.md) (Rubber-band 영역 선택)
+
+빈 영역에서 시작한 마우스 드래그로 사각형을 그려 그 안의 visible 카드를 일괄 선택한다. Phase 22의 `selectedPaths` 인프라를 그대로 활용 — 별도 selection 상태 미도입. 백엔드 변경 없음.
+
+**의존 그래프**
+
+```
+  state.js (selectedPaths)         ─┐
+  browse.js (.thumb-card / tr)     ─┼→ 신규 web/dragSelect.js ─→ DOM overlay
+  main.js (wire)                   ─┘
+```
+
+selection 변경 → `setSelected` → `renderView` → 카드 `.selected` 클래스 갱신 (기존 흐름 그대로).
+
+**범위**
+- 변경 파일: 신규 `web/dragSelect.js`, 수정 `web/main.js`(wire), `web/style.css`(overlay 스타일), `web/index.html`(버전 bump).
+- 변경 없음: 백엔드 전부 / browse.js / state.js / fileOps.js (드래그 이동 로직 무영향).
+
+### DS-1 — SPEC + plan + todo (선행 커밋)
+
+**파일:** `SPEC.md`, `tasks/plan.md`, `tasks/todo.md`
+
+- SPEC.md §2.5.4 신설(활성 조건/상호작용/modifier/대상/시각/Non-goals/서버 변경 없음) + §2.5 글머리 한 줄 추가.
+- tasks/plan.md Phase 27 섹션 신규.
+- tasks/todo.md Phase 27 entry 신규.
+
+**완료 기준:** 문서만 변경, `go test ./... && go vet ./...` 회귀 통과.
+
+### DS-2 — `web/dragSelect.js` 구현
+
+**파일:** 신규 `web/dragSelect.js`, 수정 `web/main.js`, `web/style.css`, `web/index.html`
+
+- `wireDragSelect()` export — main 영역 mousedown 핸들러 등록.
+- 빈 영역 판정: `e.target.closest('.thumb-card, tr, button, a, input, label, .lightbox, .modal-overlay, .audio-player') == null`.
+- 5px movement threshold 후 overlay 생성. 단순 클릭(<5px)은 selection 미변경.
+- visible 카드 위치(`getBoundingClientRect()`)는 mousedown 시점에 **1회 캐시** → mousemove 동안 재계산 안 함 (성능, 200카드도 안전).
+- intersect 판정: 사각형 vs 카드 rect overlap (모서리 닿음 포함).
+- modifier 분기: `e.ctrlKey || e.metaKey || e.shiftKey` → additive (기존 selection 유지 + 추가), 아니면 기존 selection 클리어 후 사각형 결과 적용.
+- mousedown 시점 selection 스냅샷(`new Set(selectedPaths)`) 보관 → ESC 시 복원.
+- mouseup/cancel 시 cleanup (overlay 제거, document 임시 listener 해제, 텍스트 선택 차단 클래스 제거).
+- viewport 너비 `≤ 600px`이면 wireDragSelect 진입 즉시 return — 모바일 비활성.
+- main.js에 `wireDragSelect()` 호출 추가.
+- `style.css` `.drag-select-overlay` 규칙 (position: absolute, 반투명 accent, pointer-events: none, z-index < 모달).
+- index.html main.js 버전 bump (Phase 26 반영 상태에 맞춰 v=37).
+
+**완료 기준:**
+- 빈 영역 좌클릭 → 5px 미만은 click으로 처리, 5px 초과는 사각형 + selection 갱신.
+- 카드 위에서 시작하면 rubber-band 미발생 (기존 폴더 이동 DnD 그대로).
+- 우/중 클릭 무시. 모바일 viewport 무동작.
+- ESC로 드래그 시작 시점 selection 복원.
+- 폴더 카드는 사각형이 덮어도 미선택. 필터로 가려진 항목 미선택.
+
+**검증:**
+- `go test ./... && go vet ./...` (백엔드 무영향 — 무조건 pass).
+- 코드 리뷰: visible 카드 rect 캐시는 mousedown 후 mouseup까지 변하지 않는다는 가정(드래그 도중 browse 재로드 트리거 없음).
+
+### DS-3 — Docker rebuild + 수동 E2E
+
+**`docker compose up -d --build`** 후 시나리오 7개:
+1. 빈 영역 클릭+짧게 드래그(<5px) → selection 변경 없이 단순 click 처리.
+2. 빈 영역 드래그 → 반투명 사각형, 안 카드 실시간 선택.
+3. 카드 위에서 드래그 시작 → 기존 폴더 이동 DnD (rubber-band 미발생).
+4. Ctrl+드래그 → 기존 selection 유지 + 사각형 항목 추가.
+5. Shift+드래그 → Ctrl과 동일.
+6. 드래그 중 ESC → overlay 사라지고 시작 시점 selection 복원.
+7. 모바일 viewport(<600px) → 동작 안 함 (기존 체크박스만).
+
+회귀: 카드 단일 클릭(lightbox/play), 카드 드래그(폴더 이동), PNG 일괄 변환 selection 연동, 텍스트 선택 가능 영역(파일명 등) 무영향.
+
+**체크포인트:** 7개 통과 + 회귀 4건 스모크. 통과 시 develop 머지.
+
+### Out of scope (Phase 27)
+- 모바일/터치 long-press + drag.
+- 사이드바 트리에서 영역 선택.
+- 키보드 화살표 + Shift 범위 선택.
+- 드래그 중 viewport 자동 스크롤(사각형이 viewport 끝에 닿을 때 자동 따라감).
+- 사각형 줄어들 때 toggle off (additive only).
+
+### 위험 / 롤백
+- **위험: 클릭 vs 짧은 드래그 충돌** — 5px movement threshold로 분기. threshold 미만이면 selection 미변경.
+- **위험: HTML5 dragstart와 충돌** — mousedown이 카드에서 시작하면 HTML5 dragstart 발화하고 우리 handler는 빈 영역 판정에서 빠짐. 충돌 없음.
+- **위험: 성능 (대량 카드)** — 200 카드 × 60fps = 12k rect 계산. mousedown 시점 1회 캐시로 회피, mousemove는 사각형 ↔ 캐시 비교만 O(N).
+- **위험: 캐시 stale** — 드래그 중 카드 추가/제거가 일어나는 케이스(lazy load, 외부 갱신). visible 카드는 이미 mousedown 시점에 모두 렌더된 상태이고 드래그 중 browse 재로드 트리거가 없으므로 안전.
+- **위험: ESC 복원 정확성** — mousedown 시점 `new Set(selectedPaths)` 스냅샷으로 보장.
+- **롤백:** `web/dragSelect.js` 삭제 + main.js wire 라인 제거 + CSS overlay 규칙 제거 + index.html 버전 되돌리기. 다른 모듈 무영향.
+
+## Phase 28 — 라이트박스 내 삭제 (`feature/lightbox-delete`)
+
+**Spec:** [SPEC.md §2.5.5](../SPEC.md), [tasks/spec-lightbox-delete.md](./spec-lightbox-delete.md)
+
+원본 이미지·동영상을 라이트박스로 열어둔 상태에서 🗑 버튼 또는 `Delete` 키로 현재 항목을 삭제한다. 이미지 라이트박스는 삭제 후 다음 이미지로 자동 이동(마지막이면 닫기), 동영상은 닫고 폴더 새로고침. 기존 `DELETE /api/file` 재사용 — 백엔드 변경 없음.
+
+**의존 그래프**
+
+```
+  state.js (lbCurrentVideoPath 추가) ─┐
+  fileOps.js (deleteFile 옵션화)     ─┼→ browse.js (lightbox 핸들러 + 키 바인딩)
+  index.html (lb-delete 버튼 + v=38) ─┤
+  style.css (.lb-delete 위치)        ─┘
+                  │
+                  ▼
+            chromedp e2e 검증
+```
+
+기존 lightbox UX(prev/next/close) → 신규 delete 분기는 `imageEntries`(이미지) 또는 `lbCurrentVideoPath`(동영상)를 진실 소스로 삼는다. 동영상은 prev/next가 없어 인덱스 추적이 없었으므로 모듈 레벨 path 1개를 신규로 들고 다닌다.
+
+**범위**
+- 변경 파일: `web/index.html`(버튼+버전), `web/style.css`(.lb-delete 위치), `web/dom.js`(`$.lbDelete` ref), `web/state.js`(`lbCurrentVideoPath`), `web/browse.js`(핸들러+키 바인딩+동영상 path 추적), `web/fileOps.js`(`deleteFile` 옵션화 또는 신규 export).
+- 변경 없음: 백엔드 전부, 기타 모듈(tree/convert/urlImport/dragSelect 등).
+
+### LD-1 — SPEC + plan + todo (선행 커밋)
+
+**파일:** `SPEC.md`(완료), `tasks/spec-lightbox-delete.md`(완료), `tasks/plan.md`(이 섹션), `tasks/todo.md`(Phase 28 entry)
+
+- SPEC §2.5.5 신설 + §2.5 글머리 한 줄 추가 (이미 반영).
+- tasks/spec-lightbox-delete.md 신규 (이미 반영).
+- tasks/plan.md Phase 28 섹션 신규 (이 단계).
+- tasks/todo.md Phase 28 entry 신규 (이 단계).
+
+**완료 기준:** 문서만 변경, `go test ./... && go vet ./...` 회귀 통과.
+
+### LD-2 — UI 마크업 + state 추가
+
+**파일:** `web/index.html`, `web/style.css`, `web/dom.js`, `web/state.js`
+
+- `index.html` 라이트박스 컨트롤(`#lightbox` 내부)에 `<button class="lb-delete" id="lb-delete" aria-label="삭제">🗑</button>` 추가. lb-close 바로 다음, lb-prev 앞.
+- `index.html` `main.js?v=37` → `v=38` 캐시 버스트.
+- `style.css` 기존 `.lb-close, .lb-prev, .lb-next` 공유 규칙(`web/style.css:523`)에 `.lb-delete` 추가. 위치는 별도 한 줄 — `.lb-delete { top: 16px; right: 72px; }` (close 좌측 56px 옆, 56=44(버튼폭 추정)+12 여백).
+- `dom.js` `$.lbDelete: document.getElementById('lb-delete')` 추가.
+- `state.js` `lbCurrentVideoPath` mutable export + setter — 동영상 라이트박스가 들고 있는 현재 entry path. 이미지는 `imageEntries[lbIndex]`로 충분하므로 신규 state 없음.
+
+**완료 기준:** 화면에 새 버튼이 lightbox 우상단(close 좌측)에 보이고 클릭/키 입력은 아직 무동작. `go vet ./...` 통과.
+
+### LD-3 — 삭제 핸들러 + 키 바인딩
+
+**파일:** `web/browse.js`, `web/fileOps.js`
+
+- `fileOps.js` `deleteFile(path, opts)` 시그니처 확장:
+  - `opts.skipBrowse` (기본 false) — true면 `_browse()` 호출 생략.
+  - return: `boolean` (성공 여부). 기존 호출자(`browse.js`의 카드 핸들러, `tree.js`)는 return값 무시 + 옵션 미전달이라 회귀 없음.
+- `browse.js` 변경:
+  - `openLightboxImage`는 그대로(이미 `lbIndex` 추적). `openLightboxVideo` 진입 시 `setLbCurrentVideoPath(entry.path)` 호출.
+  - lightbox close 경로(`$.lbClose` 클릭, lightbox 배경 클릭, ESC) 모두에서 `setLbCurrentVideoPath(null)` 호출 — 기존 close 처리 함수로 추출하면 한 곳에서 처리.
+  - 신규 `deleteCurrentLightboxItem()`:
+    ```js
+    async function deleteCurrentLightboxItem() {
+      if (lbCurrentVideoPath) {
+        // 동영상 분기
+        const ok = await deleteFile(lbCurrentVideoPath, { skipBrowse: true });
+        if (!ok) return;
+        closeLightbox();
+        _browse(currentPath, false);
+      } else if (imageEntries.length) {
+        // 이미지 분기
+        const entry = imageEntries[lbIndex];
+        const ok = await deleteFile(entry.path, { skipBrowse: true });
+        if (!ok) return;
+        imageEntries.splice(lbIndex, 1);
+        if (imageEntries.length === 0) {
+          closeLightbox();
+        } else {
+          setLbIndex(lbIndex % imageEntries.length);
+          openLightboxImage(lbIndex);
+        }
+        _browse(currentPath, false);
+      }
+    }
+    ```
+  - `wireBrowse`의 lightbox 컨트롤 블록(`web/browse.js:504-530`)에 `$.lbDelete.addEventListener('click', deleteCurrentLightboxItem)` 추가.
+  - 동일 블록의 keydown 핸들러(`:525`)에 `if (e.key === 'Delete') deleteCurrentLightboxItem();` 분기 추가. `Backspace`는 미바인딩(브라우저 뒤로가기 충돌 회피).
+- `_browse`는 fileOps에서 imports되므로 `setBrowseDeps`(혹은 동등 dep injection 패턴)로 이미 확보 — 추가 의존 불필요.
+
+**완료 기준:**
+- 이미지 라이트박스에서 🗑 클릭 → confirm OK → 다음 이미지 표시(마지막이면 닫힘).
+- 동일 흐름이 `Delete` 키로도 동작.
+- 동영상 라이트박스 → 🗑/Delete → 닫힘 + 폴더 새로고침.
+- confirm 취소 시 라이트박스 상태 무변경.
+- 라이트박스 닫힌 상태에서 `Delete` 키 무동작.
+- 기존 카드 썸네일 삭제는 회귀 없음.
+
+**검증:** `go test ./... && go vet ./...` (백엔드 무영향 — 무조건 pass).
+
+### LD-4 — chromedp e2e + 회귀 검증
+
+**파일:** 신규 `internal/handler/web_lightbox_delete_e2e_test.go`
+
+기존 `web_drag_select_e2e_test.go` 패턴 재사용 — `startStickyServer` + `newStickyChromeCtx` + `chromedp.EmulateViewport` 헬퍼.
+
+시나리오 6개:
+1. **image_delete_advances**: 이미지 3장 → 첫번째 라이트박스 열기 → 🗑 클릭 → confirm accept → `lbContent` img src가 두번째 이미지로 변경.
+2. **image_delete_last_closes**: 이미지 1장만 → 라이트박스 → 🗑 → confirm accept → `#lightbox`가 `.hidden` 클래스 보유.
+3. **image_delete_keyboard**: 시나리오 1을 `Delete` 키로 재현.
+4. **video_delete_closes**: 동영상 라이트박스(`tinyMP4()` 또는 mock) → 🗑 → confirm accept → 라이트박스 닫힘 + 폴더 grid에서 카드 사라짐.
+5. **confirm_cancel**: `chromedp.SetJavascriptDialogHandler`로 dismiss → DELETE 미발생, lightbox 그대로.
+6. **delete_key_inactive**: 라이트박스 닫힌 상태에서 `Delete` 키 → 카드 그대로.
+
+confirm dialog 처리: chromedp는 `chromedp.HandleDialog` 또는 `cdproto/page.HandleJavaScriptDialog`로 accept/dismiss 제어.
+
+**완료 기준:** 6개 시나리오 모두 통과. `go test ./internal/handler -run TestLightboxDelete_E2E -v`.
+
+회귀(기존 단위 테스트로 보장):
+- `internal/handler` `DELETE /api/file` 회귀 (기존 테스트 그대로).
+- 카드 썸네일 삭제(`web/fileOps.js:deleteFile`) — 호출 경로가 변하지 않으므로 자동 회귀 없음, 수동 1회 확인.
+
+### LD-5 — Docker rebuild + 수동 E2E
+
+**`docker compose up -d --build`** 후 시나리오:
+1. 이미지 폴더에 5장 → 라이트박스 → 🗑 → 다음 이미지 표시.
+2. 마지막 이미지 → 🗑 → 닫힘.
+3. `Delete` 키 동일 흐름.
+4. 동영상 → 🗑 → 닫힘 + 폴더 갱신.
+5. confirm 취소 → 변경 없음.
+6. 사이드카 검증: 삭제 후 `.thumb/{name}.jpg`(+ video는 `.dur`)가 사라졌는지 파일시스템 확인.
+7. 회귀: 카드 썸네일 hover 삭제 버튼 정상.
+8. 회귀: 라이트박스 닫고 다른 카드 클릭 → prev/next 정상 순환.
+
+**체크포인트:** 8개 통과 시 develop 머지.
+
+### Out of scope (Phase 28)
+- 다중 선택 라이트박스 일괄 삭제.
+- 휴지통(trash) / undo.
+- 라이트박스 내 rename·move.
+- 음악 재생목록 트랙 삭제.
+- 모바일 long-press 삭제 제스처.
+
+### 위험 / 롤백
+- **위험: 동영상 라이트박스 close 경로 누락** — `setLbCurrentVideoPath(null)`을 close 경로 전부에 걸어야 한다. 누락 시 다음 이미지 라이트박스에서 잘못된 video path가 살아있어 이미지 삭제 분기가 동영상으로 새는 버그 발생. 대응: close 처리를 `closeLightbox()` 단일 함수로 추출하고 모든 close 트리거가 이 함수를 거치게 강제. e2e 시나리오 6(close 후 키 무동작)에서 부분적으로 검출 가능.
+- **위험: confirm 동기 차단** — `confirm()`은 동기. 라이트박스가 떠 있는 상태에서 confirm이 모달처럼 가린다 — 정상. 대응: 별도 처리 불필요.
+- **위험: imageEntries splice와 `_browse` race** — splice 후 `_browse(currentPath, false)`가 `setImageEntries`로 새 배열을 채울 때까지 lbIndex가 stale일 수 있다. 그러나 splice 직후 즉시 `openLightboxImage(newIndex)`로 새 이미지를 표시하고, `_browse`는 비동기 fetch라 그 사이 사용자가 뭔가 할 시간 없음. 대응: 별도 락 불필요.
+- **위험: deleteFile 옵션화로 기존 호출자 회귀** — 옵션 미전달 시 기존 동작(_browse 호출) 유지하도록 default false. fileOps.js 단위 호출자 검색으로 회귀 영역 한정.
+- **롤백:** `web/index.html` `lb-delete` 버튼 + 버전 되돌리기, `web/style.css` `.lb-delete` 규칙 제거, `web/dom.js` `lbDelete` ref 제거, `web/state.js` `lbCurrentVideoPath` 제거, `web/browse.js` 핸들러/키 바인딩/setLbCurrentVideoPath 호출 제거, `web/fileOps.js` `deleteFile` 시그니처 원복. 백엔드 무영향이라 데이터 영향 없음.
+
+## Phase 29 — 움짤 → animated WebP 변환 (`feature/clip-to-webp`) — spec [`SPEC.md §2.9`](../SPEC.md)
+
+움짤(GIF + 짧은 동영상)을 animated WebP로 영구 변환. 자동재생·미리보기 친화 단일 포맷으로 정리하는 것이 목적. ffmpeg `libwebp_anim` 인코더 사용, 화질·자연스러움 우선(quality 80 / fps·해상도 원본 / loop 무한). 음성은 항상 drop + `audio_dropped` warning. 서버가 움짤 게이트(`≤50 MiB && duration ≤30s` 또는 GIF)를 재검증한다. SSE 진행 스트림은 TS→MP4(`/api/convert`)와 동일 스키마. **수동 변환만 제공** — 자동 업로드 변환 없음 (PNG→JPG와 다른 정책 결정).
+
+**의존성:**
+
+```
+CW1 (internal/convert/webp.go — EncodeWebP runner + ProbeStreamInfo helper + 단위 테스트)
+  └─► CW2 (handler/convert_webp.go — POST /api/convert-webp SSE + 게이트 재검증 + 라우트 등록 + 통합 테스트)
+        └─► CW3 (frontend — convertWebp.js + 카드 버튼 + 움짤 탭 일괄 버튼 + 모달 + dom/main wire)
+              └─► CW4 (chromedp e2e + Docker 수동 검증)
+```
+
+CW1은 leaf. CW2는 CW1만 의존. CW3는 CW2 머지 후 시작 (네트워크 계약 합의가 필요). CW4는 CW3 직후 검증 단계.
+
+**범위 (단일 사용자 미디어 서버 / SSE / ffmpeg 인코딩):**
+- 신규 파일: `internal/convert/webp.go`, `internal/convert/webp_test.go`, `internal/handler/convert_webp.go`, `internal/handler/convert_webp_test.go`, `web/convertWebp.js`. (option) `internal/handler/web_clip_to_webp_e2e_test.go`.
+- 수정 파일: `internal/handler/handler.go` (라우트 + `webpLocks sync.Map` 필드), `web/index.html` (모달 + 일괄 버튼 + 버전 bump), `web/style.css` (버튼·모달 스타일), `web/dom.js` (refs), `web/main.js` (wire), `web/browse.js` (카드별 버튼 + 일괄 버튼 노출 분기).
+- 변경 없음: 다른 변환·임포트·트리·드래그선택·라이트박스 모듈, settings 패키지(고정 파라미터라 settings 의존 없음).
+
+### CW0 — SPEC + plan + todo (선행, 이미 일부 완료)
+
+**파일:** `SPEC.md`(완료), `tasks/plan.md`(이 섹션), `tasks/todo.md`(Phase 29 entry)
+
+- SPEC §2.9 신설 + §3 Tech Stack ffmpeg 행 갱신 + §4 Project Structure에 `convert_webp.go` 추가 + §5 API 표 / §5.1 응답 스키마 / §8 Testing Strategy / §9 Boundaries 항목 추가 (이미 머지됨).
+- tasks/plan.md Phase 29 섹션 신규 (이 단계).
+- tasks/todo.md Phase 29 entry 신규 (이 단계).
+
+**완료 기준:** 문서만 변경, `go test ./... && go vet ./...` 회귀 통과.
+
+### CW1 — `internal/convert/webp.go` 인코더 + audio probe 헬퍼
+
+**파일:** `internal/convert/webp.go` (신규), `internal/convert/webp_test.go` (신규)
+
+**변경 포인트:**
+- `internal/convert/` 패키지에 단일 export 두 개 추가:
+  ```go
+  // ProbeStreamInfo runs ffprobe once and returns (durationSec, hasAudio, err).
+  // Used by the handler to gate clip eligibility (duration) and to decide
+  // whether to emit the "audio_dropped" warning. GIF inputs may return
+  // duration=0 from ffprobe — caller treats that as "duration unknown" but
+  // does not fail the eligibility check (GIFs are always clips).
+  func ProbeStreamInfo(srcPath string) (durationSec float64, hasAudio bool, err error)
+
+  // EncodeWebP encodes srcPath as an animated WebP into <dstDir>/<baseName>.webp.
+  // The caller must ensure the final path does not already exist. Encoder args
+  // are fixed: -c:v libwebp_anim -loop 0 -lossless 0 -q:v 80
+  // -compression_level 4 -an (audio is always dropped — caller emits the
+  // audio_dropped warning when applicable). fps and resolution preserve the
+  // input. Temporary file (.webpconvert-*.webp) is always cleaned up on
+  // failure. ffmpeg argv pattern + Callbacks throttling + watchTmp polling
+  // mirror RemuxTSToMP4 1:1.
+  func EncodeWebP(ctx context.Context, srcPath, dstDir, baseName string, cb Callbacks) (*Result, error)
+  ```
+- 내부 흐름 (`EncodeWebP`):
+  1. `exec.LookPath("ffmpeg")` — 실패 시 `ErrFFmpegMissing` (RemuxTSToMP4와 동일 sentinel 재사용).
+  2. `os.Stat(srcPath)` → `cb.OnStart(srcInfo.Size())`.
+  3. `os.CreateTemp(dstDir, ".webpconvert-*.webp")` → 즉시 close (Windows 핸들 lock 회피).
+  4. ffmpeg argv:
+     ```
+     ffmpeg -y -hide_banner -loglevel error
+       -i <srcPath>
+       -c:v libwebp_anim -loop 0 -lossless 0 -q:v 80
+       -compression_level 4
+       -an
+       <tmpPath>
+     ```
+     (RemuxTSToMP4는 `-c:v copy -bsf:a aac_adtstoasc -movflags +faststart` 였다. 본 인코더는 fps·scale 변경 없으므로 `-vf` 없음.)
+  5. `cmd.Stderr = &stderr`, `cmd.Start()` → 별도 goroutine에서 `watchTmp(watchCtx, tmpPath, cb.OnProgress)` 실행 (RemuxTSToMP4의 watchTmp 그대로 재사용 — 패키지 내부 함수라 export 필요 없음).
+  6. `cmd.Wait()` → `cancelWatch()` → `<-watchDone`.
+  7. 에러 분류: ctx.Err()이 먼저면 그대로, 아니면 `&FFmpegExitError{ExitCode, Stderr}`.
+  8. 성공 시 `os.Rename(tmpPath, finalPath)` → `os.Stat` → `*Result{Path, Size}` 반환.
+  9. defer cleanup으로 `renamed == false`이면 `os.Remove(tmpPath)`.
+- 내부 흐름 (`ProbeStreamInfo`):
+  1. `exec.CommandContext(ctx, "ffprobe", "-v", "quiet", "-show_entries", "stream=codec_type:format=duration", "-of", "json", srcPath)` 실행 (5초 타임아웃 — `probeTimeout`을 thumb 패키지에서 import하지 말고 자체 상수로 둠).
+  2. JSON 파싱 — `format.duration` (string → float64 parse) + `streams[].codec_type == "audio"` 존재 여부.
+  3. duration parse 실패는 `0, hasAudio, nil` (호출자가 GIF인지 동영상인지 판단 후 처리).
+  4. ffprobe 자체 실패는 error 반환.
+  - **이유:** 핸들러가 duration 검사와 audio 검출을 별도 호출 2번이 아니라 **한 번**에 끝낼 수 있도록 묶음. `thumb.LookupDuration`/`BackfillDuration`는 sidecar만 다루므로 audio 정보가 없어 본 절에 직접 사용 불가.
+- **상수 추가:**
+  - `webpProbeTimeout = 5 * time.Second` (thumb 패키지 `probeTimeout`과 동일 값이지만 패키지 경계 분리)
+  - 인코딩 파라미터(quality 80 등)는 argv literal로 둠 — 향후 변경 시 한 곳만 보면 되도록 함수 상단 const 블록.
+- **import:** `bytes`, `context`, `encoding/json`, `errors`, `fmt`, `os`, `os/exec`, `path/filepath`, `strconv`, `strings`, `time`. `internal/convert` 패키지의 기존 sentinel(`ErrFFmpegMissing`, `FFmpegExitError`, `Callbacks`, `Result`, `watchTmp`, `progressByteThreshold`, `progressTimeThreshold`)을 그대로 재사용.
+- **이름 충돌:** 기존 `convert.go`의 `tmpPattern = ".convert-*.mp4"`와 `webp.go`의 `tmpPattern = ".webpconvert-*.webp"` 충돌 회피를 위해 후자를 패키지 내부에서 `webpTmpPattern`로 명명.
+
+**Phase 0 검증 (CW1 시작 전 사전 점검):**
+- 컨테이너에서 `docker compose run --rm server ffmpeg -encoders 2>&1 | grep -i webp` — `libwebp` / `libwebp_anim` 둘 다 보이는지 확인. 만약 `libwebp_anim`이 없으면(일부 alpine 빌드는 `libwebp`만 있고 multi-frame은 자동 감지) argv를 `-c:v libwebp -loop 0`으로 변경 — animated 자동 감지 동작은 ffmpeg 6+ 기준 일관. 이 케이스를 SPEC §2.9의 인코더 표기에 한 줄 노트로 추가하거나, 그대로 두고 plan에서만 fallback 명시.
+
+**완료 기준:** `go test ./internal/convert -run "TestEncodeWebP|TestProbeStreamInfo" -v` — 12개 케이스:
+1. **EncodeWebP 정상 mp4**: 5초/24fps/640x360 mp4 → `.webp` 생성, `Result.Size > 0`, `Result.Path` 존재.
+2. **EncodeWebP 정상 GIF**: 작은 GIF → `.webp` 생성. ffprobe로 결과 codec=webp 확인.
+3. **EncodeWebP audio 무시**: audio track 있는 mp4 → 결과 webp는 audio 없음(`ProbeStreamInfo(result)`로 검증, `hasAudio == false`).
+4. **EncodeWebP fps·해상도 보존**: 60fps mp4 입력 → 결과 webp는 frame count > 1 + dimensions 일치.
+5. **EncodeWebP 손상 입력**: truncated mp4 → `*FFmpegExitError`, 임시 파일 미잔존.
+6. **EncodeWebP context cancel**: 인코딩 도중 ctx cancel → ffmpeg kill, 임시 `.webpconvert-*.webp` 미잔존, 반환 err은 `context.Canceled` (ctx.Err() 우선).
+7. **EncodeWebP ffmpeg 미설치**: `PATH=""` 환경 → `ErrFFmpegMissing`. (`t.Setenv("PATH", "")`)
+8. **EncodeWebP 충돌 사전 검사 없음**: 핸들러 책임. `EncodeWebP`는 finalPath 사전 존재해도 ffmpeg가 `-y`로 임시 파일 덮어쓰고, 마지막 `os.Rename`이 OS-dependent하게 덮어쓰거나 실패 — 본 단위 테스트는 호출자 보호로 dest 비어있는 케이스만 검증.
+9. **EncodeWebP atomic cleanup**: `os.Rename` 실패 모킹(rename target을 디렉토리로 만든 뒤 시도) → 임시 파일 정리, 반환 err 비어있지 않음.
+10. **ProbeStreamInfo audio 있음**: audio track mp4 → `hasAudio == true`, `durationSec > 0`.
+11. **ProbeStreamInfo audio 없음**: video-only mp4 / GIF → `hasAudio == false`. GIF는 `durationSec == 0` 또는 양수 둘 다 허용 (ffprobe 빌드에 따라 다름) — 단언은 `>=0`.
+12. **ProbeStreamInfo timeout**: 비정상적으로 큰 입력 + 1ms timeout 컨텍스트 → error 반환.
+
+ffmpeg 필수 케이스는 `exec.LookPath("ffmpeg")` 가드로 미설치 환경에서 `t.Skip` (기존 `convert_test.go` 패턴 그대로).
+
+### CW2 — `POST /api/convert-webp` SSE 핸들러
+
+**파일:** `internal/handler/convert_webp.go` (신규), `internal/handler/convert_webp_test.go` (신규), `internal/handler/handler.go` (라우트 + `webpLocks` 필드)
+
+**변경 포인트:**
+- `Handler` 구조체에 `webpLocks sync.Map` 필드 추가 (TS→MP4의 `convertLocks` 패턴 그대로). `lockWebPKey(key string) func()` 헬퍼 — `convert.go:lockConvertKey` 1:1 미러.
+- `Register`에 라우트 1줄:
+  ```go
+  mux.HandleFunc("/api/convert-webp", requireSameOrigin(h.handleConvertWebP))
+  ```
+- 상수:
+  ```go
+  const (
+      maxConvertWebPPaths      = 500
+      webpConvertFileTimeout   = 5 * time.Minute
+      clipMaxBytes             = 50 * 1024 * 1024 // SPEC §2.5.3 / §2.9
+      clipMaxDurationSec       = 30.0
+  )
+  ```
+  → `web/state.js`의 `CLIP_MAX_BYTES` / `CLIP_MAX_DURATION_SEC`와 **동일 값**. SPEC §2.5.3·§2.9가 단일 출처.
+- 요청/응답 타입은 TS→MP4와 동일 패턴(별 이름 prefix `webp` 또는 reuse 기존 `convStart` 등 inline 정의):
+  ```go
+  type webpConvertRequest struct {
+      Paths          []string `json:"paths"`
+      DeleteOriginal bool     `json:"delete_original"`
+  }
+  type webpStart struct {
+      Phase string `json:"phase"`
+      Index int    `json:"index"`
+      Path  string `json:"path"`
+      Name  string `json:"name"`
+      Total int64  `json:"total,omitempty"`
+      Type  string `json:"type"` // 입력 기준 — "video" 또는 "image"
+  }
+  type webpProgress struct { /* convert.go convProgress와 동일 */ }
+  type webpDone     struct { /* convert.go convDone와 동일, Type="image" 고정 */ }
+  type webpError    struct { /* convert.go convError와 동일 */ }
+  type webpSummary  struct { /* convert.go convSummary와 동일 */ }
+  ```
+  → 기존 `convStart`/`convDone` 등을 그대로 import해 재사용해도 무방하지만, SSE에 노출되는 `name`이 `.mp4` vs `.webp`로 다르고 `done.type`도 `"video"` vs `"image"`로 분기되므로 **별도 타입을 두어 코드 리뷰 시 의미가 명확**하도록 함. (의미 분리 가치 vs 코드 중복 ~30줄 — 분리 선택.)
+- `handleConvertWebP(w, r)` 흐름:
+  - POST 외 → 405 method not allowed.
+  - JSON decode → 실패 400 invalid request.
+  - 길이 0 → 400 no paths, > 500 → 400 too many paths.
+  - SSE 헤더 + 200 + flusher.
+  - `var writeMu sync.Mutex` + `emit(payload any)` 클로저 (TS→MP4와 동일).
+  - 각 path 순차 처리 — `h.convertWebPOneSSE(r.Context(), emit, i, p, body.DeleteOriginal)` → 성공/실패 카운트.
+  - 마지막 `emit(webpSummary{...})`.
+- `convertWebPOneSSE` 흐름:
+  1. `media.SafePath(h.dataDir, relPath)` → 실패 시 `error: "invalid_path"`.
+  2. `os.Stat(abs)` → 미존재 `"not_found"`, 디렉토리 `"not_a_file"`.
+  3. **자격 게이트 (서버 재검증):**
+     - `ext := strings.ToLower(filepath.Ext(fi.Name()))`. 
+     - GIF (`ext == ".gif"`) — 무조건 통과. `inputType := "image"`. duration / audio 검사 면제. **단**, `ProbeStreamInfo(abs)`는 호출하지 않음(비용 절감 + GIF는 audio 없음).
+     - Video (`media.DetectType(fi.Name()) == media.TypeVideo` 또는 동등 헬퍼 — 기존 `media` 패키지 함수 재사용. 없으면 확장자 화이트리스트 `.mp4`/`.mkv`/`.avi`/`.ts`/`.webm`):
+       - `fi.Size() > clipMaxBytes` → `error: "not_clip"`.
+       - duration 확보:
+         - 1차: `thumbDir := filepath.Join(filepath.Dir(abs), ".thumb")`; `thumbPath := filepath.Join(thumbDir, fi.Name() + ".jpg")`; `dur := thumb.LookupDuration(thumbPath)`.
+         - 2차(캐시 미스): `dur = thumb.BackfillDuration(thumbPath, abs)` — ffprobe 1회 + 사이드카 작성. 비용은 단발이고 사용자가 의도한 변환 트리거이므로 폴더 browse의 budget=1 cap을 우회해도 무방.
+         - 둘 다 nil → `error: "duration_unknown"`.
+       - `*dur > clipMaxDurationSec` → `error: "not_clip"`.
+       - `inputType := "video"`. `hasAudio` 확보를 위해 `ProbeStreamInfo(abs)`를 한 번 더 호출 — duration은 사이드카에서 받았으므로 이번엔 audio 정보만 사용. 호출 실패는 `hasAudio = false` 폴백 + 로그만 남김(블로킹 사유 안 됨).
+     - 그 외(이미지인데 GIF 아님 / 음악 / 기타) → `error: "unsupported_input"`.
+  4. 목표 파일 결정: `base := strings.TrimSuffix(fi.Name(), filepath.Ext(fi.Name()))`; `finalName := base + ".webp"`; `finalPath := filepath.Join(filepath.Dir(abs), finalName)`.
+  5. 충돌: `os.Stat(finalPath) == nil` → `error: "already_exists"` (인코딩 시작 전).
+  6. `unlock := h.lockWebPKey(abs); defer unlock()`. lock 후 충돌 재검사 (다른 요청이 그 사이에 만들었을 수 있음).
+  7. SSE `start` emit (`Total = fi.Size()`, `Type = inputType`, `Name = finalName`).
+  8. progress channel (drop-on-full, capacity 16) + writer goroutine (TS→MP4 패턴).
+  9. `fileCtx, cancel := context.WithTimeout(parentCtx, webpConvertFileTimeout); defer cancel()`.
+  10. `convert.EncodeWebP(fileCtx, abs, srcDir, base, cb)` 호출.
+  11. close progress + wait writer.
+  12. 에러 분류 (`classifyConvertError` 재사용 — TS→MP4의 헬퍼는 `convert.ErrFFmpegMissing` / `*convert.FFmpegExitError` / `context.Canceled` / `context.DeadlineExceeded`만 보면 되므로 그대로 재사용 가능. `convert_timeout`은 webp용으로 살짝 변형해도 되지만 기존 코드명이 `convert_timeout`이라 의미 충돌 없음).
+  13. 성공 시:
+      - `warnings := []string{}`.
+      - `hasAudio == true` → `append(warnings, "audio_dropped")`.
+      - `delete_original == true` → 원본 파일 + `.thumb/{name}.jpg` 삭제. 비디오면 `.thumb/{name}.jpg.dur`도. 실패 → `append(warnings, "delete_original_failed")` + slog.Warn.
+      - SSE `done` emit (`Path = finalRel` slash 정규화, `Name = finalName`, `Size = res.Size`, `Type = "image"`, `Warnings = warnings`).
+- 응답 path는 `filepath.ToSlash(filepath.Join(filepath.Dir(relPath), finalName))` + 선두 `/` 보장 (TS→MP4와 동일).
+- 통합 테스트 (`convert_webp_test.go`) — 16개 케이스, ffmpeg 필수 케이스는 `exec.LookPath` 가드로 skip:
+  1. **HappyPath_Video**: 짧은 mp4 1개 변환 → start → progress(≥0) → done → summary, `.webp` 디스크 + 원본 유지.
+  2. **HappyPath_GIF**: 작은 GIF 1개 변환 → done(`type:"image"`, audio_dropped 없음).
+  3. **AudioDropped**: audio 있는 mp4 → `done.warnings: ["audio_dropped"]`.
+  4. **DeleteOriginal_Video**: `delete_original:true` + mp4 → 원본 + `.thumb/{name}.jpg` + `.dur` 삭제.
+  5. **DeleteOriginal_GIF**: GIF + `delete_original:true` → 원본 + `.thumb/{name}.jpg` 삭제 (`.dur` 없음).
+  6. **NotClip_TooBig**: 60 MiB mp4 → `error: "not_clip"`, ffmpeg 호출 안 됨(임시 파일 미생성으로 검증).
+  7. **NotClip_TooLong**: 35초 mp4 → `error: "not_clip"`.
+  8. **DurationUnknown**: ffprobe가 duration 추출 못 하는 mp4(헤더 일부 손상이지만 stat은 성공) → `error: "duration_unknown"`.
+  9. **UnsupportedInput**: PNG → `error: "unsupported_input"`.
+  10. **AlreadyExists**: 목표 `foo.webp` 사전 존재 → `error: "already_exists"` + 임시 파일 미생성.
+  11. **PartialFailure**: `[good.mp4, big.mp4]` → 0번 done, 1번 not_clip, summary `succeeded:1, failed:1`.
+  12. **Cancel**: 변환 중 client disconnect 시뮬(`r.Context()` cancel) → 다음 항목 `error: "canceled"`, 임시 파일 정리.
+  13. **FFmpegMissing**: `t.Setenv("PATH", "")` → `error: "ffmpeg_missing"`.
+  14. **DeleteOriginalFailed_Warning**: 원본을 read-only 디렉토리에 두고 `delete_original:true` → done에 warning 추가, 변환 자체 성공.
+  15. **4xx**: 빈 배열 / 501개 / invalid JSON / GET → 각각 400/400/400/405.
+  16. **CrossOriginRejected**: `Origin: http://evil.example` → 403 cross_origin (다른 변환 엔드포인트와 동일 게이트).
+
+**체크포인트 ②** (CW2 종료, curl 단독 검증):
+1. `curl -N -X POST http://localhost:8080/api/convert-webp -H 'Origin: http://localhost:8080' -H 'Content-Type: application/json' -d '{"paths":["clip.mp4"],"delete_original":false}'` → SSE 이벤트 + 디스크 `clip.webp`.
+2. 35초 mp4로 같은 호출 → `error:"not_clip"`.
+3. PNG로 같은 호출 → `error:"unsupported_input"`.
+4. 같은 호출 반복 → `error:"already_exists"`.
+5. `curl -X GET http://localhost:8080/api/convert-webp` → 405.
+
+**완료 기준:** `go test ./internal/handler -run TestConvertWebP -v` 16 케이스 + 회귀 전부 통과. 위 5단계 curl 모두 기대 동작.
+
+### CW3 — frontend (모듈 + 모달 + 카드 버튼 + 일괄 버튼)
+
+**파일:** `web/convertWebp.js` (신규), `web/index.html`, `web/style.css`, `web/dom.js`, `web/main.js`, `web/browse.js`
+
+**변경 포인트:**
+- `web/convertWebp.js` 신규 모듈 (Phase 23 모듈화 패턴 + Phase 25 `convertImage.js` 패턴):
+  - export `openConvertWebPModal(paths)`, `wireConvertWebP(deps)`.
+  - SSE 클라이언트는 **TS→MP4의 `convert.js` 로직을 그대로 미러** — fetch + ReadableStream + line buffer + JSON parse + handler. **공통화 안 함** (Phase 23 plan note "FM-5: convert.js 자체 consumeSSE 유지" 정책 일관, 향후 별도 phase에서 추출).
+  - 진행 모달 마크업은 `index.html`의 신규 `#convert-webp-modal` (TS 변환 모달과 동일 베이스 클래스 `.modal` 활용 + 자체 ID).
+  - DOM ref 9개 (modal / fileList / deleteOrig checkbox / error p / result section / rows ul / summary span / cancel btn / confirm btn) — `dom.js` `$.convertWebp*` 9개로 추가.
+  - 진행 모달 본문:
+    ```html
+    <div id="convert-webp-modal" class="modal hidden">
+      <div class="modal-content">
+        <h2>움짤을 WebP로 변환</h2>
+        <ul id="convert-webp-file-list" class="convert-file-list"></ul>
+        <label class="settings-label">
+          <input type="checkbox" id="convert-webp-delete-original">
+          변환 후 원본 삭제
+        </label>
+        <p id="convert-webp-error" class="modal-error hidden"></p>
+        <section id="convert-webp-result" class="hidden">
+          <p id="convert-webp-summary" class="url-summary"></p>
+          <ul id="convert-webp-rows" class="url-rows"></ul>
+        </section>
+        <div class="modal-actions">
+          <button id="convert-webp-cancel-btn" type="button" class="btn-subtle">취소</button>
+          <button id="convert-webp-confirm-btn" type="button">시작</button>
+        </div>
+      </div>
+    </div>
+    ```
+  - 한국어 에러 라벨 (`CONVERT_WEBP_ERROR_LABELS`):
+    ```
+    invalid_path:        '경로 오류'
+    not_found:           '파일 없음'
+    not_a_file:          '폴더는 변환 불가'
+    unsupported_input:   '지원하지 않는 입력 (이미지/오디오/기타)'
+    not_clip:            '움짤 조건 미충족 (50 MiB 또는 30s 초과)'
+    duration_unknown:    '동영상 길이 확인 실패'
+    already_exists:      '대상 WebP 이미 존재'
+    ffmpeg_missing:      'ffmpeg 미설치'
+    ffmpeg_error:        '인코딩 실패'
+    convert_timeout:     '변환 시간 초과 (5분)'
+    write_error:         '저장 실패'
+    canceled:            '취소됨'
+    ```
+  - warning 라벨: `audio_dropped: '오디오 제거됨'`, `delete_original_failed: '원본 삭제 실패'`.
+  - 동작 흐름은 `convert.js`와 같은 SSE 패턴: open 시 paths 표시 → 시작 → start/progress/done/error 단위 row 갱신 → summary로 결과 요약 + close 버튼 라벨 전환 → close 시 (succeeded > 0)면 `_browse(currentPath, false)` 트리거 + AbortController abort.
+- `web/browse.js`:
+  - 카드별 "WebP로 변환" 버튼:
+    - `buildImageGrid` 에서 GIF 카드 (`entry.mime === 'image/gif'`)에 `.webp-convert-btn`("WebP로 변환") 추가 — rename/delete와 동일 layout. 클릭 → `openConvertWebPModal([entry.path])`.
+    - `buildVideoGrid` 에서 동영상 카드 중 `isClip(entry)` 통과 항목에 동일 버튼 추가. 게이트 미충족 동영상은 버튼 미노출.
+  - 일괄 버튼 (`#convert-webp-all-btn`):
+    - `updateConvertWebPAllBtn(visible)` 신규 함수 — TS→MP4의 `updateConvertAllBtn`, PNG→JPG의 `updateConvertPNGAllBtn` 패턴 미러.
+    - **활성 조건: `view.type === 'clip'` AND visible 중 움짤 ≥ 1.** 다른 탭에서는 항상 hidden.
+    - 라벨 두 종류:
+      - selection 0 + visible 움짤 ≥ 1 → `"모든 움짤 WebP로 변환 (M개)"`
+      - selection ≥ 1 + selection ∩ visible 움짤 ≥ 1 → `"선택 움짤 WebP로 변환 (N개)"`
+    - 그 외 케이스는 hidden.
+    - `dataset.paths`에 JSON 직렬화한 paths 저장. 클릭 → 파싱 → `openConvertWebPModal(paths)`.
+  - `renderView` (또는 visible 갱신 함수)에서 매 렌더마다 `updateConvertWebPAllBtn(visible)` 호출 — `updateConvertPNGAllBtn` 옆에 한 줄 추가.
+  - **헬퍼 신규 (browse.js 또는 util.js):**
+    ```js
+    function visibleClipPaths(visible) {
+      return visible.filter(e => !e.is_dir && isClip(e)).map(e => e.path);
+    }
+    function selectedVisibleClipPaths(visible) {
+      return visible
+        .filter(e => !e.is_dir && isClip(e) && selectedPaths.has(e.path))
+        .map(e => e.path);
+    }
+    ```
+    `isClip`은 이미 browse.js 내부에 존재(line 116) — 재export 또는 같은 파일 내 직접 사용. (selectedPaths는 Phase 22에서 도입.)
+- `web/index.html`:
+  - 툴바에 `<button id="convert-webp-all-btn" class="convert-all-btn convert-webp-all-btn" type="button" hidden></button>` 추가 — `#convert-png-all-btn` 옆.
+  - `#convert-webp-modal` 마크업 (위 본문).
+  - `<script type="module" src="/main.js?v=39">` 버전 bump (현재 v=38).
+- `web/style.css`:
+  - `.webp-convert-btn` (entry-button 패턴 — rename/delete와 동일 hover/focus, 색상은 `.png-convert-btn`과 시각 구분 — emerald/teal 계열).
+  - `#convert-webp-modal` (베이스 `.modal` 활용 + 필요한 미세 조정만).
+  - `.convert-webp-all-btn { background: #14b8a6; }` `:hover { background: #0d9488; }` (PNG는 보라, TS는 파랑, WebP는 민트 — 시각 구분).
+- `web/dom.js`:
+  - 신규 9개 ref (`convertWebpModal`, `convertWebpFileList`, `convertWebpDeleteOrig`, `convertWebpError`, `convertWebpResult`, `convertWebpRows`, `convertWebpSummary`, `convertWebpCancelBtn`, `convertWebpConfirmBtn`) + `convertWebpAllBtn`.
+- `web/main.js`:
+  - `import { wireConvertWebP } from './convertWebp.js';` 추가.
+  - `wireConvertWebP({ browse: loadBrowse })` 콜백 주입 (Phase 23 패턴 — 모듈 간 import는 main에서 끊는다).
+  - `wireBrowse(...)` deps에 `openConvertWebPModal` 노출 가능성 — 카드별 버튼 클릭 핸들러에서 사용. 또는 browse.js가 자체적으로 `convertWebp.js`를 import해도 무방 (main에서 deps 주입이 일관).
+
+**완료 기준:** `go test ./... && go vet ./...` 회귀. 브라우저에서:
+- 움짤 탭 → "모든 움짤 WebP로 변환 (M개)" 노출 + 클릭 → 모달 → 진행 → 결과 → 닫기 → 폴더 새로고침으로 `.webp` 카드 확인.
+- 다른 탭(전체/이미지/동영상)에서는 일괄 버튼 미노출.
+- GIF 카드 / 짧은 mp4 카드의 개별 "WebP로 변환" 버튼 동작.
+- 긴 mp4 / 큰 mp4 카드는 버튼 미노출.
+- 콘솔 에러 0.
+
+### CW4 — chromedp e2e + Docker 수동 검증
+
+**파일:** `internal/handler/web_clip_to_webp_e2e_test.go` (신규, 옵션), Docker 검증
+
+**chromedp 시나리오 (Phase 25/26 패턴 미러, 6개):**
+1. **clip_tab_shows_batch_button**: 짧은 mp4 1 + GIF 1 + 긴 mp4 1 픽스처 → 움짤 탭 진입 → `#convert-webp-all-btn` 가시 + 텍스트 `"모든 움짤 WebP로 변환 (2개)"`.
+2. **other_tab_hides_batch_button**: 같은 픽스처 + 동영상 탭 진입 → `#convert-webp-all-btn` 숨김.
+3. **selection_changes_label**: 움짤 탭 + GIF 1개 체크 → 라벨 `"선택 움짤 WebP로 변환 (1개)"`.
+4. **selection_excludes_non_clip**: 움짤 탭 + 긴 mp4(visible 안 함이지만 가정), GIF 체크 → label N == GIF 카운트만 반영.
+5. **card_button_present_for_clip**: 짧은 mp4 카드에 `.webp-convert-btn` 노출.
+6. **card_button_absent_for_long_video**: 35초 mp4 카드에 버튼 미노출.
+
+(인코딩 자체 검증은 핸들러 통합 테스트가 책임. e2e는 UI 게이트만 본다.)
+
+**Docker 수동 검증 시나리오 (10개):**
+1. `docker compose up -d --build` → 브라우저에서 GIF 1개 + 짧은 mp4 1개 + 긴 mp4 1개 + 큰 mp4 1개 + PNG 1개를 `/data/clips/` 에 둔다.
+2. 움짤 탭 진입 → "모든 움짤 WebP로 변환 (2개)" 클릭 → 모달 → 시작 → 진행 → done 2개 → 닫기 → 폴더 reload → `.webp` 2개 + 원본 유지.
+3. 결과 행 중 audio 있는 mp4의 결과 row에 "오디오 제거됨" 라벨 표시.
+4. GIF 카드 "WebP로 변환" 버튼 → 단건 변환 → 결과 자동재생 확인 (브라우저는 animated webp를 그대로 재생).
+5. 짧은 mp4 카드 "WebP로 변환" + "변환 후 원본 삭제" 체크 → 변환 → 원본 카드 사라짐 + 새 `.webp` 카드 등장.
+6. 긴 mp4(35초) 카드 → 버튼 미노출 확인. 직접 콘솔에서 `fetch('/api/convert-webp', ...)` → `not_clip` 응답.
+7. 큰 mp4(60 MiB) 카드 → 버튼 미노출. 직접 호출 → `not_clip`.
+8. PNG 카드 → 버튼 미노출. 직접 호출 → `unsupported_input`.
+9. 충돌: `foo.gif` + `foo.webp` 동시 존재 → GIF 변환 시도 → 결과 row "대상 WebP 이미 존재".
+10. 모바일 브라우저(<600px) — 카드 버튼·툴바 버튼·모달 정상 표시 (다른 변환 모달과 동일 레이아웃).
+11. 회귀 스모크: 기존 업로드/rename/delete/TS 변환/PNG 변환 각 1회 동작 확인. 콘솔 에러 0.
+
+**완료 기준:** chromedp 6 시나리오 통과 (`go test ./internal/handler -run TestClipToWebP_E2E -v`). Docker 10 시나리오 모두 기대 동작.
+
+### Out of scope (Phase 29)
+
+- WebP 외 다른 애니메이션 출력 포맷 (AVIF, HEIF, 역방향 GIF) — 범위 외.
+- 인코딩 파라미터 사용자 조절 (quality / fps / scale / loop / lossless) — 모두 고정값.
+- 무손실 webp 모드.
+- 자동 업로드 변환 — 다운로드/업로드 의도와 변환 의도 분리.
+- 음성 보존 — WebP 무음 포맷.
+- 움짤 게이트 미충족 동영상의 강제 변환.
+- 변환 큐 / 잡 레지스트리 영속화 (서버 재시작 시 진행 중 변환 폐기 — TS→MP4 정책 일관).
+- 동시 ffmpeg 프로세스 (배열 순차 처리).
+- WebP를 다시 mp4로 역변환.
+- 정적 PNG / JPG → 정적 WebP 변환 (Phase 25는 PNG→JPG로 범위 한정, 본 phase는 움짤 한정).
+- 결과 WebP의 별도 썸네일 사전 생성 (lazy 메커니즘이 다음 browse에서 자동 생성 — TS→MP4와 동일 단순화).
+
+### 위험 / 롤백
+
+- **위험: ffmpeg 빌드의 `libwebp_anim` 인코더 누락 가능성** — alpine apk `ffmpeg` 빌드는 일반적으로 `libwebp_anim`을 포함하지만 일부 minimal 빌드는 `libwebp`만 있을 수 있다. 영향: CW1의 인코딩 테스트가 모두 실패. 대응: Phase 0 검증으로 사전 확인 → 미포함 시 argv를 `-c:v libwebp -loop 0`으로 변경 (multi-frame 입력을 ffmpeg가 자동으로 animated로 인코드). SPEC §2.9 인코더 표기는 부정확하지만 본질 동작 동일 — 한 줄 노트로 보강.
+- **위험: GIF의 ffprobe duration이 0 또는 매우 큼** — GIF는 컨테이너 메타에 duration이 안 적혀 있는 경우가 많아 ffprobe가 0을 반환할 수 있다. 본 plan은 GIF에 대해 duration 검사를 면제하므로 직접 영향 없음. 단, 사용자가 30분짜리 GIF를 변환 시도하면 timeout(5분) 도달 후 `convert_timeout`. 의도된 동작.
+- **위험: `BackfillDuration` 부작용** — 본 핸들러가 `.thumb/{name}.jpg.dur` 사이드카를 새로 만들 수 있다 (해당 동영상이 그 폴더에 처음 browse되기 전에 변환을 트리거한 경우). browse 시점에 이미 만들어졌을 사이드카를 한 번 더 쓰는 것뿐이라 무해 — 그러나 동시 browse 요청과의 race는 thumb 패키지 자체 atomic write로 보호된다.
+- **위험: 큰 결과물 (mp4보다 큰 webp)** — animated webp는 mp4보다 3~5배 클 수 있다. 사용자가 디스크 절감을 기대했다면 의도 상이. SPEC §2.9의 목적이 "자동재생/미리보기 친화"임을 사용자에게 명시 (`done` 응답은 `size` 필드를 그대로 노출하므로 UI에서 변환 후 크기를 보여주면 self-evident).
+- **위험: per-path lock 누수** — `webpLocks sync.Map`은 unlock 후에도 entry를 유지(TS→MP4와 동일 정책 — 디스크의 unique source path 수만큼 bounded). 영향 없음.
+- **위험: 인코딩 시간이 5분을 초과하는 입력** — 30s/50MiB 게이트가 있으니 정상 사례에서 도달 불가능. CPU 1코어 alpine 컨테이너에서 1080p/24fps animated webp는 ~30s 이내. timeout은 안전망.
+- **위험: audio 검출 실패로 warning 누락** — `ProbeStreamInfo`가 일부 포맷(.ts 등)에서 audio stream 인식 실패 가능. 영향: 결과 webp는 어쨌든 `-an`으로 무음이지만 `audio_dropped` warning이 누락되어 사용자가 "왜 음성이 없지?" 의아할 수 있음. 발생 빈도 낮음 + 결과 동작은 일관(항상 무음)이라 추가 mitigation 안 함.
+- **롤백:** Phase 29 머지 단위로 revert → Phase 28 상태 복귀. 디스크에 남은 `.webp` 파일은 일반 이미지로 인식되어 그대로 표시됨 (변환 인프라 제거 후에도 데이터 손실 없음). per-path lock map은 핸들러 재등록과 함께 사라짐. SPEC.md §2.9 / §3 / §4 / §5 / §8 / §9 변경분도 함께 revert. settings 변경 없음 — 마이그레이션 없음.
+
+## Phase 30 — 움짤 카드 자동재생 부담 완화 (`feature/clip-hover-playback`) — spec [`SPEC.md §2.5.6`](../SPEC.md)
+
+GIF/WebP 카드의 동시 자동재생으로 인한 저사양 PC 부담 완화. **클라이언트만 변경** — 기존 `thumb.Generate` 가 GIF/WebP 첫 프레임을 jpg 사이드카로 추출하고 `serveImageThumb` lazy 생성이 backstop 이라 서버 무변경. 평시 카드는 정적 첫 프레임(`/api/thumb`), hover (데스크톱) 또는 viewport 진입 (모바일) 시에만 src 를 `/api/stream` 으로 토글해 재생.
+
+**의존성:**
+```
+HP0 (SPEC §2.5.6 + plan/todo + 브랜치, 선행 커밋)
+  └─► HP1 (web/browse.js + style.css + main.js v=40→v=41)
+        └─► HP2 (chromedp e2e — hover/IO/grid 폭 검증)
+              └─► HP3 (docker 수동 검증)
+```
+
+선형. 모든 변경은 `web/` 만 — Go 코드/테스트 회귀 영향 없음.
+
+**범위:**
+- 변경 파일: `web/browse.js`(buildImageGrid, attachClipHoverPlayback 신설, renderFileList 의 grid 클래스), `web/style.css`(.image-grid-clip 한 줄), `web/index.html`(main.js v 증가).
+- 변경 없음: 서버 전부, 다른 web 모듈(convertWebp/dragSelect/lightbox/tree/settings 등).
+
+### HP0 — SPEC + plan + todo + branch (선행 커밋)
+
+**파일:** `SPEC.md` (이미 working tree 에 §2.5.6 작성), `tasks/plan.md` (이 섹션), `tasks/todo.md` (Phase 30 entry).
+
+- SPEC §2.5 글머리에 §2.5.6 한 줄 + §2.5.6 본문 신설 (이미 반영, commit 만 남음).
+- plan.md / todo.md Phase 30 entry.
+
+**완료 기준:** `go test ./... && go vet ./...` 회귀 통과 (서버 무변경이라 자동 pass).
+
+### HP1 — `web/browse.js` + `web/style.css` 변경
+
+**파일:** `web/browse.js`, `web/style.css`, `web/index.html`
+
+**변경 포인트:**
+- `web/browse.js` `buildImageGrid` GIF/WebP 카드 마크업:
+  - `entry.mime === 'image/gif' || entry.mime === 'image/webp'` 분기.
+  - `<img src="${thumbURL}" data-thumb-src="${thumbURL}" data-stream-src="${streamURL}" ...>` — 평시 정적 jpg.
+  - `attachClipHoverPlayback(card)` 호출 (카드 element 에 hover/IO 정책 부착).
+  - 비-움짤 이미지(JPG/PNG)는 기존 `entry.thumb_available ? thumbURL : streamURL` 폴백 그대로.
+- `web/browse.js` 신규 헬퍼 `attachClipHoverPlayback(card)`:
+  - `card.querySelector('img')` 로 img 획득. dataset 에서 thumb/stream URL 읽음.
+  - `matchMedia('(hover: hover)').matches` 분기:
+    - `true`: `mouseenter` → `img.src = img.dataset.streamSrc`. `mouseleave` → `img.src = img.dataset.thumbSrc`.
+    - `false`: `IntersectionObserver` (모듈 레벨 single instance, threshold 0.1):
+      - `entry.isIntersecting` → `img.src = img.dataset.streamSrc`.
+      - 아니면 → `img.src = img.dataset.thumbSrc`.
+      - `observer.observe(card)` 호출. 카드 DOM 제거 시 자동 cleanup (browser GC 처리 — 명시적 unobserve 는 renderFileList 가 grid 를 통째로 교체해 GC 가 잡음).
+  - 두 분기 모두 `data-clip-card="true"` 마커를 카드에 부착해 e2e 가 셀렉트 가능.
+- `web/browse.js` `renderFileList` (또는 image grid 생성 직후):
+  - `view.type === 'clip'` 일 때 `image-grid` 에 `image-grid-clip` 클래스 추가. 다른 탭은 미부착.
+- `web/style.css`:
+  - `.image-grid.image-grid-clip { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }` 한 줄. 모바일 미디어 쿼리는 기존 `image-grid` 규칙이 처리.
+- `web/index.html`: `main.js?v=40` → `v=41`.
+
+**완료 기준:**
+- `node --check web/browse.js web/style.css 2>&1` 신택스 OK (CSS 는 별도 — JS 만 check).
+- `docker compose up -d --build` 후 GET /main.js?v=41 → 200, GET /browse.js → 200.
+- 콘솔 에러 없음 (수동 확인은 HP3).
+
+### HP2 — chromedp e2e
+
+**파일:** `internal/handler/web_clip_hover_playback_e2e_test.go` (신규)
+
+**픽스처 (/clips):** Phase 29 e2e 와 유사하지만 GIF/WebP 카드 위주.
+- `clip.gif`, `clip.webp` (둘 다 평시 thumb URL 표시되어야 함).
+- `photo.jpg` (비-움짤 이미지, 정책 영향 없음).
+
+**시나리오 (4):**
+1. `desktop_hover_toggles_src`: viewport 에서 카드 hover → img.src 가 `/api/stream`. mouseleave → img.src 가 `/api/thumb`.
+2. `mobile_intersection_toggles_src`: chromedp 의 emulation 으로 hover 비활성. 카드가 viewport 안에 있으면 img.src = stream. 스크롤로 viewport 밖이면 src = thumb.
+3. `clip_tab_grid_uses_240px`: 움짤 탭에서 `.image-grid` 에 `image-grid-clip` 클래스 존재 확인 + computed style 의 grid-template-columns 가 240px minmax 포함.
+4. `non_clip_tab_keeps_default_grid`: 전체/이미지 탭에서 `image-grid-clip` 클래스 미부착.
+
+mobile emulation: chromedp 는 `chromedp.EmulateViewport` 외에도 user agent 변경으로 `(hover: none)` 시뮬 가능. 가장 간단한 방법: `Emulation.setEmitTouchEventsForMouse` + `Emulation.setUserAgentOverride` mobile UA. 또는 JS 에서 `window.matchMedia` 를 stub. 후자가 가장 안정.
+
+JS 스텁: 페이지 로드 후 `window.matchMedia = (q) => ({matches: q.includes('hover: none'), addEventListener: ()=>{}, removeEventListener: ()=>{}})`. 단 페이지 로드 전에 stub 해야 attachClipHoverPlayback 가 올바른 분기 선택. chromedp 의 `chromedp.Evaluate(stubScript, nil)` 를 page 로드 전에 실행 — `Page.addScriptToEvaluateOnNewDocument` 패턴.
+
+**완료 기준:** 4 시나리오 통과 (`go test ./internal/handler -run TestClipHoverPlayback_E2E -v`). 기존 회귀 e2e 영향 없음.
+
+### HP3 — Docker 수동 검증
+
+`docker compose up -d --build` 후:
+1. /clips 폴더에 GIF + WebP + 짧은 mp4 들 → 움짤 탭.
+2. 카드 한 행 6개 정도 (240px), 모두 정적 첫 프레임 표시.
+3. 카드 한 개에 마우스 hover → 그 카드만 재생, 나머지는 정적.
+4. 마우스 떼면 정지.
+5. 다른 탭(전체/이미지/동영상) → 카드 폭 160px 기존대로.
+6. DevTools 의 mobile emulation (hover 없는 viewport) → 페이지 로드 → viewport 안 카드 자동 재생, 스크롤하면 밖 카드 정지.
+7. 회귀: 기존 라이트박스/카드 클릭/upload/rename/delete 정상.
+
+**완료 기준:** 7 시나리오 모두 기대 동작.
+
+### Out of scope (Phase 30)
+
+- 서버측 사이드카 사전 일괄 워밍 — 첫 카드 진입 시 lazy 비용은 작아서 후속 phase 보류.
+- viewport 안 카드 수 cap (예: 최대 N개만 재생) — IntersectionObserver 정책으로는 보이는 모든 카드 활성. 더 엄격한 cap 필요 시 후속.
+- prefers-reduced-motion 토글, settings 노출.
+- 라이트박스/오디오 플레이어.
+- 분류 정책 (§2.5.3, §2.9) 변경.
+
+### 위험 / 롤백
+
+- **위험: thumb URL 의 첫 호출 latency** — GIF/WebP 의 사이드카가 디스크에 없을 때 첫 `/api/thumb` 호출이 imaging.Open 디코드를 트리거. 폴더 첫 진입 시 visible 카드 N 개가 동시에 lazy 생성을 요청 — 기존 thumb.Pool 이 worker pool 로 직렬화. 사용자 체감은 첫 진입 시 잠깐 비어 있는 카드 → 점차 채움. 이미 `serveImageThumb` 패턴이 동일하게 동작하므로 신규 위험은 아님.
+- **위험: hover 빠르게 토글 시 디코더 thrashing** — 마우스가 카드들을 빠르게 지나갈 때 src 가 매번 바뀐다. img 디코더는 cheap (jpg/webp/gif 모두 캐시됨). 측정해보고 부담되면 short debounce 도입.
+- **위험: 모바일 IntersectionObserver 의 카드 진입/이탈이 빠른 스크롤 시 깜빡임** — threshold 0.1 로 낮은 진입 기준. 완전 viewport 진입 (1.0) 으로 올리면 깜빡임 줄지만 활성화 지연 커짐. 0.1 이 단순한 출발점.
+- **위험: hover 판정 (`(hover: hover)`)이 hybrid 디바이스(마우스+터치 가능) 에서 어느 쪽?** — `hover: hover` 가 true 이면 hover 정책. 터치 이벤트는 그대로 라이트박스 진입 — IO 와 별도. hybrid 동작은 hover 정책으로 충분.
+- **롤백:** Phase 30 머지 단위로 revert → Phase 29 상태 복귀. SPEC §2.5.6 / §2.5 글머리도 함께 revert. 데이터 영향 없음 (디스크 사이드카는 그대로 유효 — Phase 29 도 thumb 사이드카 가능). 사용자가 phase 도입 전에 익숙해진 자동재생 동작이 사라지므로 일관성 위해 phase 단위 롤백.
+

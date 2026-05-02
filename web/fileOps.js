@@ -33,6 +33,28 @@ function uploadFiles(files) {
   Array.from(files).forEach(file => uploadOne(file));
 }
 
+// annotateUploadResult inspects the upload response and appends an inline
+// note for PNG → JPG auto-conversion outcomes (SPEC §2.8.1). Returns the
+// linger time before the progress row should be removed — longer when there
+// is something for the user to read.
+function annotateUploadResult(container, responseText) {
+  let resp;
+  try { resp = JSON.parse(responseText); } catch { return 1500; }
+  const warnings = Array.isArray(resp.warnings) ? resp.warnings : [];
+  const notes = [];
+  if (resp.converted) notes.push({ text: `PNG → JPG로 변환됨 (${resp.name})`, kind: 'ok' });
+  if (warnings.includes('convert_failed')) notes.push({ text: 'PNG 변환 실패, 원본으로 저장됨', kind: 'warn' });
+  if (warnings.includes('renamed')) notes.push({ text: `파일명 자동 변경: ${resp.name}`, kind: 'warn' });
+  if (notes.length === 0) return 1500;
+  for (const n of notes) {
+    const note = document.createElement('div');
+    note.className = 'progress-note progress-note-' + n.kind;
+    note.textContent = n.text;
+    container.appendChild(note);
+  }
+  return 4000;
+}
+
 function uploadOne(file) {
   const container = document.createElement('div');
   container.className = 'progress-item';
@@ -52,7 +74,8 @@ function uploadOne(file) {
   xhr.addEventListener('load', () => {
     if (xhr.status === 201) {
       fill.style.width = '100%';
-      setTimeout(() => container.remove(), 1500);
+      const linger = annotateUploadResult(container, xhr.responseText);
+      setTimeout(() => container.remove(), linger);
       _browse(currentPath, false);
     } else {
       container.style.color = 'var(--danger)';
@@ -119,14 +142,17 @@ function showFolderError(msg) {
 }
 
 // ── Delete ────────────────────────────────────────────────────────────────────
-export async function deleteFile(path) {
-  if (!confirm(`삭제하시겠습니까?\n${path}`)) return;
+// opts.skipBrowse=true면 호출자(라이트박스)가 자체 mutation 후 _browse를
+// 직접 호출하므로 중복 fetch를 피한다. return: 성공 true / 취소·실패 false.
+export async function deleteFile(path, opts = {}) {
+  if (!confirm(`삭제하시겠습니까?\n${path}`)) return false;
   const res = await fetch('/api/file?path=' + encodeURIComponent(path), { method: 'DELETE' });
   if (res.ok) {
-    _browse(currentPath, false);
-  } else {
-    alert('삭제 실패');
+    if (!opts.skipBrowse) _browse(currentPath, false);
+    return true;
   }
+  alert('삭제 실패');
+  return false;
 }
 
 export async function deleteFolder(path) {
