@@ -13,6 +13,7 @@ import {
 import { wireSettings } from './settings.js';
 import { wireConvert } from './convert.js';
 import { wireConvertImage } from './convertImage.js';
+import { wireConvertWebP } from './convertWebp.js';
 import { wireDragSelect } from './dragSelect.js';
 import { setURLImportDeps, wireURLImport } from './urlImport.js';
 import {
@@ -35,6 +36,7 @@ wireTree({ browse, attachDropHandlers, attachDragHandlers, openRenameModal, dele
 wireSettings();
 wireConvert({ browse });
 wireConvertImage({ browse });
+wireConvertWebP({ browse });
 wireURLImport();
 wireBrowse();
 wireDragSelect();

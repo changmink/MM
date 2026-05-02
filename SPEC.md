@@ -259,8 +259,9 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
 
 **움짤 정의 (필터 통과 조건):**
 - **GIF (`mime === 'image/gif'`)**: **무조건 움짤.** GIF는 서버가 duration을 제공하지 않고, 실무에서 대부분 짧고 가볍다는 사용자 판단에 따라 크기·길이 체크를 생략한다.
+- **WebP (`mime === 'image/webp'`)**: **무조건 움짤.** §2.9의 변환 결과물이 모두 animated WebP이고 단일 사용자 운용에서 정적 WebP는 사실상 등장하지 않는다는 가정. 정적/애니메이션을 헤더(VP8X + Animation flag)로 분기하는 정확한 detection은 over-engineering이라 도입하지 않음 — 정적 webp가 등장해 분류가 어색해지면 후속 phase에서 보강.
 - **동영상 (`type === 'video'`)**: `size ≤ 50 MiB` (50 × 1024² = 52,428,800 B) **AND** `duration_sec != null && duration_sec <= 30` 둘 다 만족해야 한다. `duration_sec`이 `null`(썸네일 placeholder / ffprobe 실패 등)이면 움짤로 간주하지 **않음** — 길이를 모르므로 보수적으로 제외.
-- **그 외** (정적 이미지 — JPG/PNG/WEBP 등, 음악, 기타): 움짤 아님.
+- **그 외** (정적 이미지 — JPG/PNG, 음악, 기타): 움짤 아님.
 
 **UI:**
 - [ ] 툴바 타입 세그먼트 맨 끝에 6번째 버튼 `움짤` (`data-type="clip"`). 기존 순서 유지: `전체 / 이미지 / 동영상 / 음악 / 기타 / 움짤`.
@@ -269,7 +270,7 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
 **배타적 분류 (3-way):** `이미지 / 동영상 / 움짤`은 서로 **배타적**으로 분류된다. 움짤 조건에 해당하는 파일은 `이미지`나 `동영상` 탭에 **나타나지 않는다**:
 - `이미지` 탭: 정적 이미지만 (GIF 제외)
 - `동영상` 탭: 움짤 아닌 동영상만 (길거나 큰 동영상 / duration 미상 동영상)
-- `움짤` 탭: GIF + 움짤 동영상
+- `움짤` 탭: GIF + WebP + 움짤 동영상
 - `전체` 탭은 이 배타 규칙을 적용하지 않음 — 모든 파일을 자연 타입 섹션에 표시 (움짤도 이미지/동영상 섹션에 포함).
 - `음악 / 기타` 탭은 움짤 조건과 무관 (은 해당 타입 내 움짤이 존재할 수 없음).
 
@@ -281,7 +282,7 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
 - [ ] 움짤 판별은 헬퍼로 분리:
   ```js
   function isClip(e) {
-    if (e.mime === 'image/gif') return true;
+    if (e.mime === 'image/gif' || e.mime === 'image/webp') return true;
     if (e.type === 'video') {
       return e.size <= 50 * 1024 * 1024
         && e.duration_sec != null
@@ -303,7 +304,7 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
 - §2.5.1·§2.5.2와 동일. 움짤 모드에서도 합계는 보이는 파일 기준, lightbox는 visible 이미지만 순환.
 
 **Non-goals:**
-- APNG / animated WEBP 감지 — 확장자만으로 판별 불가, ffprobe 호출이 필요해 범위 외.
+- APNG / 정적 WebP 정확 분기 감지 — RIFF VP8X chunk + Animation flag 검사가 필요. 단일 사용자 운용에서 정적 WebP가 등장할 가능성이 낮아 단순화 (모든 webp를 움짤로 분류). 필요해지면 후속 phase에서 보강.
 - GIF duration 서버 측 추출 — 본 기능은 서버 무변경 원칙. 필요해지면 별도 Phase.
 - 움짤 전용 뷰(섹션 병합, 자동재생 미리보기 등).
 - 움짤 조건 커스터마이징 (50MB / 30s 상수, 사용자 설정 없음).
@@ -592,6 +593,55 @@ PNG 파일을 JPEG로 영구 변환한다. 두 진입점:
 - 동시 변환 (배열은 항상 순차 처리) — 단일 사용자 가정.
 - URL import(§2.6) 결과의 자동 변환 — 다운로드와 변환 의도를 분리. 다운로드 받은 PNG는 수동 변환으로만 처리.
 
+### 2.9 움짤 → animated WebP 변환
+
+움짤(§2.5.3)로 분류되는 항목을 animated WebP로 영구 변환한다. 자동 재생·미리보기 친화적인 단일 가벼운 포맷으로 정리하는 것이 목적. **수동 변환만 제공** — PNG→JPG와 달리 ffmpeg 인코딩 비용이 무시 못 할 수준이라 다운로드/업로드 의도와 변환 의도를 분리한다.
+
+**입력 자격 (서버가 게이트 재검증):**
+- **GIF (`mime === 'image/gif'`)**: 무조건 자격 있음. 크기·길이 검증 면제 — §2.5.3 움짤 정의와 일관.
+- **동영상 (`type === 'video'`)**: §2.5.3과 동일 게이트 — `size ≤ 50 MiB` (`CLIP_MAX_BYTES`) **AND** `duration_sec ≤ 30s` (`CLIP_MAX_DURATION_SEC`). duration은 `thumb.LookupDuration` 캐시 우선 → 없으면 `thumb.BackfillDuration`(ffprobe 1회)으로 확보. duration을 끝내 알 수 없으면 `duration_unknown`로 거부 (보수적).
+- **그 외 (WebP 포함)**: `unsupported_input`로 거부. WebP는 §2.5.3에서 움짤로 분류되지만 변환 결과물 자체이므로 입력 자격은 없다 — 클라이언트의 일괄 paths 추출에서 webp를 제외하고(`isClipConvertable`), 직접 API 호출은 서버가 `unsupported_input`로 차단한다. PNG/JPG 정적 이미지·오디오·기타도 동일 코드.
+
+**구현 공통 규약:**
+- **인코더:** ffmpeg `libwebp` (multi-frame 입력을 자동으로 animated webp로 promote, ffmpeg 6+). 등록된 `libwebp_anim` 별칭은 alpine apk ffmpeg 6.1 빌드에서 single-frame 출력만 만드는 회귀가 있어 사용하지 않는다 — `libwebp` + multi-frame 입력 경로가 결과 webp의 RIFF 컨테이너에 VP8X chunk + animation flag를 정상 기록한다. Dockerfile 영향 없음 — 기본 alpine apk `ffmpeg` 패키지에 포함.
+- **인코딩 파라미터 (고정값, 사용자 설정 없음):**
+  - `-c:v libwebp` / `-loop 0` (무한 반복) / `-lossless 0` / `-q:v 80` (화질 우선) / `-compression_level 4`
+  - **fps·해상도 원본 유지** — 자연스러움 우선. 입력이 극단 해상도여도 별도 다운스케일 안 함 (50 MiB 게이트가 이미 상한).
+  - **음성 제거**: `-an`. 입력에 audio stream이 있었다면 결과 `warnings`에 `"audio_dropped"` 추가. audio 존재 여부는 ffprobe 1회 호출로 검출(duration 조회와 동일 호출에서 stream 정보 함께 추출 — GIF는 audio 검사 생략).
+- **출력 파일명:** `<basename>.webp` — 확장자만 교체, base name 유지. 대소문자 정규화: 출력은 항상 소문자 `.webp`. `foo.MP4` / `foo.gif` / `foo.GIF` 모두 → `foo.webp`.
+- **충돌 처리:** 목표 `<basename>.webp`가 같은 디렉토리에 사전 존재하면 **`already_exists`로 거부** — 자동 suffix 없음 (rename·TS→MP4·PNG→JPG 수동 변환과 일관).
+- **원자성:** `os.CreateTemp(dstDir, ".webpconvert-*.webp")` → ffmpeg 출력 → atomic `os.Rename`. 실패 시 임시 파일 cleanup. (TS→MP4 패턴과 동일.)
+- **per-path 직렬화:** `Handler.webpLocks sync.Map`로 같은 소스에 대한 동시 변환을 직렬화 — TS→MP4의 `convertLocks` 패턴 그대로.
+- **타임아웃:** 파일당 5분 (`webpConvertFileTimeout`). 30초 입력 + 화질 우선이라도 충분히 안전한 상한.
+- **요청 응답 형태:** `POST /api/convert-webp`, **SSE 진행 스트림** — PNG→JPG의 동기 응답이 아니다. ffmpeg 인코딩이 1초 내외로 끝나지 않으므로 progress UX 가치가 충분. 이벤트 스키마는 TS→MP4(`/api/convert`)와 동일 (`start`/`progress`/`done`/`error`/`summary`). 자세한 스키마는 §5.1.
+- **`delete_original`:** 기본 `false`. `true`면 변환 성공 후 원본 + `.thumb/{name}.jpg` (+ 동영상은 `.jpg.dur`) 삭제. 사이드카 삭제 실패는 `delete_original_failed` warning 추가, 변환 자체는 성공.
+- **새 WebP의 썸네일:** 별도 생성하지 않음 — 기존 lazy 메커니즘이 다음 browse에서 자동 생성 (TS→MP4·PNG→JPG와 동일 단순화).
+- **동시성:** 배열은 항상 순차 처리 (single-user 가정).
+- **취소:** request context cancel 시 ffmpeg kill + 임시 파일 정리.
+- **요청 보호:** `requireSameOrigin`으로 wrap (변경 작업).
+- **설정 의존:** 인코딩 파라미터가 모두 고정값이므로 settings(§2.7) 의존 없음.
+- **신규 패키지/파일:** `internal/convert/webp.go`(별도 패키지 신설하지 않음 — TS→MP4와 함께 ffmpeg runner 묶음에 합친다), `internal/handler/convert_webp.go`.
+
+**UI:**
+- [ ] **카드별 "WebP로 변환" 버튼**: 움짤 자격 카드(GIF 또는 짧은 동영상)에만 노출. WebP 카드는 결과물이므로 버튼 미노출 (재변환 의도 없음). 기존 rename/delete 버튼과 동일 레이아웃.
+- [ ] **일괄 변환 트리거** (툴바, PNG→JPG 일괄 버튼과 공존하는 별도 버튼). 변환 입력 자격 (`isClipConvertable`)은 `isClip`에서 webp를 제외한 부분집합 — GIF + 짧은 동영상만:
+  - **선택 0개 + visible 변환가능 움짤 ≥ 1개:** "모든 움짤 WebP로 변환 (M개)" — 현재 visible entries 중 `isClipConvertable` 통과 항목 전부 (webp 제외).
+  - **선택 ≥ 1개이고 그중 변환가능 움짤 ≥ 1개:** "선택 움짤 WebP로 변환 (N개)" — `selectedPaths` ∩ visible entries 중 `isClipConvertable` 통과만 추려서 변환. 비-움짤·webp는 자동 제외(차단·경고 없음).
+  - 그 외 (선택은 있는데 변환가능 0개 / 선택 0개 + visible 변환가능 0개): 버튼 숨김.
+- [ ] **활성 조건:** 일괄 버튼은 **움짤 탭(`view.type === 'clip'`) 활성 시에만** 노출. 다른 탭(전체/이미지/동영상)에서는 visible에 움짤이 섞여 있어도 표시하지 않음 — 의도 모호함 방지(움짤 탭으로 명시 진입한 경우에만 일괄 변환을 허용).
+- [ ] **모달:** TS→MP4와 동일한 SSE 진행 바 모달 디자인. 항목별 진행률 바 + 성공/실패 요약. 신규 모듈 `web/convertWebp.js` (TS→MP4의 `convert.js`를 참고하되 별도 모듈로 분리해 모달 DOM 충돌 회피).
+- [ ] **응답 후 갱신:** done 이벤트 수신 시 해당 폴더 `loadBrowse()` 1회 — 새 `.webp` 카드 + (delete_original 시) 원본 제거 반영.
+
+**Non-goals:**
+- WebP 외 다른 애니메이션 출력 포맷 (AVIF·HEIF, GIF로의 역변환) — 범위 외.
+- 인코딩 파라미터 사용자 조절 (quality / fps / scale / loop) — 모두 고정값.
+- 무손실 webp 모드.
+- 자동 업로드 변환 — 다운로드/업로드 의도와 변환 의도 분리 (PNG→JPG 자동 변환과 다른 정책 결정).
+- 음성 보존 — WebP는 무음 포맷.
+- 움짤 게이트 미충족 동영상의 강제 변환 — 30s/50MiB 상한은 정책. 더 긴 동영상이 필요하면 별도 Phase.
+- 변환 큐 / 잡 레지스트리 영속화 — 서버 재시작 시 진행 중 변환 폐기 (TS→MP4와 동일).
+- 동시 ffmpeg 프로세스 (배열은 순차 처리).
+
 ---
 
 ## 3. Tech Stack
@@ -600,7 +650,7 @@ PNG 파일을 JPEG로 영구 변환한다. 두 진입점:
 |-------|--------|--------|
 | Backend | Go (net/http stdlib) | 성능, 단일 바이너리 |
 | Image processing | `github.com/disintegration/imaging` | 순수 Go, CGo 불필요. 썸네일 + PNG → JPG 변환(§2.8)에서 공유 |
-| Transcoding | ffmpeg (alpine apk) | TS → MP4 실시간 트랜스코딩 |
+| Transcoding | ffmpeg (alpine apk) | TS → MP4 실시간 트랜스코딩, 움짤 → animated WebP 인코딩(`libwebp` + multi-frame 자동 promote, §2.9) |
 | Frontend | Vanilla HTML + CSS + JS | 의존성 없음 |
 | Container | Docker + Docker Compose | 배포 단순화 |
 | Storage | Docker named volume → `/data` | 영속성 |
@@ -625,11 +675,13 @@ file_server/
 │   │   ├── import_url.go       # URL/HLS 다운로드 SSE 핸들러
 │   │   ├── import_url_jobs.go  # /api/import-url/jobs* (목록/구독/취소/삭제)
 │   │   ├── convert.go          # TS → MP4 영구 변환 SSE 핸들러
+│   │   ├── convert_image.go    # PNG → JPG 변환 핸들러 (§2.8.2)
+│   │   ├── convert_webp.go     # 움짤 → animated WebP 변환 SSE 핸들러 (§2.9)
 │   │   └── settings.go         # GET/PATCH /api/settings
 │   ├── media/                  # 타입 판별, MIME, SafePath, MoveFile (최하위 레이어)
 │   ├── thumb/                  # 이미지·동영상 섬네일 + duration 사이드카, 워커 풀
 │   ├── urlfetch/               # HTTP 다운로드 + HLS remux (SSE 용 Callbacks hook)
-│   ├── convert/                # TS → MP4 ffmpeg remux runner
+│   ├── convert/                # ffmpeg 기반 변환 runner — TS → MP4 remux + 움짤 → WebP 인코딩(§2.9)
 │   ├── imageconv/              # PNG → JPG 변환 (§2.8) — disintegration/imaging 기반, 흰 배경 합성
 │   ├── importjob/              # 잡 라이프사이클·이벤트 채널·Registry (인메모리)
 │   └── settings/               # §2.7 URL import 설정 — JSON 영속화 + 스냅샷 getter
@@ -662,6 +714,7 @@ file_server/
 | POST | `/api/import-url?path=` | URL 목록에서 미디어 다운로드 → 저장 (SSE 진행 스트림) |
 | POST | `/api/convert` | TS 파일 목록을 MP4로 영구 변환 (SSE 진행 스트림) |
 | POST | `/api/convert-image` | PNG 파일 목록을 JPG로 영구 변환 (동기 JSON, §2.8) |
+| POST | `/api/convert-webp` | 움짤 목록을 animated WebP로 영구 변환 (SSE 진행 스트림, §2.9) |
 | GET | `/api/settings` | 현재 다운로드 설정 조회 (§2.7) |
 | PATCH | `/api/settings` | 다운로드 설정 갱신 (§2.7) |
 | GET | `/` | 프론트엔드 SPA |
@@ -1090,6 +1143,71 @@ PNG 파일을 JPG로 영구 변환 (§2.8.2). **동기 JSON 응답** — SSE가 
   - `400 {"error": "invalid request"}` — JSON 파싱 실패
   - `405 {"error": "method not allowed"}` — POST 외
 
+#### POST /api/convert-webp
+
+움짤(GIF 또는 짧은 동영상)을 animated WebP로 영구 변환 (§2.9). **SSE 진행 스트림** — 이벤트 스키마·throttling은 `/api/convert`(§5.1)와 동일 (`phase`: `start` / `progress` / `done` / `error` / `summary`). PNG→JPG의 동기 응답이 아닌 이유: ffmpeg 인코딩이 1초 내외로 끝나지 않으므로 progress UX 가치가 충분.
+
+- **Body:**
+  ```json
+  {
+    "paths": ["clips/foo.mp4", "clips/bar.gif"],
+    "delete_original": false
+  }
+  ```
+  - `paths`: 변환 대상 경로 배열(`/data` 기준 상대). 최소 1개, 최대 **500개** (다른 변환 엔드포인트와 동일 상한).
+  - `delete_original`: 변환 성공 시 원본 + `.thumb/{name}.jpg` (+ 동영상은 `.jpg.dur`) 삭제 여부 (기본 `false`).
+- **응답:** `200 OK`, `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`.
+
+**이벤트 스키마**
+
+```jsonc
+// phase: "start"
+{"phase":"start","index":0,"path":"clips/foo.mp4",
+ "name":"foo.webp","total":12345678,"type":"video"}
+
+// phase: "progress"
+{"phase":"progress","index":0,"received":4194304}
+
+// phase: "done"
+{"phase":"done","index":0,"path":"clips/foo.webp",
+ "name":"foo.webp","size":3210000,"type":"image",
+ "warnings":["audio_dropped"]}
+
+// phase: "error"
+{"phase":"error","index":1,"path":"clips/long.mp4",
+ "error":"not_clip"}
+
+// phase: "summary"
+{"phase":"summary","succeeded":1,"failed":1}
+```
+
+- `start.total`은 원본 입력 크기(최종 WebP와 무관, 진행 비율 계산은 `received/total`로 근사).
+- `start.type`은 입력 기준이라 `"video"` 또는 `"image"`(GIF의 경우).
+- `progress.received`는 임시 `.webp` 출력 파일의 현재 바이트 수(ffmpeg 인코딩 중 stat 폴링).
+- `done.size`는 최종 WebP 파일 크기 (atomic rename 직후 `Stat`).
+- `done.type`은 항상 `"image"` (출력이 WebP — 정적·애니메이션 모두 image 타입).
+- `warnings` 가능 값:
+  - `"audio_dropped"` — 입력에 audio stream이 있었으나 결과 WebP에는 포함되지 않음 (의도된 동작, GIF는 audio 검사 생략).
+  - `"delete_original_failed"` — `delete_original: true`였으나 원본 또는 사이드카 삭제 실패. 변환 자체는 성공.
+- `error` 가능 값:
+  - `"invalid_path"` — path traversal 또는 `/data` 밖 경로
+  - `"not_found"` — 경로에 파일이 없음
+  - `"not_a_file"` — 경로가 디렉토리
+  - `"unsupported_input"` — GIF·동영상이 아닌 입력 (PNG/JPG 정적 이미지, 오디오, 기타)
+  - `"not_clip"` — 동영상인데 50 MiB 또는 30s 초과 (움짤 게이트 미충족)
+  - `"duration_unknown"` — 동영상인데 ffprobe로 duration 확보 실패
+  - `"already_exists"` — 목표 `<base>.webp`가 이미 존재 (자동 suffix 없음)
+  - `"ffmpeg_missing"` — ffmpeg 바이너리가 서버 PATH에 없음
+  - `"ffmpeg_error"` — ffmpeg non-zero exit (입력 손상, libwebp 미지원 등)
+  - `"convert_timeout"` — 5분 초과
+  - `"write_error"` — 디스크 저장 실패 (디스크 풀 등)
+  - `"canceled"` — 클라이언트 연결 끊김/요청 context 취소
+- **4xx 케이스** (SSE 스트림 시작 전 일반 JSON 에러 응답):
+  - `400 {"error": "no paths"}` — 빈 배열
+  - `400 {"error": "too many paths"}` — 500개 초과
+  - `400 {"error": "invalid request"}` — JSON 파싱 실패
+  - `405 {"error": "method not allowed"}` — POST 외
+
 #### GET /api/settings
 - 성공: `200 OK`, `Content-Type: application/json`
 - 응답: 현재 메모리 캐시된 설정 값 그대로 (§2.7 형식)
@@ -1342,6 +1460,38 @@ volumes:
   - PNG 5개 중 2개 + 비-PNG 1개를 체크박스 선택 → 툴바 버튼이 "선택 PNG 변환 (2)"로 즉시 전환 → 모달 파일 목록에 PNG 2개만 노출 → 변환 후 두 파일만 `.jpg`로 갱신, 나머지(선택 안 한 PNG 3개 + 비-PNG 1개) 무영향
   - settings 모달의 "PNG 자동 변환" 체크박스 OFF → PNG 업로드 시 원본 PNG 그대로 표시되는지 확인, 토글 다시 ON → 다음 PNG 업로드부터 `.jpg`로 저장되는지 확인
   - 알파 PNG 자동 변환 결과를 다른 뷰어에서 열어 흰 배경 합성 확인
+- 단위 테스트 (움짤 → WebP 변환, `internal/convert.EncodeWebP`):
+  - 정상 동영상 변환: MP4 5초 → WebP 생성, ffprobe로 결과 검증 (codec=webp, frame count > 1)
+  - GIF 입력 → WebP 생성 (loop / animation 보존)
+  - audio stream 있는 입력의 결과는 audio 미포함 (`ffprobe -select_streams a` 비어 있음)
+  - 손상 입력 → `FFmpegExitError`로 분류, 임시 파일 미잔존
+  - context cancel 시 ffmpeg kill + 임시 파일 `.webpconvert-*.webp` 정리 확인
+  - 출력 확장자 정규화: 입력 `.MP4`/`.GIF`이어도 결과는 소문자 `.webp`(handler 책임이지만 `EncodeWebP`는 destPath 그대로 받음 — 단위 테스트는 명시적 lowercase 경로 전달)
+- 통합 테스트 (`POST /api/convert-webp`, `httptest.NewRecorder` + 실제 ffmpeg):
+  - 정상 1개 변환 → `start` → `progress`(≥0개) → `done` → `summary` 이벤트, `.webp` 파일 생성 + 원본 유지
+  - audio 있는 mp4 → `done.warnings: ["audio_dropped"]`, 결과 webp는 무음
+  - GIF 입력 → 크기·길이 무관하게 통과 (예: 5초/5MiB GIF, 1초/100KB GIF 모두 변환 성공)
+  - `delete_original: true` → 원본 + `.thumb/{name}.jpg`(+`.dur`) 삭제 확인
+  - 35초 mp4 → `error: "not_clip"`
+  - 60 MiB mp4 → `error: "not_clip"`
+  - duration 미상 mp4 (ffprobe가 duration 추출 실패하는 입력) → `error: "duration_unknown"`
+  - PNG 입력 → `error: "unsupported_input"`
+  - 충돌: 목표 `foo.webp` 사전 존재 → `error: "already_exists"` + 임시 파일 미생성 + 원본 무영향
+  - 부분 실패: 2개 중 1개는 not_clip → 해당 index만 `error`, 나머지는 정상 `done`, `summary.succeeded: 1, failed: 1`
+  - 취소: 변환 중 context cancel → ffmpeg kill + 임시 파일 정리 + 후속 항목에 `canceled` 폴백
+  - ffmpeg 미설치 환경: `error: "ffmpeg_missing"`
+  - `delete_original_failed` 경고: 원본을 read-only 디렉토리에 두고 `delete_original: true` → `done.warnings: ["delete_original_failed"]`, 변환 자체는 성공
+  - 4xx: 빈 배열 → `400 "no paths"`, 501개 → `400 "too many paths"`, 잘못된 JSON → `400 "invalid request"`, GET → `405 "method not allowed"`
+  - traversal: `paths: ["../../etc/passwd"]` → 항목 `error: "invalid_path"`
+  - same-origin: `Origin: evil.example` → 403 (다른 변환 엔드포인트와 동일 게이트)
+- 수동 테스트 (움짤 → WebP 변환):
+  - 움짤 탭 진입 → "모든 움짤 WebP로 변환 (M개)" 버튼 → 진행 모달 → 완료 후 `.webp` 카드로 갱신 + 자동재생 확인
+  - 동영상 카드(짧은 mp4) "WebP로 변환" 버튼 → 단건 변환 → 결과 카드 자동재생 확인
+  - GIF 카드 "WebP로 변환" 버튼 → 변환 → 결과 WebP가 GIF와 동일한 루프 재생
+  - 음성 있는 짧은 mp4 변환 → 결과 webp 무음 + UI 결과 행에 `audio_dropped` 라벨 표시
+  - 30s 초과 동영상에 콘솔에서 직접 `fetch('/api/convert-webp', ...)` 호출 → `not_clip` 거부 (UI 게이트 우회 시 서버 방어 검증)
+  - 다른 탭(전체/이미지/동영상)에서는 일괄 버튼이 보이지 않음 확인
+  - 움짤 5개 중 2개 선택 + 비-움짤 1개 선택 → 툴바 버튼이 "선택 움짤 WebP로 변환 (2)"로 전환 → 변환 후 선택한 2개만 `.webp`로 갱신
 
 ---
 
@@ -1360,6 +1510,7 @@ volumes:
 - Settings: PATCH 시 두 필드 모두 경계 검증 후 atomic write (temp + rename), 저장 실패 시 메모리 캐시는 변경하지 않음 (디스크-메모리 drift 방지), 진행 중인 URL 요청은 시작 시점 스냅샷 값을 끝까지 유지 (race-free)
 - TS→MP4 변환: 입력·출력 경로 모두 `media.SafePath`로 검증, 확장자 `.ts` 화이트리스트 검증(대소문자 무시), 목표 `.mp4` 사전 존재 시 ffmpeg 호출 전 거부, ffmpeg argv 전달(쉘 미개입), 임시 파일 `.convert-*.mp4` → atomic rename, context 취소·타임아웃 시 ffmpeg kill + 임시 파일 정리, stderr는 서버 로그에만 기록(SSE에는 `ffmpeg_error` 코드만), 동일 소스 경로에 대한 동시 요청은 `stream.go`의 per-path 뮤텍스와 동일 패턴으로 직렬화
 - PNG→JPG 변환: 입력·출력 경로 모두 `media.SafePath`로 검증, 입력 확장자 `.png` 화이트리스트(대소문자 무시), 출력 확장자는 항상 소문자 `.jpg`, 알파 채널은 흰색 배경에 합성(JPEG 구조적 한계 처리), JPEG quality 90 고정, 임시 파일(`.pngconvert-*.png`/`.jpg`, `.imageconv-*`) → atomic rename, 자동 업로드 변환은 settings 스냅샷을 요청 시작 시점에 고정(토글 race-free), 자동 변환 실패 시 원본 PNG로 폴백 저장(업로드 성공 유지 + `convert_failed` warning), 수동 변환은 목표 `.jpg` 사전 존재 시 거부(자동 suffix 없음), 디코드/인코드 실패는 코드 오류로만 노출(스택 트레이스나 내부 경로 비공개)
+- 움짤→WebP 변환(§2.9): 입력·출력 경로 모두 `media.SafePath`로 검증, 입력 자격 서버 재검증(GIF 무조건 통과 / 동영상은 `≤50 MiB` AND `duration ≤30s`), duration은 `thumb` 캐시 우선·없으면 `BackfillDuration` 1회로 확보, duration 미상이면 `duration_unknown` 거부, 출력 확장자 항상 소문자 `.webp`, 충돌 시 `already_exists` 거부(자동 suffix 없음), 임시 파일 `.webpconvert-*.webp` → atomic rename, ffmpeg argv 전달(쉘 미개입), audio stream 검출 시 `audio_dropped` warning 표기(GIF는 audio 검사 생략), per-path 직렬화(`webpLocks` `sync.Map`), 파일당 5분 타임아웃, context cancel·timeout 시 ffmpeg kill + 임시 파일 정리, stderr는 서버 로그에만(SSE에는 `ffmpeg_error` 코드만), 변경 핸들러로서 `requireSameOrigin` wrap
 
 **하지 않을 것 (Never)**
 - TS 이외 포맷 트랜스코딩 (MP4/MKV/AVI는 원본 그대로 스트리밍)
@@ -1375,7 +1526,8 @@ volumes:
 - Settings: 인증/권한 검사(single-tenant 전제), 경계 밖 값 저장, 진행 중인 요청에 새 값 반영(스냅샷 정책), 설정을 핸들러별로 분기(URL import와 HLS는 반드시 동일 값 공유)
 - HLS import: 재인코딩(`-c copy`로 리먹싱만, CPU 폭주 방지), DASH(`.mpd`) 지원, 원본 `.m3u8` + `.ts` 세그먼트를 그대로 저장, DRM/암호화 세그먼트 우회 시도, live stream 특별 처리(엔드리스 스트림은 공통 timeout/size 상한으로만 차단)
 - TS→MP4 변환: 재인코딩 폴백(remux 실패는 `ffmpeg_error` 반환), `.ts` 외 확장자 변환(범위 외), 다른 포맷 간 변환(MKV↔MP4 등), 원본 `.ts` 덮어쓰기(목표 `.mp4` 충돌 시 항상 409 — 자동 suffix 없음), 동시 ffmpeg 프로세스 실행(배열은 순차 처리), 변환 큐 영속화(서버 재시작 시 진행 중 변환 폐기)
-- PNG→JPG 변환: PNG 외 입력 포맷 변환(BMP/TIFF/WEBP/HEIC 등 — 범위 외), JPG 외 출력 포맷(WEBP/AVIF — 범위 외), JPEG quality 사용자 조절(90 고정), 알파 채널 보존(흰 배경 합성 강제 — 알파가 필요한 케이스는 변환 회피해야 함), EXIF/메타데이터 보존, 수동 변환의 자동 suffix(`_1`/`_2` — 충돌은 항상 409 로 거부), URL import(§2.6) 결과의 자동 변환(다운로드와 변환 의도를 분리 — 수동 변환으로만), 자동 변환 시 원본 PNG도 별도 저장(변환 성공 시 원본은 디스크에 남기지 않음 — 사용자가 원본을 원하면 자동 변환을 OFF), SSE/progress 스트림(동기 응답으로 단순화), 동시 변환(배열은 항상 순차 처리)
+- PNG→JPG 변환: PNG 외 입력 포맷 변환(BMP/TIFF/WEBP/HEIC 등 — 범위 외), JPG 외 출력 포맷(AVIF — 범위 외; 정적 PNG의 WEBP 변환은 본 절 범위 외), JPEG quality 사용자 조절(90 고정), 알파 채널 보존(흰 배경 합성 강제 — 알파가 필요한 케이스는 변환 회피해야 함), EXIF/메타데이터 보존, 수동 변환의 자동 suffix(`_1`/`_2` — 충돌은 항상 409 로 거부), URL import(§2.6) 결과의 자동 변환(다운로드와 변환 의도를 분리 — 수동 변환으로만), 자동 변환 시 원본 PNG도 별도 저장(변환 성공 시 원본은 디스크에 남기지 않음 — 사용자가 원본을 원하면 자동 변환을 OFF), SSE/progress 스트림(동기 응답으로 단순화), 동시 변환(배열은 항상 순차 처리)
+- 움짤→WebP 변환(§2.9): 움짤 게이트 미충족 입력의 강제 변환(자격 미달은 항상 `not_clip`/`duration_unknown` 거부 — 50MiB/30s 상한은 정책), audio 보존(WebP는 무음 포맷이라 항상 drop + `audio_dropped` warning), 인코딩 파라미터 사용자 조절(quality 80 / fps·해상도 원본 / loop 무한 / `compression_level 4` 모두 고정), 무손실 webp 모드, 자동 업로드 변환(다운로드/업로드 의도와 분리 — 수동만 제공), WebP 외 다른 애니메이션 출력 포맷(AVIF·HEIF·GIF 역변환 — 범위 외), 충돌 시 자동 suffix(`_1`/`_2` — 항상 `already_exists` 거부), 동시 ffmpeg 프로세스 실행(배열은 순차 처리), 변환 큐 영속화(서버 재시작 시 진행 중 변환 폐기 — TS→MP4와 동일)
 
 **Known limitations**
 - Folder rename은 `os.Stat` + `os.Rename` 순서로, 두 콜 사이에 동일 이름 폴더가 생성되면 race 발생 가능. 단일 사용자 배포 대상이므로 acceptable.

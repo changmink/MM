@@ -4018,3 +4018,362 @@ confirm dialog 처리: chromedp는 `chromedp.HandleDialog` 또는 `cdproto/page.
 - **위험: deleteFile 옵션화로 기존 호출자 회귀** — 옵션 미전달 시 기존 동작(_browse 호출) 유지하도록 default false. fileOps.js 단위 호출자 검색으로 회귀 영역 한정.
 - **롤백:** `web/index.html` `lb-delete` 버튼 + 버전 되돌리기, `web/style.css` `.lb-delete` 규칙 제거, `web/dom.js` `lbDelete` ref 제거, `web/state.js` `lbCurrentVideoPath` 제거, `web/browse.js` 핸들러/키 바인딩/setLbCurrentVideoPath 호출 제거, `web/fileOps.js` `deleteFile` 시그니처 원복. 백엔드 무영향이라 데이터 영향 없음.
 
+## Phase 29 — 움짤 → animated WebP 변환 (`feature/clip-to-webp`) — spec [`SPEC.md §2.9`](../SPEC.md)
+
+움짤(GIF + 짧은 동영상)을 animated WebP로 영구 변환. 자동재생·미리보기 친화 단일 포맷으로 정리하는 것이 목적. ffmpeg `libwebp_anim` 인코더 사용, 화질·자연스러움 우선(quality 80 / fps·해상도 원본 / loop 무한). 음성은 항상 drop + `audio_dropped` warning. 서버가 움짤 게이트(`≤50 MiB && duration ≤30s` 또는 GIF)를 재검증한다. SSE 진행 스트림은 TS→MP4(`/api/convert`)와 동일 스키마. **수동 변환만 제공** — 자동 업로드 변환 없음 (PNG→JPG와 다른 정책 결정).
+
+**의존성:**
+
+```
+CW1 (internal/convert/webp.go — EncodeWebP runner + ProbeStreamInfo helper + 단위 테스트)
+  └─► CW2 (handler/convert_webp.go — POST /api/convert-webp SSE + 게이트 재검증 + 라우트 등록 + 통합 테스트)
+        └─► CW3 (frontend — convertWebp.js + 카드 버튼 + 움짤 탭 일괄 버튼 + 모달 + dom/main wire)
+              └─► CW4 (chromedp e2e + Docker 수동 검증)
+```
+
+CW1은 leaf. CW2는 CW1만 의존. CW3는 CW2 머지 후 시작 (네트워크 계약 합의가 필요). CW4는 CW3 직후 검증 단계.
+
+**범위 (단일 사용자 미디어 서버 / SSE / ffmpeg 인코딩):**
+- 신규 파일: `internal/convert/webp.go`, `internal/convert/webp_test.go`, `internal/handler/convert_webp.go`, `internal/handler/convert_webp_test.go`, `web/convertWebp.js`. (option) `internal/handler/web_clip_to_webp_e2e_test.go`.
+- 수정 파일: `internal/handler/handler.go` (라우트 + `webpLocks sync.Map` 필드), `web/index.html` (모달 + 일괄 버튼 + 버전 bump), `web/style.css` (버튼·모달 스타일), `web/dom.js` (refs), `web/main.js` (wire), `web/browse.js` (카드별 버튼 + 일괄 버튼 노출 분기).
+- 변경 없음: 다른 변환·임포트·트리·드래그선택·라이트박스 모듈, settings 패키지(고정 파라미터라 settings 의존 없음).
+
+### CW0 — SPEC + plan + todo (선행, 이미 일부 완료)
+
+**파일:** `SPEC.md`(완료), `tasks/plan.md`(이 섹션), `tasks/todo.md`(Phase 29 entry)
+
+- SPEC §2.9 신설 + §3 Tech Stack ffmpeg 행 갱신 + §4 Project Structure에 `convert_webp.go` 추가 + §5 API 표 / §5.1 응답 스키마 / §8 Testing Strategy / §9 Boundaries 항목 추가 (이미 머지됨).
+- tasks/plan.md Phase 29 섹션 신규 (이 단계).
+- tasks/todo.md Phase 29 entry 신규 (이 단계).
+
+**완료 기준:** 문서만 변경, `go test ./... && go vet ./...` 회귀 통과.
+
+### CW1 — `internal/convert/webp.go` 인코더 + audio probe 헬퍼
+
+**파일:** `internal/convert/webp.go` (신규), `internal/convert/webp_test.go` (신규)
+
+**변경 포인트:**
+- `internal/convert/` 패키지에 단일 export 두 개 추가:
+  ```go
+  // ProbeStreamInfo runs ffprobe once and returns (durationSec, hasAudio, err).
+  // Used by the handler to gate clip eligibility (duration) and to decide
+  // whether to emit the "audio_dropped" warning. GIF inputs may return
+  // duration=0 from ffprobe — caller treats that as "duration unknown" but
+  // does not fail the eligibility check (GIFs are always clips).
+  func ProbeStreamInfo(srcPath string) (durationSec float64, hasAudio bool, err error)
+
+  // EncodeWebP encodes srcPath as an animated WebP into <dstDir>/<baseName>.webp.
+  // The caller must ensure the final path does not already exist. Encoder args
+  // are fixed: -c:v libwebp_anim -loop 0 -lossless 0 -q:v 80
+  // -compression_level 4 -an (audio is always dropped — caller emits the
+  // audio_dropped warning when applicable). fps and resolution preserve the
+  // input. Temporary file (.webpconvert-*.webp) is always cleaned up on
+  // failure. ffmpeg argv pattern + Callbacks throttling + watchTmp polling
+  // mirror RemuxTSToMP4 1:1.
+  func EncodeWebP(ctx context.Context, srcPath, dstDir, baseName string, cb Callbacks) (*Result, error)
+  ```
+- 내부 흐름 (`EncodeWebP`):
+  1. `exec.LookPath("ffmpeg")` — 실패 시 `ErrFFmpegMissing` (RemuxTSToMP4와 동일 sentinel 재사용).
+  2. `os.Stat(srcPath)` → `cb.OnStart(srcInfo.Size())`.
+  3. `os.CreateTemp(dstDir, ".webpconvert-*.webp")` → 즉시 close (Windows 핸들 lock 회피).
+  4. ffmpeg argv:
+     ```
+     ffmpeg -y -hide_banner -loglevel error
+       -i <srcPath>
+       -c:v libwebp_anim -loop 0 -lossless 0 -q:v 80
+       -compression_level 4
+       -an
+       <tmpPath>
+     ```
+     (RemuxTSToMP4는 `-c:v copy -bsf:a aac_adtstoasc -movflags +faststart` 였다. 본 인코더는 fps·scale 변경 없으므로 `-vf` 없음.)
+  5. `cmd.Stderr = &stderr`, `cmd.Start()` → 별도 goroutine에서 `watchTmp(watchCtx, tmpPath, cb.OnProgress)` 실행 (RemuxTSToMP4의 watchTmp 그대로 재사용 — 패키지 내부 함수라 export 필요 없음).
+  6. `cmd.Wait()` → `cancelWatch()` → `<-watchDone`.
+  7. 에러 분류: ctx.Err()이 먼저면 그대로, 아니면 `&FFmpegExitError{ExitCode, Stderr}`.
+  8. 성공 시 `os.Rename(tmpPath, finalPath)` → `os.Stat` → `*Result{Path, Size}` 반환.
+  9. defer cleanup으로 `renamed == false`이면 `os.Remove(tmpPath)`.
+- 내부 흐름 (`ProbeStreamInfo`):
+  1. `exec.CommandContext(ctx, "ffprobe", "-v", "quiet", "-show_entries", "stream=codec_type:format=duration", "-of", "json", srcPath)` 실행 (5초 타임아웃 — `probeTimeout`을 thumb 패키지에서 import하지 말고 자체 상수로 둠).
+  2. JSON 파싱 — `format.duration` (string → float64 parse) + `streams[].codec_type == "audio"` 존재 여부.
+  3. duration parse 실패는 `0, hasAudio, nil` (호출자가 GIF인지 동영상인지 판단 후 처리).
+  4. ffprobe 자체 실패는 error 반환.
+  - **이유:** 핸들러가 duration 검사와 audio 검출을 별도 호출 2번이 아니라 **한 번**에 끝낼 수 있도록 묶음. `thumb.LookupDuration`/`BackfillDuration`는 sidecar만 다루므로 audio 정보가 없어 본 절에 직접 사용 불가.
+- **상수 추가:**
+  - `webpProbeTimeout = 5 * time.Second` (thumb 패키지 `probeTimeout`과 동일 값이지만 패키지 경계 분리)
+  - 인코딩 파라미터(quality 80 등)는 argv literal로 둠 — 향후 변경 시 한 곳만 보면 되도록 함수 상단 const 블록.
+- **import:** `bytes`, `context`, `encoding/json`, `errors`, `fmt`, `os`, `os/exec`, `path/filepath`, `strconv`, `strings`, `time`. `internal/convert` 패키지의 기존 sentinel(`ErrFFmpegMissing`, `FFmpegExitError`, `Callbacks`, `Result`, `watchTmp`, `progressByteThreshold`, `progressTimeThreshold`)을 그대로 재사용.
+- **이름 충돌:** 기존 `convert.go`의 `tmpPattern = ".convert-*.mp4"`와 `webp.go`의 `tmpPattern = ".webpconvert-*.webp"` 충돌 회피를 위해 후자를 패키지 내부에서 `webpTmpPattern`로 명명.
+
+**Phase 0 검증 (CW1 시작 전 사전 점검):**
+- 컨테이너에서 `docker compose run --rm server ffmpeg -encoders 2>&1 | grep -i webp` — `libwebp` / `libwebp_anim` 둘 다 보이는지 확인. 만약 `libwebp_anim`이 없으면(일부 alpine 빌드는 `libwebp`만 있고 multi-frame은 자동 감지) argv를 `-c:v libwebp -loop 0`으로 변경 — animated 자동 감지 동작은 ffmpeg 6+ 기준 일관. 이 케이스를 SPEC §2.9의 인코더 표기에 한 줄 노트로 추가하거나, 그대로 두고 plan에서만 fallback 명시.
+
+**완료 기준:** `go test ./internal/convert -run "TestEncodeWebP|TestProbeStreamInfo" -v` — 12개 케이스:
+1. **EncodeWebP 정상 mp4**: 5초/24fps/640x360 mp4 → `.webp` 생성, `Result.Size > 0`, `Result.Path` 존재.
+2. **EncodeWebP 정상 GIF**: 작은 GIF → `.webp` 생성. ffprobe로 결과 codec=webp 확인.
+3. **EncodeWebP audio 무시**: audio track 있는 mp4 → 결과 webp는 audio 없음(`ProbeStreamInfo(result)`로 검증, `hasAudio == false`).
+4. **EncodeWebP fps·해상도 보존**: 60fps mp4 입력 → 결과 webp는 frame count > 1 + dimensions 일치.
+5. **EncodeWebP 손상 입력**: truncated mp4 → `*FFmpegExitError`, 임시 파일 미잔존.
+6. **EncodeWebP context cancel**: 인코딩 도중 ctx cancel → ffmpeg kill, 임시 `.webpconvert-*.webp` 미잔존, 반환 err은 `context.Canceled` (ctx.Err() 우선).
+7. **EncodeWebP ffmpeg 미설치**: `PATH=""` 환경 → `ErrFFmpegMissing`. (`t.Setenv("PATH", "")`)
+8. **EncodeWebP 충돌 사전 검사 없음**: 핸들러 책임. `EncodeWebP`는 finalPath 사전 존재해도 ffmpeg가 `-y`로 임시 파일 덮어쓰고, 마지막 `os.Rename`이 OS-dependent하게 덮어쓰거나 실패 — 본 단위 테스트는 호출자 보호로 dest 비어있는 케이스만 검증.
+9. **EncodeWebP atomic cleanup**: `os.Rename` 실패 모킹(rename target을 디렉토리로 만든 뒤 시도) → 임시 파일 정리, 반환 err 비어있지 않음.
+10. **ProbeStreamInfo audio 있음**: audio track mp4 → `hasAudio == true`, `durationSec > 0`.
+11. **ProbeStreamInfo audio 없음**: video-only mp4 / GIF → `hasAudio == false`. GIF는 `durationSec == 0` 또는 양수 둘 다 허용 (ffprobe 빌드에 따라 다름) — 단언은 `>=0`.
+12. **ProbeStreamInfo timeout**: 비정상적으로 큰 입력 + 1ms timeout 컨텍스트 → error 반환.
+
+ffmpeg 필수 케이스는 `exec.LookPath("ffmpeg")` 가드로 미설치 환경에서 `t.Skip` (기존 `convert_test.go` 패턴 그대로).
+
+### CW2 — `POST /api/convert-webp` SSE 핸들러
+
+**파일:** `internal/handler/convert_webp.go` (신규), `internal/handler/convert_webp_test.go` (신규), `internal/handler/handler.go` (라우트 + `webpLocks` 필드)
+
+**변경 포인트:**
+- `Handler` 구조체에 `webpLocks sync.Map` 필드 추가 (TS→MP4의 `convertLocks` 패턴 그대로). `lockWebPKey(key string) func()` 헬퍼 — `convert.go:lockConvertKey` 1:1 미러.
+- `Register`에 라우트 1줄:
+  ```go
+  mux.HandleFunc("/api/convert-webp", requireSameOrigin(h.handleConvertWebP))
+  ```
+- 상수:
+  ```go
+  const (
+      maxConvertWebPPaths      = 500
+      webpConvertFileTimeout   = 5 * time.Minute
+      clipMaxBytes             = 50 * 1024 * 1024 // SPEC §2.5.3 / §2.9
+      clipMaxDurationSec       = 30.0
+  )
+  ```
+  → `web/state.js`의 `CLIP_MAX_BYTES` / `CLIP_MAX_DURATION_SEC`와 **동일 값**. SPEC §2.5.3·§2.9가 단일 출처.
+- 요청/응답 타입은 TS→MP4와 동일 패턴(별 이름 prefix `webp` 또는 reuse 기존 `convStart` 등 inline 정의):
+  ```go
+  type webpConvertRequest struct {
+      Paths          []string `json:"paths"`
+      DeleteOriginal bool     `json:"delete_original"`
+  }
+  type webpStart struct {
+      Phase string `json:"phase"`
+      Index int    `json:"index"`
+      Path  string `json:"path"`
+      Name  string `json:"name"`
+      Total int64  `json:"total,omitempty"`
+      Type  string `json:"type"` // 입력 기준 — "video" 또는 "image"
+  }
+  type webpProgress struct { /* convert.go convProgress와 동일 */ }
+  type webpDone     struct { /* convert.go convDone와 동일, Type="image" 고정 */ }
+  type webpError    struct { /* convert.go convError와 동일 */ }
+  type webpSummary  struct { /* convert.go convSummary와 동일 */ }
+  ```
+  → 기존 `convStart`/`convDone` 등을 그대로 import해 재사용해도 무방하지만, SSE에 노출되는 `name`이 `.mp4` vs `.webp`로 다르고 `done.type`도 `"video"` vs `"image"`로 분기되므로 **별도 타입을 두어 코드 리뷰 시 의미가 명확**하도록 함. (의미 분리 가치 vs 코드 중복 ~30줄 — 분리 선택.)
+- `handleConvertWebP(w, r)` 흐름:
+  - POST 외 → 405 method not allowed.
+  - JSON decode → 실패 400 invalid request.
+  - 길이 0 → 400 no paths, > 500 → 400 too many paths.
+  - SSE 헤더 + 200 + flusher.
+  - `var writeMu sync.Mutex` + `emit(payload any)` 클로저 (TS→MP4와 동일).
+  - 각 path 순차 처리 — `h.convertWebPOneSSE(r.Context(), emit, i, p, body.DeleteOriginal)` → 성공/실패 카운트.
+  - 마지막 `emit(webpSummary{...})`.
+- `convertWebPOneSSE` 흐름:
+  1. `media.SafePath(h.dataDir, relPath)` → 실패 시 `error: "invalid_path"`.
+  2. `os.Stat(abs)` → 미존재 `"not_found"`, 디렉토리 `"not_a_file"`.
+  3. **자격 게이트 (서버 재검증):**
+     - `ext := strings.ToLower(filepath.Ext(fi.Name()))`. 
+     - GIF (`ext == ".gif"`) — 무조건 통과. `inputType := "image"`. duration / audio 검사 면제. **단**, `ProbeStreamInfo(abs)`는 호출하지 않음(비용 절감 + GIF는 audio 없음).
+     - Video (`media.DetectType(fi.Name()) == media.TypeVideo` 또는 동등 헬퍼 — 기존 `media` 패키지 함수 재사용. 없으면 확장자 화이트리스트 `.mp4`/`.mkv`/`.avi`/`.ts`/`.webm`):
+       - `fi.Size() > clipMaxBytes` → `error: "not_clip"`.
+       - duration 확보:
+         - 1차: `thumbDir := filepath.Join(filepath.Dir(abs), ".thumb")`; `thumbPath := filepath.Join(thumbDir, fi.Name() + ".jpg")`; `dur := thumb.LookupDuration(thumbPath)`.
+         - 2차(캐시 미스): `dur = thumb.BackfillDuration(thumbPath, abs)` — ffprobe 1회 + 사이드카 작성. 비용은 단발이고 사용자가 의도한 변환 트리거이므로 폴더 browse의 budget=1 cap을 우회해도 무방.
+         - 둘 다 nil → `error: "duration_unknown"`.
+       - `*dur > clipMaxDurationSec` → `error: "not_clip"`.
+       - `inputType := "video"`. `hasAudio` 확보를 위해 `ProbeStreamInfo(abs)`를 한 번 더 호출 — duration은 사이드카에서 받았으므로 이번엔 audio 정보만 사용. 호출 실패는 `hasAudio = false` 폴백 + 로그만 남김(블로킹 사유 안 됨).
+     - 그 외(이미지인데 GIF 아님 / 음악 / 기타) → `error: "unsupported_input"`.
+  4. 목표 파일 결정: `base := strings.TrimSuffix(fi.Name(), filepath.Ext(fi.Name()))`; `finalName := base + ".webp"`; `finalPath := filepath.Join(filepath.Dir(abs), finalName)`.
+  5. 충돌: `os.Stat(finalPath) == nil` → `error: "already_exists"` (인코딩 시작 전).
+  6. `unlock := h.lockWebPKey(abs); defer unlock()`. lock 후 충돌 재검사 (다른 요청이 그 사이에 만들었을 수 있음).
+  7. SSE `start` emit (`Total = fi.Size()`, `Type = inputType`, `Name = finalName`).
+  8. progress channel (drop-on-full, capacity 16) + writer goroutine (TS→MP4 패턴).
+  9. `fileCtx, cancel := context.WithTimeout(parentCtx, webpConvertFileTimeout); defer cancel()`.
+  10. `convert.EncodeWebP(fileCtx, abs, srcDir, base, cb)` 호출.
+  11. close progress + wait writer.
+  12. 에러 분류 (`classifyConvertError` 재사용 — TS→MP4의 헬퍼는 `convert.ErrFFmpegMissing` / `*convert.FFmpegExitError` / `context.Canceled` / `context.DeadlineExceeded`만 보면 되므로 그대로 재사용 가능. `convert_timeout`은 webp용으로 살짝 변형해도 되지만 기존 코드명이 `convert_timeout`이라 의미 충돌 없음).
+  13. 성공 시:
+      - `warnings := []string{}`.
+      - `hasAudio == true` → `append(warnings, "audio_dropped")`.
+      - `delete_original == true` → 원본 파일 + `.thumb/{name}.jpg` 삭제. 비디오면 `.thumb/{name}.jpg.dur`도. 실패 → `append(warnings, "delete_original_failed")` + slog.Warn.
+      - SSE `done` emit (`Path = finalRel` slash 정규화, `Name = finalName`, `Size = res.Size`, `Type = "image"`, `Warnings = warnings`).
+- 응답 path는 `filepath.ToSlash(filepath.Join(filepath.Dir(relPath), finalName))` + 선두 `/` 보장 (TS→MP4와 동일).
+- 통합 테스트 (`convert_webp_test.go`) — 16개 케이스, ffmpeg 필수 케이스는 `exec.LookPath` 가드로 skip:
+  1. **HappyPath_Video**: 짧은 mp4 1개 변환 → start → progress(≥0) → done → summary, `.webp` 디스크 + 원본 유지.
+  2. **HappyPath_GIF**: 작은 GIF 1개 변환 → done(`type:"image"`, audio_dropped 없음).
+  3. **AudioDropped**: audio 있는 mp4 → `done.warnings: ["audio_dropped"]`.
+  4. **DeleteOriginal_Video**: `delete_original:true` + mp4 → 원본 + `.thumb/{name}.jpg` + `.dur` 삭제.
+  5. **DeleteOriginal_GIF**: GIF + `delete_original:true` → 원본 + `.thumb/{name}.jpg` 삭제 (`.dur` 없음).
+  6. **NotClip_TooBig**: 60 MiB mp4 → `error: "not_clip"`, ffmpeg 호출 안 됨(임시 파일 미생성으로 검증).
+  7. **NotClip_TooLong**: 35초 mp4 → `error: "not_clip"`.
+  8. **DurationUnknown**: ffprobe가 duration 추출 못 하는 mp4(헤더 일부 손상이지만 stat은 성공) → `error: "duration_unknown"`.
+  9. **UnsupportedInput**: PNG → `error: "unsupported_input"`.
+  10. **AlreadyExists**: 목표 `foo.webp` 사전 존재 → `error: "already_exists"` + 임시 파일 미생성.
+  11. **PartialFailure**: `[good.mp4, big.mp4]` → 0번 done, 1번 not_clip, summary `succeeded:1, failed:1`.
+  12. **Cancel**: 변환 중 client disconnect 시뮬(`r.Context()` cancel) → 다음 항목 `error: "canceled"`, 임시 파일 정리.
+  13. **FFmpegMissing**: `t.Setenv("PATH", "")` → `error: "ffmpeg_missing"`.
+  14. **DeleteOriginalFailed_Warning**: 원본을 read-only 디렉토리에 두고 `delete_original:true` → done에 warning 추가, 변환 자체 성공.
+  15. **4xx**: 빈 배열 / 501개 / invalid JSON / GET → 각각 400/400/400/405.
+  16. **CrossOriginRejected**: `Origin: http://evil.example` → 403 cross_origin (다른 변환 엔드포인트와 동일 게이트).
+
+**체크포인트 ②** (CW2 종료, curl 단독 검증):
+1. `curl -N -X POST http://localhost:8080/api/convert-webp -H 'Origin: http://localhost:8080' -H 'Content-Type: application/json' -d '{"paths":["clip.mp4"],"delete_original":false}'` → SSE 이벤트 + 디스크 `clip.webp`.
+2. 35초 mp4로 같은 호출 → `error:"not_clip"`.
+3. PNG로 같은 호출 → `error:"unsupported_input"`.
+4. 같은 호출 반복 → `error:"already_exists"`.
+5. `curl -X GET http://localhost:8080/api/convert-webp` → 405.
+
+**완료 기준:** `go test ./internal/handler -run TestConvertWebP -v` 16 케이스 + 회귀 전부 통과. 위 5단계 curl 모두 기대 동작.
+
+### CW3 — frontend (모듈 + 모달 + 카드 버튼 + 일괄 버튼)
+
+**파일:** `web/convertWebp.js` (신규), `web/index.html`, `web/style.css`, `web/dom.js`, `web/main.js`, `web/browse.js`
+
+**변경 포인트:**
+- `web/convertWebp.js` 신규 모듈 (Phase 23 모듈화 패턴 + Phase 25 `convertImage.js` 패턴):
+  - export `openConvertWebPModal(paths)`, `wireConvertWebP(deps)`.
+  - SSE 클라이언트는 **TS→MP4의 `convert.js` 로직을 그대로 미러** — fetch + ReadableStream + line buffer + JSON parse + handler. **공통화 안 함** (Phase 23 plan note "FM-5: convert.js 자체 consumeSSE 유지" 정책 일관, 향후 별도 phase에서 추출).
+  - 진행 모달 마크업은 `index.html`의 신규 `#convert-webp-modal` (TS 변환 모달과 동일 베이스 클래스 `.modal` 활용 + 자체 ID).
+  - DOM ref 9개 (modal / fileList / deleteOrig checkbox / error p / result section / rows ul / summary span / cancel btn / confirm btn) — `dom.js` `$.convertWebp*` 9개로 추가.
+  - 진행 모달 본문:
+    ```html
+    <div id="convert-webp-modal" class="modal hidden">
+      <div class="modal-content">
+        <h2>움짤을 WebP로 변환</h2>
+        <ul id="convert-webp-file-list" class="convert-file-list"></ul>
+        <label class="settings-label">
+          <input type="checkbox" id="convert-webp-delete-original">
+          변환 후 원본 삭제
+        </label>
+        <p id="convert-webp-error" class="modal-error hidden"></p>
+        <section id="convert-webp-result" class="hidden">
+          <p id="convert-webp-summary" class="url-summary"></p>
+          <ul id="convert-webp-rows" class="url-rows"></ul>
+        </section>
+        <div class="modal-actions">
+          <button id="convert-webp-cancel-btn" type="button" class="btn-subtle">취소</button>
+          <button id="convert-webp-confirm-btn" type="button">시작</button>
+        </div>
+      </div>
+    </div>
+    ```
+  - 한국어 에러 라벨 (`CONVERT_WEBP_ERROR_LABELS`):
+    ```
+    invalid_path:        '경로 오류'
+    not_found:           '파일 없음'
+    not_a_file:          '폴더는 변환 불가'
+    unsupported_input:   '지원하지 않는 입력 (이미지/오디오/기타)'
+    not_clip:            '움짤 조건 미충족 (50 MiB 또는 30s 초과)'
+    duration_unknown:    '동영상 길이 확인 실패'
+    already_exists:      '대상 WebP 이미 존재'
+    ffmpeg_missing:      'ffmpeg 미설치'
+    ffmpeg_error:        '인코딩 실패'
+    convert_timeout:     '변환 시간 초과 (5분)'
+    write_error:         '저장 실패'
+    canceled:            '취소됨'
+    ```
+  - warning 라벨: `audio_dropped: '오디오 제거됨'`, `delete_original_failed: '원본 삭제 실패'`.
+  - 동작 흐름은 `convert.js`와 같은 SSE 패턴: open 시 paths 표시 → 시작 → start/progress/done/error 단위 row 갱신 → summary로 결과 요약 + close 버튼 라벨 전환 → close 시 (succeeded > 0)면 `_browse(currentPath, false)` 트리거 + AbortController abort.
+- `web/browse.js`:
+  - 카드별 "WebP로 변환" 버튼:
+    - `buildImageGrid` 에서 GIF 카드 (`entry.mime === 'image/gif'`)에 `.webp-convert-btn`("WebP로 변환") 추가 — rename/delete와 동일 layout. 클릭 → `openConvertWebPModal([entry.path])`.
+    - `buildVideoGrid` 에서 동영상 카드 중 `isClip(entry)` 통과 항목에 동일 버튼 추가. 게이트 미충족 동영상은 버튼 미노출.
+  - 일괄 버튼 (`#convert-webp-all-btn`):
+    - `updateConvertWebPAllBtn(visible)` 신규 함수 — TS→MP4의 `updateConvertAllBtn`, PNG→JPG의 `updateConvertPNGAllBtn` 패턴 미러.
+    - **활성 조건: `view.type === 'clip'` AND visible 중 움짤 ≥ 1.** 다른 탭에서는 항상 hidden.
+    - 라벨 두 종류:
+      - selection 0 + visible 움짤 ≥ 1 → `"모든 움짤 WebP로 변환 (M개)"`
+      - selection ≥ 1 + selection ∩ visible 움짤 ≥ 1 → `"선택 움짤 WebP로 변환 (N개)"`
+    - 그 외 케이스는 hidden.
+    - `dataset.paths`에 JSON 직렬화한 paths 저장. 클릭 → 파싱 → `openConvertWebPModal(paths)`.
+  - `renderView` (또는 visible 갱신 함수)에서 매 렌더마다 `updateConvertWebPAllBtn(visible)` 호출 — `updateConvertPNGAllBtn` 옆에 한 줄 추가.
+  - **헬퍼 신규 (browse.js 또는 util.js):**
+    ```js
+    function visibleClipPaths(visible) {
+      return visible.filter(e => !e.is_dir && isClip(e)).map(e => e.path);
+    }
+    function selectedVisibleClipPaths(visible) {
+      return visible
+        .filter(e => !e.is_dir && isClip(e) && selectedPaths.has(e.path))
+        .map(e => e.path);
+    }
+    ```
+    `isClip`은 이미 browse.js 내부에 존재(line 116) — 재export 또는 같은 파일 내 직접 사용. (selectedPaths는 Phase 22에서 도입.)
+- `web/index.html`:
+  - 툴바에 `<button id="convert-webp-all-btn" class="convert-all-btn convert-webp-all-btn" type="button" hidden></button>` 추가 — `#convert-png-all-btn` 옆.
+  - `#convert-webp-modal` 마크업 (위 본문).
+  - `<script type="module" src="/main.js?v=39">` 버전 bump (현재 v=38).
+- `web/style.css`:
+  - `.webp-convert-btn` (entry-button 패턴 — rename/delete와 동일 hover/focus, 색상은 `.png-convert-btn`과 시각 구분 — emerald/teal 계열).
+  - `#convert-webp-modal` (베이스 `.modal` 활용 + 필요한 미세 조정만).
+  - `.convert-webp-all-btn { background: #14b8a6; }` `:hover { background: #0d9488; }` (PNG는 보라, TS는 파랑, WebP는 민트 — 시각 구분).
+- `web/dom.js`:
+  - 신규 9개 ref (`convertWebpModal`, `convertWebpFileList`, `convertWebpDeleteOrig`, `convertWebpError`, `convertWebpResult`, `convertWebpRows`, `convertWebpSummary`, `convertWebpCancelBtn`, `convertWebpConfirmBtn`) + `convertWebpAllBtn`.
+- `web/main.js`:
+  - `import { wireConvertWebP } from './convertWebp.js';` 추가.
+  - `wireConvertWebP({ browse: loadBrowse })` 콜백 주입 (Phase 23 패턴 — 모듈 간 import는 main에서 끊는다).
+  - `wireBrowse(...)` deps에 `openConvertWebPModal` 노출 가능성 — 카드별 버튼 클릭 핸들러에서 사용. 또는 browse.js가 자체적으로 `convertWebp.js`를 import해도 무방 (main에서 deps 주입이 일관).
+
+**완료 기준:** `go test ./... && go vet ./...` 회귀. 브라우저에서:
+- 움짤 탭 → "모든 움짤 WebP로 변환 (M개)" 노출 + 클릭 → 모달 → 진행 → 결과 → 닫기 → 폴더 새로고침으로 `.webp` 카드 확인.
+- 다른 탭(전체/이미지/동영상)에서는 일괄 버튼 미노출.
+- GIF 카드 / 짧은 mp4 카드의 개별 "WebP로 변환" 버튼 동작.
+- 긴 mp4 / 큰 mp4 카드는 버튼 미노출.
+- 콘솔 에러 0.
+
+### CW4 — chromedp e2e + Docker 수동 검증
+
+**파일:** `internal/handler/web_clip_to_webp_e2e_test.go` (신규, 옵션), Docker 검증
+
+**chromedp 시나리오 (Phase 25/26 패턴 미러, 6개):**
+1. **clip_tab_shows_batch_button**: 짧은 mp4 1 + GIF 1 + 긴 mp4 1 픽스처 → 움짤 탭 진입 → `#convert-webp-all-btn` 가시 + 텍스트 `"모든 움짤 WebP로 변환 (2개)"`.
+2. **other_tab_hides_batch_button**: 같은 픽스처 + 동영상 탭 진입 → `#convert-webp-all-btn` 숨김.
+3. **selection_changes_label**: 움짤 탭 + GIF 1개 체크 → 라벨 `"선택 움짤 WebP로 변환 (1개)"`.
+4. **selection_excludes_non_clip**: 움짤 탭 + 긴 mp4(visible 안 함이지만 가정), GIF 체크 → label N == GIF 카운트만 반영.
+5. **card_button_present_for_clip**: 짧은 mp4 카드에 `.webp-convert-btn` 노출.
+6. **card_button_absent_for_long_video**: 35초 mp4 카드에 버튼 미노출.
+
+(인코딩 자체 검증은 핸들러 통합 테스트가 책임. e2e는 UI 게이트만 본다.)
+
+**Docker 수동 검증 시나리오 (10개):**
+1. `docker compose up -d --build` → 브라우저에서 GIF 1개 + 짧은 mp4 1개 + 긴 mp4 1개 + 큰 mp4 1개 + PNG 1개를 `/data/clips/` 에 둔다.
+2. 움짤 탭 진입 → "모든 움짤 WebP로 변환 (2개)" 클릭 → 모달 → 시작 → 진행 → done 2개 → 닫기 → 폴더 reload → `.webp` 2개 + 원본 유지.
+3. 결과 행 중 audio 있는 mp4의 결과 row에 "오디오 제거됨" 라벨 표시.
+4. GIF 카드 "WebP로 변환" 버튼 → 단건 변환 → 결과 자동재생 확인 (브라우저는 animated webp를 그대로 재생).
+5. 짧은 mp4 카드 "WebP로 변환" + "변환 후 원본 삭제" 체크 → 변환 → 원본 카드 사라짐 + 새 `.webp` 카드 등장.
+6. 긴 mp4(35초) 카드 → 버튼 미노출 확인. 직접 콘솔에서 `fetch('/api/convert-webp', ...)` → `not_clip` 응답.
+7. 큰 mp4(60 MiB) 카드 → 버튼 미노출. 직접 호출 → `not_clip`.
+8. PNG 카드 → 버튼 미노출. 직접 호출 → `unsupported_input`.
+9. 충돌: `foo.gif` + `foo.webp` 동시 존재 → GIF 변환 시도 → 결과 row "대상 WebP 이미 존재".
+10. 모바일 브라우저(<600px) — 카드 버튼·툴바 버튼·모달 정상 표시 (다른 변환 모달과 동일 레이아웃).
+11. 회귀 스모크: 기존 업로드/rename/delete/TS 변환/PNG 변환 각 1회 동작 확인. 콘솔 에러 0.
+
+**완료 기준:** chromedp 6 시나리오 통과 (`go test ./internal/handler -run TestClipToWebP_E2E -v`). Docker 10 시나리오 모두 기대 동작.
+
+### Out of scope (Phase 29)
+
+- WebP 외 다른 애니메이션 출력 포맷 (AVIF, HEIF, 역방향 GIF) — 범위 외.
+- 인코딩 파라미터 사용자 조절 (quality / fps / scale / loop / lossless) — 모두 고정값.
+- 무손실 webp 모드.
+- 자동 업로드 변환 — 다운로드/업로드 의도와 변환 의도 분리.
+- 음성 보존 — WebP 무음 포맷.
+- 움짤 게이트 미충족 동영상의 강제 변환.
+- 변환 큐 / 잡 레지스트리 영속화 (서버 재시작 시 진행 중 변환 폐기 — TS→MP4 정책 일관).
+- 동시 ffmpeg 프로세스 (배열 순차 처리).
+- WebP를 다시 mp4로 역변환.
+- 정적 PNG / JPG → 정적 WebP 변환 (Phase 25는 PNG→JPG로 범위 한정, 본 phase는 움짤 한정).
+- 결과 WebP의 별도 썸네일 사전 생성 (lazy 메커니즘이 다음 browse에서 자동 생성 — TS→MP4와 동일 단순화).
+
+### 위험 / 롤백
+
+- **위험: ffmpeg 빌드의 `libwebp_anim` 인코더 누락 가능성** — alpine apk `ffmpeg` 빌드는 일반적으로 `libwebp_anim`을 포함하지만 일부 minimal 빌드는 `libwebp`만 있을 수 있다. 영향: CW1의 인코딩 테스트가 모두 실패. 대응: Phase 0 검증으로 사전 확인 → 미포함 시 argv를 `-c:v libwebp -loop 0`으로 변경 (multi-frame 입력을 ffmpeg가 자동으로 animated로 인코드). SPEC §2.9 인코더 표기는 부정확하지만 본질 동작 동일 — 한 줄 노트로 보강.
+- **위험: GIF의 ffprobe duration이 0 또는 매우 큼** — GIF는 컨테이너 메타에 duration이 안 적혀 있는 경우가 많아 ffprobe가 0을 반환할 수 있다. 본 plan은 GIF에 대해 duration 검사를 면제하므로 직접 영향 없음. 단, 사용자가 30분짜리 GIF를 변환 시도하면 timeout(5분) 도달 후 `convert_timeout`. 의도된 동작.
+- **위험: `BackfillDuration` 부작용** — 본 핸들러가 `.thumb/{name}.jpg.dur` 사이드카를 새로 만들 수 있다 (해당 동영상이 그 폴더에 처음 browse되기 전에 변환을 트리거한 경우). browse 시점에 이미 만들어졌을 사이드카를 한 번 더 쓰는 것뿐이라 무해 — 그러나 동시 browse 요청과의 race는 thumb 패키지 자체 atomic write로 보호된다.
+- **위험: 큰 결과물 (mp4보다 큰 webp)** — animated webp는 mp4보다 3~5배 클 수 있다. 사용자가 디스크 절감을 기대했다면 의도 상이. SPEC §2.9의 목적이 "자동재생/미리보기 친화"임을 사용자에게 명시 (`done` 응답은 `size` 필드를 그대로 노출하므로 UI에서 변환 후 크기를 보여주면 self-evident).
+- **위험: per-path lock 누수** — `webpLocks sync.Map`은 unlock 후에도 entry를 유지(TS→MP4와 동일 정책 — 디스크의 unique source path 수만큼 bounded). 영향 없음.
+- **위험: 인코딩 시간이 5분을 초과하는 입력** — 30s/50MiB 게이트가 있으니 정상 사례에서 도달 불가능. CPU 1코어 alpine 컨테이너에서 1080p/24fps animated webp는 ~30s 이내. timeout은 안전망.
+- **위험: audio 검출 실패로 warning 누락** — `ProbeStreamInfo`가 일부 포맷(.ts 등)에서 audio stream 인식 실패 가능. 영향: 결과 webp는 어쨌든 `-an`으로 무음이지만 `audio_dropped` warning이 누락되어 사용자가 "왜 음성이 없지?" 의아할 수 있음. 발생 빈도 낮음 + 결과 동작은 일관(항상 무음)이라 추가 mitigation 안 함.
+- **롤백:** Phase 29 머지 단위로 revert → Phase 28 상태 복귀. 디스크에 남은 `.webp` 파일은 일반 이미지로 인식되어 그대로 표시됨 (변환 인프라 제거 후에도 데이터 손실 없음). per-path lock map은 핸들러 재등록과 함께 사라짐. SPEC.md §2.9 / §3 / §4 / §5 / §8 / §9 변경분도 함께 revert. settings 변경 없음 — 마이그레이션 없음.
+
