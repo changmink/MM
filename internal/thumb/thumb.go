@@ -27,6 +27,9 @@ const (
 )
 
 // Generate creates a 200x200 JPEG thumbnail at dst from the image at src.
+// GIF and animated WebP are special-cased to extract the first frame —
+// imaging.Open's WebP decoder (golang.org/x/image/webp) handles only static
+// frames, so animated WebPs fall back to webpmux from libwebp-tools.
 func Generate(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return err
@@ -37,9 +40,18 @@ func Generate(src, dst string) error {
 	var img image.Image
 	var err error
 
-	if ext == ".gif" {
+	switch ext {
+	case ".gif":
 		img, err = decodeGIFFirstFrame(src)
-	} else {
+	case ".webp":
+		img, err = imaging.Open(src, imaging.AutoOrientation(true))
+		if err != nil {
+			// Likely an animated WebP — imaging's static decoder can't
+			// parse VP8X+ANIM chunks. Try the webpmux fallback before
+			// surfacing the error.
+			img, err = decodeAnimatedWebPFirstFrame(src)
+		}
+	default:
 		img, err = imaging.Open(src, imaging.AutoOrientation(true))
 	}
 	if err != nil {
@@ -49,6 +61,59 @@ func Generate(src, dst string) error {
 	thumb := imaging.Fit(img, thumbWidth, thumbHeight, imaging.Lanczos)
 	return imaging.Save(thumb, dst, imaging.JPEGQuality(85))
 }
+
+// decodeAnimatedWebPFirstFrame extracts frame 1 from an animated WebP via
+// libwebp-tools — webpmux pulls the single ANMF chunk into a static WebP,
+// then dwebp transcodes it to PNG which imaging can read reliably. The
+// imaging package's golang.org/x/image/webp decoder rejected the static
+// webpmux output in alpine 3.19's libwebp build, so the dwebp hop is the
+// pragmatic fix. Returns ErrWebPMuxMissing when either tool is absent so
+// callers distinguish deployment misconfig from input corruption.
+func decodeAnimatedWebPFirstFrame(src string) (image.Image, error) {
+	if _, err := exec.LookPath("webpmux"); err != nil {
+		return nil, ErrWebPMuxMissing
+	}
+	if _, err := exec.LookPath("dwebp"); err != nil {
+		return nil, ErrWebPMuxMissing
+	}
+
+	tmpWebp, err := os.CreateTemp("", "webp-frame-*.webp")
+	if err != nil {
+		return nil, err
+	}
+	tmpWebpPath := tmpWebp.Name()
+	tmpWebp.Close()
+	defer os.Remove(tmpWebpPath)
+
+	tmpPng, err := os.CreateTemp("", "webp-frame-*.png")
+	if err != nil {
+		return nil, err
+	}
+	tmpPngPath := tmpPng.Name()
+	tmpPng.Close()
+	defer os.Remove(tmpPngPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+
+	if err := exec.CommandContext(ctx, "webpmux",
+		"-get", "frame", "1",
+		src, "-o", tmpWebpPath,
+	).Run(); err != nil {
+		return nil, fmt.Errorf("webpmux extract: %w", err)
+	}
+	if err := exec.CommandContext(ctx, "dwebp",
+		tmpWebpPath, "-o", tmpPngPath,
+	).Run(); err != nil {
+		return nil, fmt.Errorf("dwebp decode: %w", err)
+	}
+	return imaging.Open(tmpPngPath, imaging.AutoOrientation(true))
+}
+
+// ErrWebPMuxMissing signals that webpmux from libwebp-tools is unavailable.
+// Surfaced by decodeAnimatedWebPFirstFrame so handler code can distinguish
+// "deployment misconfigured" from "input file is broken".
+var ErrWebPMuxMissing = errors.New("webpmux not found in PATH (libwebp-tools)")
 
 // GenerateFromVideo extracts a representative frame from a video file and
 // saves it as a 200x200 JPEG at dst. It tries 50%, 25%, and 75% of the video

@@ -384,7 +384,7 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
 움짤(GIF / WebP)은 카드 thumb 사이드카가 없으면 `<img src="/api/stream?...">` 로 원본 자체를 그려 자동재생된다. 폴더에 움짤이 100+ 있으면 visible 여부와 무관하게 모두 디코드되어 저사양 PC에서 부담이 크다. 이 기능은 클라이언트만 변경해 동시 재생되는 카드 수를 줄인다 — **서버 변경 없음**. 평시에는 정적 첫 프레임 jpg(`/api/thumb`) 를 보여주고, hover/viewport 진입 시에만 원본 stream 으로 src 를 토글한다.
 
 **기반 가정 (서버 동작):**
-- `thumb.Generate` 는 GIF 첫 프레임(`decodeGIFFirstFrame`) / WebP 첫 프레임(`imaging.Open` 의 첫 프레임 디코드)을 정적 jpg 사이드카(`.thumb/{name}.jpg`) 로 추출한다 — 이미 구현됨.
+- `thumb.Generate` 는 GIF 첫 프레임(`decodeGIFFirstFrame`) / 정적 WebP(`imaging.Open`) / **animated WebP** (`webpmux -get frame 1` → `dwebp` → imaging) 모두 처리해 정적 jpg 사이드카(`.thumb/{name}.jpg`) 를 만든다. animated WebP 폴백은 `imaging` 의 `golang.org/x/image/webp` 디코더가 정적 frame 만 지원하는 한계 때문에 필요. **Dockerfile 에 `libwebp-tools` 패키지 추가**(webpmux + dwebp).
 - `serveImageThumb` 는 사이드카가 없으면 즉시 lazy 생성. 즉 클라이언트가 `/api/thumb?path=...` 를 요청하면 GIF/WebP 라도 항상 정적 jpg 가 돌아온다. 첫 호출은 디코드 비용이 있고 두 번째부터는 OS file cache 에서 즉시.
 - browse 응답의 `thumb_available` 은 사이드카 디스크 존재 여부 — 첫 browse 시점에는 GIF/WebP 의 경우 false 일 수 있지만, 클라이언트는 그 값을 무시하고 항상 `/api/thumb` URL 을 사용하는 정책으로 가도 안전(lazy 생성이 backstop).
 
@@ -427,7 +427,7 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
 - 이전 phase 결정(움짤 필터 §2.5.3, 변환 §2.9) 변경 — 분류·변환 정책 그대로.
 - thumb 사이드카 사전 일괄 생성 (예: 폴더 내 모든 움짤 미리 워밍) — lazy 메커니즘에 위임. 첫 진입 시 latency 가 체감되면 후속 검토.
 
-**서버 변경:** 없음 (`thumb.Generate` 가 이미 GIF/WebP 첫 프레임을 처리).
+**서버 변경:** 최소 — `thumb.Generate` 에 animated WebP 폴백(webpmux + dwebp) + Dockerfile `libwebp-tools` 패키지 추가. handler/browse 등 그 외 경로 무변경.
 
 ### 2.6 URL 기반 미디어 가져오기 (URL Import)
 
@@ -701,6 +701,7 @@ PNG 파일을 JPEG로 영구 변환한다. 두 진입점:
 |-------|--------|--------|
 | Backend | Go (net/http stdlib) | 성능, 단일 바이너리 |
 | Image processing | `github.com/disintegration/imaging` | 순수 Go, CGo 불필요. 썸네일 + PNG → JPG 변환(§2.8)에서 공유 |
+| WebP first-frame | `libwebp-tools` (alpine apk: webpmux + dwebp) | animated WebP 의 thumbnail 첫 프레임 추출(§2.5.6) — Go imaging 의 정적 webp 디코더 한계 보완 |
 | Transcoding | ffmpeg (alpine apk) | TS → MP4 실시간 트랜스코딩, 움짤 → animated WebP 인코딩(`libwebp` + multi-frame 자동 promote, §2.9) |
 | Frontend | Vanilla HTML + CSS + JS | 의존성 없음 |
 | Container | Docker + Docker Compose | 배포 단순화 |
