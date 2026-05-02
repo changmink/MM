@@ -19,27 +19,33 @@
 - 폴더 생성 모달 — **사이드바 헤더의 "+ 새 폴더"** 진입 (현재 browse 경로 기준 생성)
 - **폴더 작업 동선은 사이드바 트리** — 트리 노드 hover 시 ✎ rename / 🗑 삭제 노출
 - **폴더 이동(DnD)** — 트리 노드 또는 메인 리스트 폴더 행을 다른 트리 노드/breadcrumb 위로 끌어 놓기. 자기 자신/자손/동일 부모로의 이동은 거부, 충돌 시 409
-- 다중 파일 선택 후 사이드바 폴더로 일괄 이동 (폴더는 단건 이동만)
+- **다중 선택 + 일괄 작업** — 카드/행 체크박스 또는 빈 영역 rubber-band 드래그로 visible 항목 일괄 선택, 사이드바 폴더로 한 번에 이동(폴더는 단건 이동만)
 
 ### 이미지 / 동영상 / 음악
 - 이미지 섬네일 자동 생성 (200×200 JPEG, `.thumb/` 사이드카)
 - 동영상 섬네일 + duration 오버레이 (ffmpeg, 50%/25%/75% 프레임 폴백)
 - HTTP Range 스트리밍 (MP4/MKV/AVI/MP3/FLAC/AAC/OGG/WAV/M4A)
 - **TS 파일**: 실시간 remux 스트리밍 + **MP4로 영구 변환** (개별/일괄, SSE 진행률)
+- **PNG → JPG 변환** — 업로드 시 자동(설정 토글, 기본 ON, 흰 배경 합성) + 카드/일괄 수동 변환(`POST /api/convert-image`)
+- **움짤 → animated WebP 변환** — GIF·짧은 동영상을 `libwebp`로 영구 변환(SSE, audio strip + warning), 움짤 탭 한정 일괄 버튼
+- **라이트박스 내 삭제** — 원본 보기 중 🗑 버튼 또는 `Delete` 키로 즉시 삭제(이미지는 다음 항목으로, 동영상은 닫고 새로고침)
 
 ### URL 가져오기
 - 여러 URL 동시 입력 → 서버가 순차 다운로드 + 디스크 스트리밍 저장
 - 이미지/동영상/음악 + **HLS(`.m3u8`)** 지원 (최고 품질 variant 자동 선택, ffmpeg remux)
 - Content-Type 기반 확장자 결정, 충돌 시 `_1` 자동 리네임
 - SSE 실시간 진행률, 부분 실패 허용
+- 새로고침/탭 재오픈 후 활성 잡 자동 복원, 개별 URL/배치 취소 + 종료 잡 dismiss
 
 ### 탐색 UX
 - 정렬·타입 필터·이름 검색 툴바 (URL 상태 동기화)
-- "움짤" 필터: GIF + 짧고 작은 동영상 (`≤ 30s`, `≤ 50 MiB`)
+- 빈 영역 드래그 rubber-band 영역 선택 (데스크톱, modifier로 추가 선택)
+- "움짤" 필터: GIF/WebP + 짧고 작은 동영상 (`≤ 30s`, `≤ 50 MiB`)
+- 움짤 카드 hover/IntersectionObserver 자동재생 — 평시 정적 첫 프레임으로 부담 완화
 - 파일 용량 요약 (breadcrumb 우측) + 개별 size badge
 
 ### 다운로드 설정
-- 헤더 ⚙ 버튼 → 최대 다운로드 크기 / 타임아웃 조정
+- 헤더 ⚙ 버튼 → 최대 다운로드 크기 / 타임아웃 + PNG → JPG 자동 변환 토글
 - `<dataDir>/.config/settings.json`에 영속화
 
 ---
@@ -84,7 +90,7 @@ go run ./cmd/server
 | POST | `/api/folder?path=` | 폴더 생성 |
 | PATCH | `/api/folder?path=` | 폴더 rename(`{name}`) 또는 이동(`{to}`) |
 | DELETE | `/api/folder?path=` | 폴더 재귀 삭제 |
-| PATCH | `/api/file?path=` | 파일 rename |
+| PATCH | `/api/file?path=` | 파일 rename(`{name}`) 또는 이동(`{to}`) |
 | DELETE | `/api/file?path=` | 파일 삭제 |
 | POST | `/api/import-url?path=` | URL/HLS 다운로드 시작 (SSE 응답에 `register`+`queued`+...) |
 | GET | `/api/import-url/jobs` | 활성·이력 잡 목록 (페이지 새로고침 시 복원용) |
@@ -93,7 +99,9 @@ go run ./cmd/server
 | DELETE | `/api/import-url/jobs/{id}` | 종료된 잡을 history에서 제거 (활성이면 409) |
 | DELETE | `/api/import-url/jobs?status=finished` | 종료된 잡 일괄 정리 |
 | POST | `/api/convert` | TS → MP4 영구 변환 (SSE) |
-| GET/PATCH | `/api/settings` | 다운로드 설정 |
+| POST | `/api/convert-image` | PNG → JPG 동기 변환 (단건/배치) |
+| POST | `/api/convert-webp` | 움짤(GIF / 짧은 동영상) → animated WebP 변환 (SSE) |
+| GET/PATCH | `/api/settings` | 다운로드 설정 + PNG 자동 변환 토글 |
 
 mutating 라우트(POST·PATCH·DELETE)는 모두 `Origin == Host` 또는 `Sec-Fetch-Site` allowlist를 통과해야 한다. 거부 시 `403 cross_origin` (상세는 SPEC.md §5.3).
 
@@ -107,13 +115,14 @@ mutating 라우트(POST·PATCH·DELETE)는 모두 `Origin == Host` 또는 `Sec-F
 cmd/server/        엔트리포인트 (net/http + graceful shutdown)
 internal/
   handler/        HTTP 엔드포인트
-  media/          타입/MIME 판별
-  thumb/          이미지·동영상 썸네일 생성 (ffmpeg 프레임 폴백)
+  media/          타입/MIME 판별 + 파일/폴더 이동(MoveFile/MoveDir)
+  thumb/          이미지·동영상 썸네일 생성 (ffmpeg + animated WebP 폴백)
   urlfetch/       URL/HLS 다운로드 (SSE 진행 스트림)
-  convert/        TS → MP4 ffmpeg remux 러너
+  convert/        TS → MP4 + 움짤 → animated WebP ffmpeg 러너
+  imageconv/      PNG → JPG 변환 (흰 배경 합성, atomic write)
   importjob/      잡 라이프사이클·이벤트 채널·Registry (인메모리)
   settings/       다운로드 설정 영속화
-web/              index.html + app.js + style.css (vanilla)
+web/              index.html + style.css + main.js + 17개 ES module
 ```
 
 ---
@@ -132,7 +141,8 @@ go test ./...
 
 - **Backend**: Go 1.26, net/http stdlib, `github.com/disintegration/imaging`
 - **Transcoding/Probe**: ffmpeg, ffprobe (alpine apk)
-- **Frontend**: Vanilla HTML/CSS/JS (의존성 없음)
+- **WebP 도구**: `libwebp-tools` (alpine apk — `webpmux` + `dwebp`). animated WebP 첫 프레임 추출에 사용
+- **Frontend**: Vanilla HTML/CSS/JS (의존성 없음, ES module 17개)
 - **Container**: Docker multi-stage build (alpine:3.19 런타임)
 
 ---
