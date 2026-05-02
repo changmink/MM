@@ -25,6 +25,7 @@ type Handler struct {
 	registry     *importjob.Registry // in-memory URL-import job state; survives request lifecycle
 	streamLocks  sync.Map            // cachePath -> *sync.Mutex; serializes ffmpeg per cache key
 	convertLocks sync.Map            // absSrcPath -> *sync.Mutex; serializes TS → MP4 per source
+	webpLocks    sync.Map            // absSrcPath -> *sync.Mutex; serializes clip → WebP per source
 	importSem    chan struct{}       // size-1 semaphore; serializes URL import batches process-wide
 }
 
@@ -96,6 +97,7 @@ func Register(mux *http.ServeMux, dataDir, webDir string, settingsStore *setting
 	mux.HandleFunc("/api/import-url/jobs/", requireSameOrigin(h.handleJobsByID))
 	mux.HandleFunc("/api/convert", requireSameOrigin(h.handleConvert))
 	mux.HandleFunc("/api/convert-image", requireSameOrigin(h.handleConvertImage))
+	mux.HandleFunc("/api/convert-webp", requireSameOrigin(h.handleConvertWebP))
 	mux.HandleFunc("/api/settings", requireSameOrigin(h.handleSettings))
 
 	mux.Handle("/", http.FileServer(http.Dir(webDir)))
