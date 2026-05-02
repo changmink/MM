@@ -259,8 +259,9 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
 
 **움짤 정의 (필터 통과 조건):**
 - **GIF (`mime === 'image/gif'`)**: **무조건 움짤.** GIF는 서버가 duration을 제공하지 않고, 실무에서 대부분 짧고 가볍다는 사용자 판단에 따라 크기·길이 체크를 생략한다.
+- **WebP (`mime === 'image/webp'`)**: **무조건 움짤.** §2.9의 변환 결과물이 모두 animated WebP이고 단일 사용자 운용에서 정적 WebP는 사실상 등장하지 않는다는 가정. 정적/애니메이션을 헤더(VP8X + Animation flag)로 분기하는 정확한 detection은 over-engineering이라 도입하지 않음 — 정적 webp가 등장해 분류가 어색해지면 후속 phase에서 보강.
 - **동영상 (`type === 'video'`)**: `size ≤ 50 MiB` (50 × 1024² = 52,428,800 B) **AND** `duration_sec != null && duration_sec <= 30` 둘 다 만족해야 한다. `duration_sec`이 `null`(썸네일 placeholder / ffprobe 실패 등)이면 움짤로 간주하지 **않음** — 길이를 모르므로 보수적으로 제외.
-- **그 외** (정적 이미지 — JPG/PNG/WEBP 등, 음악, 기타): 움짤 아님.
+- **그 외** (정적 이미지 — JPG/PNG, 음악, 기타): 움짤 아님.
 
 **UI:**
 - [ ] 툴바 타입 세그먼트 맨 끝에 6번째 버튼 `움짤` (`data-type="clip"`). 기존 순서 유지: `전체 / 이미지 / 동영상 / 음악 / 기타 / 움짤`.
@@ -269,7 +270,7 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
 **배타적 분류 (3-way):** `이미지 / 동영상 / 움짤`은 서로 **배타적**으로 분류된다. 움짤 조건에 해당하는 파일은 `이미지`나 `동영상` 탭에 **나타나지 않는다**:
 - `이미지` 탭: 정적 이미지만 (GIF 제외)
 - `동영상` 탭: 움짤 아닌 동영상만 (길거나 큰 동영상 / duration 미상 동영상)
-- `움짤` 탭: GIF + 움짤 동영상
+- `움짤` 탭: GIF + WebP + 움짤 동영상
 - `전체` 탭은 이 배타 규칙을 적용하지 않음 — 모든 파일을 자연 타입 섹션에 표시 (움짤도 이미지/동영상 섹션에 포함).
 - `음악 / 기타` 탭은 움짤 조건과 무관 (은 해당 타입 내 움짤이 존재할 수 없음).
 
@@ -281,7 +282,7 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
 - [ ] 움짤 판별은 헬퍼로 분리:
   ```js
   function isClip(e) {
-    if (e.mime === 'image/gif') return true;
+    if (e.mime === 'image/gif' || e.mime === 'image/webp') return true;
     if (e.type === 'video') {
       return e.size <= 50 * 1024 * 1024
         && e.duration_sec != null
@@ -303,7 +304,7 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
 - §2.5.1·§2.5.2와 동일. 움짤 모드에서도 합계는 보이는 파일 기준, lightbox는 visible 이미지만 순환.
 
 **Non-goals:**
-- APNG / animated WEBP 감지 — 확장자만으로 판별 불가, ffprobe 호출이 필요해 범위 외.
+- APNG / 정적 WebP 정확 분기 감지 — RIFF VP8X chunk + Animation flag 검사가 필요. 단일 사용자 운용에서 정적 WebP가 등장할 가능성이 낮아 단순화 (모든 webp를 움짤로 분류). 필요해지면 후속 phase에서 보강.
 - GIF duration 서버 측 추출 — 본 기능은 서버 무변경 원칙. 필요해지면 별도 Phase.
 - 움짤 전용 뷰(섹션 병합, 자동재생 미리보기 등).
 - 움짤 조건 커스터마이징 (50MB / 30s 상수, 사용자 설정 없음).
@@ -599,7 +600,7 @@ PNG 파일을 JPEG로 영구 변환한다. 두 진입점:
 **입력 자격 (서버가 게이트 재검증):**
 - **GIF (`mime === 'image/gif'`)**: 무조건 자격 있음. 크기·길이 검증 면제 — §2.5.3 움짤 정의와 일관.
 - **동영상 (`type === 'video'`)**: §2.5.3과 동일 게이트 — `size ≤ 50 MiB` (`CLIP_MAX_BYTES`) **AND** `duration_sec ≤ 30s` (`CLIP_MAX_DURATION_SEC`). duration은 `thumb.LookupDuration` 캐시 우선 → 없으면 `thumb.BackfillDuration`(ffprobe 1회)으로 확보. duration을 끝내 알 수 없으면 `duration_unknown`로 거부 (보수적).
-- **그 외**: `unsupported_input`로 거부 — PNG/JPG 정적 이미지, 오디오, 기타. 클라이언트 UI는 자격 없는 카드에 버튼을 노출하지 않지만 직접 호출 방어로 서버에서 한 번 더 차단.
+- **그 외 (WebP 포함)**: `unsupported_input`로 거부. WebP는 §2.5.3에서 움짤로 분류되지만 변환 결과물 자체이므로 입력 자격은 없다 — 클라이언트의 일괄 paths 추출에서 webp를 제외하고(`isClipConvertable`), 직접 API 호출은 서버가 `unsupported_input`로 차단한다. PNG/JPG 정적 이미지·오디오·기타도 동일 코드.
 
 **구현 공통 규약:**
 - **인코더:** ffmpeg `libwebp` (multi-frame 입력을 자동으로 animated webp로 promote, ffmpeg 6+). 등록된 `libwebp_anim` 별칭은 alpine apk ffmpeg 6.1 빌드에서 single-frame 출력만 만드는 회귀가 있어 사용하지 않는다 — `libwebp` + multi-frame 입력 경로가 결과 webp의 RIFF 컨테이너에 VP8X chunk + animation flag를 정상 기록한다. Dockerfile 영향 없음 — 기본 alpine apk `ffmpeg` 패키지에 포함.
@@ -622,11 +623,11 @@ PNG 파일을 JPEG로 영구 변환한다. 두 진입점:
 - **신규 패키지/파일:** `internal/convert/webp.go`(별도 패키지 신설하지 않음 — TS→MP4와 함께 ffmpeg runner 묶음에 합친다), `internal/handler/convert_webp.go`.
 
 **UI:**
-- [ ] **카드별 "WebP로 변환" 버튼**: 움짤 자격 카드(GIF 또는 짧은 동영상)에만 노출. 기존 rename/delete 버튼과 동일 레이아웃.
-- [ ] **일괄 변환 트리거** (툴바, PNG→JPG 일괄 버튼과 공존하는 별도 버튼):
-  - **선택 0개 + visible 움짤 ≥ 1개:** "모든 움짤 WebP로 변환 (M개)" — 현재 visible entries 중 `isClip` 통과 항목 전부.
-  - **선택 ≥ 1개이고 그중 움짤 ≥ 1개:** "선택 움짤 WebP로 변환 (N개)" — `selectedPaths` ∩ visible entries 중 `isClip` 통과만 추려서 변환. 비-움짤 선택은 자동 제외(차단·경고 없음).
-  - 그 외 (선택은 있는데 움짤 0개 / 선택 0개 + visible 움짤 0개): 버튼 숨김.
+- [ ] **카드별 "WebP로 변환" 버튼**: 움짤 자격 카드(GIF 또는 짧은 동영상)에만 노출. WebP 카드는 결과물이므로 버튼 미노출 (재변환 의도 없음). 기존 rename/delete 버튼과 동일 레이아웃.
+- [ ] **일괄 변환 트리거** (툴바, PNG→JPG 일괄 버튼과 공존하는 별도 버튼). 변환 입력 자격 (`isClipConvertable`)은 `isClip`에서 webp를 제외한 부분집합 — GIF + 짧은 동영상만:
+  - **선택 0개 + visible 변환가능 움짤 ≥ 1개:** "모든 움짤 WebP로 변환 (M개)" — 현재 visible entries 중 `isClipConvertable` 통과 항목 전부 (webp 제외).
+  - **선택 ≥ 1개이고 그중 변환가능 움짤 ≥ 1개:** "선택 움짤 WebP로 변환 (N개)" — `selectedPaths` ∩ visible entries 중 `isClipConvertable` 통과만 추려서 변환. 비-움짤·webp는 자동 제외(차단·경고 없음).
+  - 그 외 (선택은 있는데 변환가능 0개 / 선택 0개 + visible 변환가능 0개): 버튼 숨김.
 - [ ] **활성 조건:** 일괄 버튼은 **움짤 탭(`view.type === 'clip'`) 활성 시에만** 노출. 다른 탭(전체/이미지/동영상)에서는 visible에 움짤이 섞여 있어도 표시하지 않음 — 의도 모호함 방지(움짤 탭으로 명시 진입한 경우에만 일괄 변환을 허용).
 - [ ] **모달:** TS→MP4와 동일한 SSE 진행 바 모달 디자인. 항목별 진행률 바 + 성공/실패 요약. 신규 모듈 `web/convertWebp.js` (TS→MP4의 `convert.js`를 참고하되 별도 모듈로 분리해 모달 DOM 충돌 회피).
 - [ ] **응답 후 갱신:** done 이벤트 수신 시 해당 폴더 `loadBrowse()` 1회 — 새 `.webp` 카드 + (delete_original 시) 원본 제거 반영.

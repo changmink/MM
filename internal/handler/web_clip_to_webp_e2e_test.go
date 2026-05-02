@@ -19,11 +19,13 @@ import (
 // frontend renders the right buttons in the right places.
 //
 // Fixtures live in /clips:
-//   - short.mp4   (duration sidecar 5s, ~empty file)        → isClip=true
+//   - short.mp4   (duration sidecar 5s, ~empty file)        → isClip=true, convertable
 //   - long.mp4    (duration sidecar 35s, ~empty file)       → isClip=false (>30s)
 //   - big.mp4     (duration sidecar 5s, sparse 60 MiB)      → isClip=false (>50MiB)
-//   - clip.gif    (tiny GIF bytes)                          → isClip=true (unconditional)
-//   - photo.jpg   (tiny JPEG bytes)                         → isClip=false, non-GIF/non-clip
+//   - clip.gif    (tiny GIF bytes)                          → isClip=true, convertable
+//   - clip.webp   (tiny WebP bytes)                         → isClip=true (SPEC §2.5.3 갱신),
+//                                                             not convertable (§2.9 결과물)
+//   - photo.jpg   (tiny JPEG bytes)                         → isClip=false, non-clip
 func TestClipToWebP_E2E(t *testing.T) {
 	dataDir := t.TempDir()
 	clips := filepath.Join(dataDir, "clips")
@@ -61,6 +63,10 @@ func TestClipToWebP_E2E(t *testing.T) {
 
 	// clip.gif — tiny GIF89a header is enough for browse to identify mime.
 	writeBytes(t, filepath.Join(clips, "clip.gif"), tinyGIF())
+	// clip.webp — SPEC §2.5.3 says all WebPs are clips, but §2.9 excludes
+	// them from the convertable input set (already a result). Browse does
+	// extension-based mime mapping so any bytes work for the fixture.
+	writeBytes(t, filepath.Join(clips, "clip.webp"), []byte("dummy-webp"))
 	// photo.jpg — non-clip control entry.
 	writeBytes(t, filepath.Join(clips, "photo.jpg"), tinyJPEG())
 
@@ -82,13 +88,49 @@ func TestClipToWebP_E2E(t *testing.T) {
 	}
 
 	// Scenario 1: clip tab shows "모든 움짤 WebP로 변환 (2개)".
+	// Three cards are visible (short.mp4, clip.gif, clip.webp) but only the
+	// two convertable ones (gif + short video) feed the batch label —
+	// clip.webp is a result, not an input.
 	t.Run("clip_tab_shows_batch_button", func(t *testing.T) {
 		hidden, label := readWebPBatchBtn(t, runCtx)
 		if hidden {
 			t.Errorf("button hidden, want visible on clip tab")
 		}
 		if !strings.Contains(label, "모든 움짤 WebP로 변환") || !strings.Contains(label, "2") {
-			t.Errorf("label = %q, want '모든 움짤 WebP로 변환 (2개)'", label)
+			t.Errorf("label = %q, want '모든 움짤 WebP로 변환 (2개)' (webp excluded)", label)
+		}
+		var paths string
+		if err := chromedp.Run(runCtx,
+			chromedp.Evaluate(`document.getElementById('convert-webp-all-btn').dataset.paths`, &paths),
+		); err != nil {
+			t.Fatalf("read dataset.paths: %v", err)
+		}
+		if strings.Contains(paths, "clip.webp") {
+			t.Errorf("dataset.paths includes clip.webp (must be excluded): %s", paths)
+		}
+		if !strings.Contains(paths, "short.mp4") || !strings.Contains(paths, "clip.gif") {
+			t.Errorf("dataset.paths missing convertable entries: %s", paths)
+		}
+	})
+
+	// Scenario 1b: clip tab actually shows clip.webp as a card (SPEC §2.5.3
+	// — WebP is now classified as a clip). Verifies the classification
+	// change isn't accidentally reverted.
+	t.Run("clip_tab_includes_webp_card", func(t *testing.T) {
+		var got bool
+		js := `(() => {
+  const cards = document.querySelectorAll('.thumb-card');
+  for (const c of cards) {
+    const cb = c.querySelector('input[type="checkbox"]');
+    if (cb && cb.getAttribute('aria-label') === 'clip.webp 선택') return true;
+  }
+  return false;
+})()`
+		if err := chromedp.Run(runCtx, chromedp.Evaluate(js, &got)); err != nil {
+			t.Fatalf("eval: %v", err)
+		}
+		if !got {
+			t.Errorf("clip.webp card not visible in clip tab — webp not classified as clip")
 		}
 	})
 
@@ -122,10 +164,27 @@ func TestClipToWebP_E2E(t *testing.T) {
 		}
 	})
 
-	// Scenario 3: per-card "WEBP" button present on clip-eligible entries
-	// (short.mp4 video clip + clip.gif), absent on non-clip entries.
+	// Scenario 2b: selecting only clip.webp → button hidden because webp is
+	// classified as a clip but excluded from convertable inputs.
+	t.Run("webp_only_selection_hides_button", func(t *testing.T) {
+		if err := chromedp.Run(runCtx,
+			chromedp.Evaluate(`document.getElementById('clear-selection-btn').click()`, nil),
+			chromedp.Sleep(100*time.Millisecond),
+			clickEntryCheckbox("clip.webp"),
+			chromedp.Sleep(100*time.Millisecond),
+		); err != nil {
+			t.Fatalf("select clip.webp only: %v", err)
+		}
+		hidden, _ := readWebPBatchBtn(t, runCtx)
+		if !hidden {
+			t.Errorf("button visible with webp-only selection, want hidden (webp not convertable)")
+		}
+	})
+
+	// Scenario 3: per-card "WEBP" button present on convertable entries
+	// (short.mp4 + clip.gif), absent on non-clip entries AND on clip.webp
+	// (classified as clip but not a valid input — already a result).
 	t.Run("card_buttons_match_clip_eligibility", func(t *testing.T) {
-		// Move to all-tab so every entry renders.
 		if err := chromedp.Run(runCtx,
 			chromedp.Navigate(server.URL+"?path=/clips&type=all"),
 			chromedp.WaitVisible(`.thumb-card`, chromedp.ByQuery),
@@ -138,6 +197,7 @@ func TestClipToWebP_E2E(t *testing.T) {
 		assertCardWebPBtn(t, runCtx, "long.mp4", false)
 		assertCardWebPBtn(t, runCtx, "big.mp4", false)
 		assertCardWebPBtn(t, runCtx, "photo.jpg", false)
+		assertCardWebPBtn(t, runCtx, "clip.webp", false)
 	})
 
 	// Scenario 4: video tab hides the batch button even though clip-eligible
@@ -158,7 +218,7 @@ func TestClipToWebP_E2E(t *testing.T) {
 	})
 
 	// Scenario 5: image tab also hides the batch button (same gate). Per
-	// SPEC §2.5.3 the image tab excludes GIF clips outright, so we only
+	// SPEC §2.5.3 the image tab excludes GIF/WebP clips outright, so we only
 	// verify the batch button is hidden and photo.jpg lacks the WEBP button.
 	t.Run("image_tab_hides_batch_button", func(t *testing.T) {
 		if err := chromedp.Run(runCtx,
