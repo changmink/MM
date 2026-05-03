@@ -172,20 +172,29 @@ func (h *Handler) Close() {
 	}
 }
 
-// writeError emits a JSON error body and (for 5xx, or any non-nil err) logs
-// the underlying cause with request context. Pass nil for err on plain 4xx
-// validation failures where the message is the whole story.
+// writeError emits a JSON error body. 5xx 응답과 err != nil인 client 실수를
+// 분리해서 로그한다 — 5xx는 server malfunction을 의미하므로 Error, 4xx + err
+// (e.g. JSON parse 실패)은 운영자 진단용 Warn으로. 둘 다 아닌 plain 4xx는
+// 기록하지 않는다 (의도적 client 거부 — 정상 동작).
 func writeError(w http.ResponseWriter, r *http.Request, code int, msg string, err error) {
-	if code >= 500 || err != nil {
+	switch {
+	case code >= 500:
 		slog.Error("request failed",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", code,
-			"msg", msg,
-			"err", err,
+			"method", r.Method, "path", r.URL.Path,
+			"status", code, "msg", msg, "err", err,
+		)
+	case err != nil:
+		slog.Warn("request rejected",
+			"method", r.Method, "path", r.URL.Path,
+			"status", code, "msg", msg, "err", err,
 		)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	if encErr := json.NewEncoder(w).Encode(map[string]string{"error": msg}); encErr != nil {
+		// 클라이언트가 mid-error로 끊기면 진단을 위해 흔적 정도만 남긴다.
+		slog.Debug("error response encode failed",
+			"method", r.Method, "path", r.URL.Path, "err", encErr,
+		)
+	}
 }
