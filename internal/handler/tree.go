@@ -17,14 +17,14 @@ import (
 
 const maxTreeDepth = 5
 
-// treeNode is a folder-only navigation node.
+// treeNode는 폴더 전용 내비게이션 노드다.
 //
-//	Children == nil   → not loaded (depth limit reached, more exists)
-//	Children == []    → loaded, no children
-//	Children == [...] → loaded children
+//	Children == nil   → 로드되지 않음(depth 한도에 도달했고 더 있음)
+//	Children == []    → 로드됨, 자식 없음
+//	Children == [...] → 자식 로드됨
 //
-// HasChildren is always populated so the UI can render an expand chevron
-// without needing to follow up with another request.
+// HasChildren은 항상 채워지므로 UI가 추가 요청 없이도 expand chevron을
+// 렌더링할 수 있다.
 type treeNode struct {
 	Path        string     `json:"path"`
 	Name        string     `json:"name"`
@@ -89,9 +89,9 @@ func (h *Handler) handleTree(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, r, http.StatusOK, root)
 }
 
-// walkTree returns the immediate child folders of dirAbs. When depth > 1 it
-// recurses into each child reducing depth by 1; at depth == 1 each child's
-// Children is left as nil (more) or [] (none) per HasChildren.
+// walkTree는 dirAbs의 직속 자식 폴더를 반환한다. depth > 1이면 각 자식으로
+// depth-1로 재귀한다. depth == 1에서는 각 자식의 Children을 HasChildren에
+// 따라 nil(더 있음) 또는 []로 둔다.
 func walkTree(dirAbs, dirRel string, depth int) ([]treeNode, bool, error) {
 	entries, err := os.ReadDir(dirAbs)
 	if err != nil {
@@ -100,7 +100,7 @@ func walkTree(dirAbs, dirRel string, depth int) ([]treeNode, bool, error) {
 
 	dirs := make([]os.DirEntry, 0, len(entries))
 	for _, e := range entries {
-		// .thumb and any other dotfile/dotdir is server-internal; never expose.
+		// .thumb를 비롯한 모든 dotfile/dotdir은 서버 내부 항목이라 노출하지 않는다.
 		if strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
@@ -127,9 +127,9 @@ func walkTree(dirAbs, dirRel string, depth int) ([]treeNode, bool, error) {
 		if depth > 1 {
 			grand, hasGrand, err := walkTree(childAbs, childRel, depth-1)
 			if err != nil {
-				// One unreadable subdir shouldn't fail the whole tree;
-				// surface as "no children" but log so operators can trace
-				// permission/IO problems instead of seeing silent blanks.
+				// 한 개의 읽기 불가 subdir이 트리 전체를 실패시켜선 안 된다.
+				// "자식 없음"으로 표면화하되, 운영자가 권한/IO 문제를 추적할 수
+				// 있도록 로그를 남긴다 — 조용한 빈 칸이 되지 않게.
 				slog.Debug("tree walk: subdir unreadable", "path", childAbs, "err", err)
 				node.Children = []treeNode{}
 				node.HasChildren = false
@@ -144,7 +144,7 @@ func walkTree(dirAbs, dirRel string, depth int) ([]treeNode, bool, error) {
 			}
 			node.HasChildren = has
 			if has {
-				node.Children = nil // not loaded — UI lazy-fetches on expand
+				node.Children = nil // 로드되지 않음 — UI가 expand 시 lazy fetch 한다
 			} else {
 				node.Children = []treeNode{}
 			}
@@ -154,19 +154,19 @@ func walkTree(dirAbs, dirRel string, depth int) ([]treeNode, bool, error) {
 	return children, true, nil
 }
 
-// dirHasSubdirs probes whether dirAbs contains at least one non-hidden
-// subdirectory. Used at the depth boundary to set HasChildren without
-// loading grandchildren. Returns (false, err) on a real read error so
-// the caller can log it — previously any error, including IO failures,
-// was mapped to (false, nil) and hid problems from operators.
+// dirHasSubdirs는 dirAbs에 숨겨지지 않은 subdirectory가 하나라도 있는지
+// 확인한다. depth 경계에서 grandchild를 로드하지 않고 HasChildren을 설정할
+// 때 쓴다. 실제 읽기 오류가 발생하면 (false, err)를 반환해 호출자가 로그를
+// 남길 수 있게 한다 — 예전에는 IO 실패까지 포함해 모든 에러를 (false, nil)로
+// 매핑해 운영자에게 문제를 가렸다.
 func dirHasSubdirs(dirAbs string) (bool, error) {
 	f, err := os.Open(dirAbs)
 	if err != nil {
 		return false, err
 	}
 	defer f.Close()
-	// Read in small batches and bail on the first hit so a directory
-	// of thousands of files doesn't trigger a full scan just to set a bool.
+	// 작은 배치로 읽고 처음 일치하는 항목에서 빠져나간다 — 그래야 파일이
+	// 수천 개인 디렉터리가 단순 bool 하나를 위해 전체 스캔되지 않는다.
 	for {
 		batch, err := f.ReadDir(64)
 		for _, e := range batch {
@@ -186,8 +186,8 @@ func dirHasSubdirs(dirAbs string) (bool, error) {
 	}
 }
 
-// normalizeTreeRel returns rel as a slash-prefixed POSIX path with no
-// trailing slash, except the root which is "/".
+// normalizeTreeRel은 rel을 후행 슬래시 없는 슬래시 prefix POSIX 경로로
+// 반환한다. 루트는 예외적으로 "/"다.
 func normalizeTreeRel(rel string) string {
 	if rel == "" || rel == "/" {
 		return "/"
@@ -203,7 +203,7 @@ func joinTreeRel(parent, name string) string {
 	return parent + "/" + name
 }
 
-// nodeName returns the display name for a tree node — empty string for root.
+// nodeName은 트리 노드의 표시 이름을 반환한다. 루트는 빈 문자열이다.
 func nodeName(rel string) string {
 	r := normalizeTreeRel(rel)
 	if r == "/" {

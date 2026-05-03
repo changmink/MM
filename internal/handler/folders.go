@@ -62,7 +62,7 @@ func (h *Handler) moveFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reject moving into the same parent — same rule as moveFile.
+	// 같은 부모로의 이동은 거부한다 — moveFile과 동일한 규칙.
 	if filepath.Clean(filepath.Dir(srcAbs)) == filepath.Clean(destAbs) {
 		writeError(w, r, http.StatusBadRequest, "same directory", nil)
 		return
@@ -148,12 +148,12 @@ func (h *Handler) renameFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// parentAbs was safe-checked via srcAbs; body.Name has no separators
-	// per validateName; join cannot escape the root.
+	// parentAbs는 srcAbs를 통해 이미 safe-check 되었고, body.Name은
+	// validateName이 separator를 막아주므로 join이 root를 탈출할 수 없다.
 	dstAbs := filepath.Join(filepath.Dir(srcAbs), body.Name)
 
-	// Case-only rename (movies → Movies) must skip the existence check
-	// because Stat on a case-insensitive FS resolves to the source itself.
+	// 대소문자만 다른 rename(movies → Movies)은 존재 검사를 건너뛰어야 한다
+	// — case-insensitive FS에서 Stat이 source 자체로 해석되기 때문이다.
 	caseOnly := strings.EqualFold(fi.Name(), body.Name) && fi.Name() != body.Name
 	if !caseOnly {
 		if _, err := os.Stat(dstAbs); err == nil {
@@ -162,10 +162,10 @@ func (h *Handler) renameFolder(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Single OS rename moves the directory atomically; contents (including
-	// .thumb/ subdirectory) follow automatically — no sidecar bookkeeping.
-	// A concurrent creator winning the Stat→Rename gap is an accepted race;
-	// see SPEC §9 "known limitations" (single-user deployment target).
+	// 단일 OS rename이 디렉터리를 원자적으로 이동시킨다. .thumb/ 서브디렉터리
+	// 포함 내용물이 자동으로 따라가므로 별도 사이드카 처리가 필요 없다.
+	// Stat→Rename 사이를 동시 생성자가 차지하는 race는 허용된다 — SPEC §9
+	// "known limitations" (단일 사용자 배포 대상) 참조.
 	if err := os.Rename(srcAbs, dstAbs); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "rename failed", err)
 		return
@@ -229,7 +229,7 @@ func (h *Handler) deleteFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// prevent deleting the root data directory itself
+	// 루트 데이터 디렉터리 자체의 삭제를 막는다
 	if abs == filepath.Clean(h.dataDir) {
 		writeError(w, r, http.StatusBadRequest, "cannot delete root", nil)
 		return

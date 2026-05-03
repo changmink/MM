@@ -18,11 +18,11 @@ func writeSSEHeaders(w http.ResponseWriter) {
 	handlerutil.WriteSSEHeaders(w)
 }
 
-// sseEmitter — see handlerutil.NewSSEEmitter for the full contract. Use only
-// when more than one goroutine in a handler can call emit concurrently;
-// single-goroutine event pumps (e.g. Job.Publish drained in one for-range
-// loop — see handleImportURL / handleSubscribeJob) should call
-// writeSSEEvent directly to avoid a redundant lock per frame.
+// sseEmitter — 전체 계약은 handlerutil.NewSSEEmitter 참조. 핸들러 안에서
+// 두 개 이상의 고루틴이 emit을 동시에 호출할 때만 사용한다. 단일 고루틴
+// 이벤트 펌프(예: Job.Publish를 단일 for-range로 드레인하는
+// handleImportURL / handleSubscribeJob)는 프레임마다 불필요한 잠금을
+// 피하기 위해 writeSSEEvent를 직접 호출하는 게 좋다.
 func sseEmitter(w http.ResponseWriter, flusher http.Flusher) func(any) {
 	return handlerutil.NewSSEEmitter(w, flusher)
 }

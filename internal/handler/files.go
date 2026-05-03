@@ -63,8 +63,8 @@ func (h *Handler) deleteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// remove sidecar thumbnail (and duration sidecar for videos). Both are
-	// best-effort: a stale .jpg simply gets overwritten on next generation.
+	// 사이드카 썸네일을(영상은 duration 사이드카까지 포함해) 제거한다.
+	// 둘 다 best-effort다 — 잔재 .jpg는 다음 생성 시 덮어써진다.
 	if media.IsImage(fi.Name()) || media.IsVideo(fi.Name()) {
 		thumbPath := filepath.Join(filepath.Dir(abs), ".thumb", fi.Name()+".jpg")
 		os.Remove(thumbPath)
@@ -98,8 +98,8 @@ func (h *Handler) moveFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reject moving into the same directory: it's almost always a UI mistake,
-	// and silently succeeding would still apply a _N suffix (cosmetic noise).
+	// 같은 디렉터리로의 이동은 거부한다 — 거의 항상 UI 실수이며, 조용히
+	// 성공시키면 _N 접미사가 붙어 미관상 잡음이 된다.
 	if filepath.Clean(filepath.Dir(srcAbs)) == filepath.Clean(destAbs) {
 		writeError(w, r, http.StatusBadRequest, "same directory", nil)
 		return
@@ -162,8 +162,8 @@ func (h *Handler) renameFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rename keeps the original extension. Strip any extension the user
-	// may have included so "new.mkv" on an .mp4 file becomes "new.mp4".
+	// rename은 원본 확장자를 유지한다. 사용자가 입력한 확장자는 떼어내,
+	// .mp4 파일에 대한 "new.mkv"는 "new.mp4"가 되도록 한다.
 	oldName := fi.Name()
 	origExt := fileExtension(oldName)
 	newBase := stripTrailingExt(body.Name)
@@ -182,8 +182,8 @@ func (h *Handler) renameFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// parentAbs was safe-checked via srcAbs; newName has no path separators
-	// per validateName; join cannot escape the root.
+	// parentAbs는 srcAbs를 통해 이미 safe-check 되었고, newName은
+	// validateName이 path separator를 막아주므로 join이 root를 탈출할 수 없다.
 	parentAbs := filepath.Dir(srcAbs)
 	dstAbs := filepath.Join(parentAbs, newName)
 
@@ -210,12 +210,12 @@ func (h *Handler) renameFile(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// renameThumbSidecars moves .thumb/{oldName}.jpg and (for videos) its .dur
-// sidecar to match a renamed source file. oldName and newName must be
-// basenames only — a caller passing a path-with-slashes would silently
-// produce a wrong thumb path. validateName on the rename entry points
-// guarantees this today. Sidecar failures are logged but never block
-// success — the next /api/thumb request will regenerate them.
+// renameThumbSidecars는 rename된 원본 파일에 맞춰 .thumb/{oldName}.jpg와
+// (영상의 경우) 그 .dur 사이드카를 옮긴다. oldName과 newName은 basename만
+// 와야 한다 — 슬래시가 들어간 경로를 호출자가 넘기면 조용히 잘못된 thumb
+// 경로를 만든다. 현재로선 rename 진입부의 validateName이 이를 보장한다.
+// 사이드카 실패는 로그만 남기고 성공을 막지 않는다 — 다음 /api/thumb
+// 요청이 재생성한다.
 func renameThumbSidecars(parentAbs, oldName, newName string) {
 	if !media.IsImage(oldName) && !media.IsVideo(oldName) {
 		return

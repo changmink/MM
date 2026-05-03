@@ -28,12 +28,12 @@ type webpConvertRequest struct {
 	DeleteOriginal bool     `json:"delete_original"`
 }
 
-// handleConvertWebP drives the SSE batch endpoint for clip ??animated WebP
-// conversion. Wire schema mirrors POST /api/convert (TS ??MP4) ??same
-// start/progress/done/error/summary phases ??so the frontend can reuse the
-// SSE consumer pattern. Per-file gate validation (GIF unconditional /
-// video ??0MiB && ??0s) runs before any encoding work and surfaces as a
-// terminal error event, not an HTTP error.
+// handleConvertWebP은 클립 → 애니메이션 WebP 변환을 위한 SSE 배치
+// 엔드포인트를 구동한다. wire 스키마는 POST /api/convert(TS → MP4)와
+// 같은 start/progress/done/error/summary phase를 사용하므로 프론트엔드가
+// SSE 소비 패턴을 재사용한다. 파일별 자격 검증(GIF는 무조건, 영상은
+// ≤50MiB && ≤30s)이 어떤 인코딩 작업보다 먼저 실행되며, HTTP 오류가 아닌
+// terminal error 이벤트로 표면화된다.
 func (h *Handler) HandleConvertWebP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
@@ -75,9 +75,9 @@ func (h *Handler) HandleConvertWebP(w http.ResponseWriter, r *http.Request) {
 	emit(convSummary{Phase: "summary", Succeeded: succeeded, Failed: failed})
 }
 
-// convertWebPOneSSE drives one clip ??WebP conversion and emits exactly one
-// terminal event (done or error) plus zero-or-one start and zero-or-more
-// progress events. Returns true on success.
+// convertWebPOneSSE는 클립 → WebP 변환 하나를 구동하고 정확히 한 번의
+// terminal 이벤트(done 또는 error), start 0~1회, progress 0회 이상을
+// 발행한다. 성공 시 true를 반환한다.
 func (h *Handler) convertWebPOneSSE(parentCtx context.Context, emit func(any),
 	index int, relPath string, deleteOriginal bool) bool {
 
@@ -105,16 +105,16 @@ func (h *Handler) convertWebPOneSSE(parentCtx context.Context, emit func(any),
 	ext := strings.ToLower(filepath.Ext(origName))
 	srcDir := filepath.Dir(abs)
 
-	// Eligibility gate. SPEC §2.9 + §2.5.3 server-side re-validation. GIFs
-	// are unconditionally clips (no size or duration check). Videos must
-	// pass both the size cap and duration cap; we read duration from the
-	// thumb sidecar (cheap) and fall back to ffprobe one-shot when missing.
+	// 자격 게이트. SPEC §2.9 + §2.5.3 서버 측 재검증. GIF는 크기·duration
+	// 검사 없이 무조건 클립으로 본다. 영상은 크기 상한과 duration 상한을
+	// 모두 통과해야 한다 — duration은 thumb 사이드카(저렴)에서 읽고, 없으면
+	// ffprobe one-shot으로 폴백한다.
 	var inputType string
 	var hasAudio bool
 	switch {
 	case ext == ".gif":
 		inputType = "image"
-		// GIF containers carry no audio stream ??skip ProbeStreamInfo.
+		// GIF 컨테이너는 오디오 스트림이 없다 — ProbeStreamInfo를 건너뛴다.
 	case media.IsVideo(origName):
 		if fi.Size() > clipMaxBytes {
 			return emitErr("not_clip")
@@ -126,8 +126,8 @@ func (h *Handler) convertWebPOneSSE(parentCtx context.Context, emit func(any),
 		if *dur > clipMaxDurationSec {
 			return emitErr("not_clip")
 		}
-		// Audio detection is best-effort; on probe failure we skip the
-		// audio_dropped warning rather than failing the conversion.
+		// 오디오 감지는 best-effort다. probe 실패 시 변환을 실패시키는 대신
+		// audio_dropped 경고를 건너뛴다.
 		_, ha, perr := convert.ProbeStreamInfo(abs)
 		if perr != nil {
 			slog.Warn("convert-webp: ProbeStreamInfo failed",
@@ -139,8 +139,7 @@ func (h *Handler) convertWebPOneSSE(parentCtx context.Context, emit func(any),
 		return emitErr("unsupported_input")
 	}
 
-	// Output filename: <base>.webp, base name preserved, extension always
-	// lowercase. SPEC §2.9.
+	// 출력 파일명: <base>.webp, base는 보존하고 확장자는 항상 소문자. SPEC §2.9.
 	base := strings.TrimSuffix(origName, filepath.Ext(origName))
 	finalName := base + ".webp"
 	finalPath := filepath.Join(srcDir, finalName)
@@ -154,14 +153,13 @@ func (h *Handler) convertWebPOneSSE(parentCtx context.Context, emit func(any),
 	unlock := handlerutil.LockPath(h.webpLocks, abs)
 	defer unlock()
 
-	// Re-check after lock: another concurrent request might have produced
-	// the .webp while we were waiting.
+	// 잠금 후 재확인: 우리가 대기하는 동안 다른 동시 요청이 .webp를 만들었을 수 있다.
 	if _, err := os.Stat(finalPath); err == nil {
 		return emitErr("already_exists")
 	}
 
-	// Build the slash-prefixed relative path of the final WebP for the done
-	// event so the client can point loadBrowse() at the same folder.
+	// done 이벤트용 최종 WebP의 슬래시 prefix 상대 경로를 만들어, 클라이언트가
+	// loadBrowse()를 같은 폴더로 가리킬 수 있게 한다.
 	finalRel := filepath.Join(filepath.Dir(relPath), finalName)
 	finalRel = filepath.ToSlash(finalRel)
 	if !strings.HasPrefix(finalRel, "/") {
@@ -201,8 +199,9 @@ func (h *Handler) convertWebPOneSSE(parentCtx context.Context, emit func(any),
 
 	if rerr != nil {
 		code := classifyConvertError(rerr, parentCtx)
-		// classifyConvertError maps DeadlineExceeded to "convert_timeout";
-		// retain that wire code (matches SPEC §5.1 for /api/convert-webp).
+		// classifyConvertError는 DeadlineExceeded를 "convert_timeout"로
+		// 매핑한다 — 그 wire 코드를 그대로 둔다(SPEC §5.1의
+		// /api/convert-webp와 일치).
 		logConvertError(relPath, rerr, code)
 		return emitErr(code)
 	}
@@ -224,27 +223,29 @@ func (h *Handler) convertWebPOneSSE(parentCtx context.Context, emit func(any),
 	return true
 }
 
-// videoDurationForGate returns the cached duration sidecar value if present,
-// otherwise probes via ffprobe (writing a sidecar for future calls). Returns
-// nil when duration cannot be determined ??caller surfaces as
-// "duration_unknown". The thumb sidecar lives at <srcDir>/.thumb/<name>.jpg.dur.
+// videoDurationForGate는 캐시된 duration 사이드카 값이 있으면 반환하고,
+// 없으면 ffprobe로 probe해 (이후 호출을 위해 사이드카를 쓰면서) 반환한다.
+// duration을 결정할 수 없으면 nil을 반환한다 — 호출자는 이를
+// "duration_unknown"으로 표면화한다. thumb 사이드카는
+// <srcDir>/.thumb/<name>.jpg.dur 위치에 있다.
 func videoDurationForGate(srcDir, origName, absVideoPath string) *float64 {
 	thumbPath := filepath.Join(srcDir, ".thumb", origName+".jpg")
 	if dur := thumb.LookupDuration(thumbPath); dur != nil {
 		return dur
 	}
-	// BackfillDuration writes the sidecar best-effort; a write failure
-	// (read-only thumb dir) does not block the gate decision.
+	// BackfillDuration은 사이드카를 best-effort로 쓴다 — 쓰기 실패(예:
+	// 읽기 전용 thumb 디렉터리)는 gate 결정을 막지 않는다.
 	if dur := thumb.BackfillDuration(thumbPath, absVideoPath); dur != nil {
 		return dur
 	}
 	return nil
 }
 
-// deleteOriginalAndSidecars removes the source clip and its .thumb sidecars
-// (best-effort). Returns "delete_original_failed" on any failure that isn't
-// a missing file, "" on success. inputType selects which sidecars to clean:
-// videos own both .jpg and .jpg.dur, GIFs only .jpg.
+// deleteOriginalAndSidecars는 소스 클립과 그 .thumb 사이드카들을
+// (best-effort로) 제거한다. 파일 부재가 아닌 어떤 실패에서든
+// "delete_original_failed"를 반환하고, 성공 시 ""를 반환한다. inputType은
+// 어떤 사이드카를 정리할지 결정한다 — 영상은 .jpg와 .jpg.dur 둘 다, GIF는
+// .jpg만이다.
 func deleteOriginalAndSidecars(abs, inputType string) string {
 	srcDir := filepath.Dir(abs)
 	origName := filepath.Base(abs)

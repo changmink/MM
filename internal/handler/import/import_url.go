@@ -23,14 +23,14 @@ import (
 
 const (
 	maxImportURLs = 500
-	// maxImportURLLength bounds individual URL strings so the registry cannot
-	// be force-fed arbitrarily large blobs that later surface verbatim through
-	// GET /api/import-url/jobs. 2 KB is well above any legitimate signed-URL
-	// length seen in practice (S3, Cloudfront, Mux ~1.5 KB worst case).
+	// maxImportURLLength는 개별 URL 문자열의 상한이다. 임의로 큰 blob을
+	// 레지스트리에 강제로 밀어넣어 GET /api/import-url/jobs로 그대로 노출
+	// 되는 것을 막는다. 2 KB는 실제 정상 signed URL 길이(S3, Cloudfront, Mux의
+	// 최악 ~1.5 KB)보다 충분히 크다.
 	maxImportURLLength = 2048
-	// progressChanBuffer lets the Fetch goroutine drop samples instead of
-	// blocking when broadcast falls behind. A slow subscriber must never
-	// stall the download.
+	// progressChanBuffer는 broadcast가 뒤처졌을 때 Fetch 고루틴이 블록하지
+	// 않고 샘플을 떨어뜨릴 수 있게 해준다. 느린 구독자가 다운로드를 멈춰
+	// 세워서는 안 된다.
 	progressChanBuffer = 16
 	// importURLWorkers는 한 URL import 배치 안에서 동시에 받을 URL의 상한.
 	// HLS와 달리 origin이 동일하다는 보장이 없어 보수적으로 2. process-wide
@@ -43,10 +43,10 @@ type importRequest struct {
 	URLs []string `json:"urls"`
 }
 
-// sseRegister is the first frame of the POST response. It hands the client
-// the jobId so a refresh can re-subscribe via GET /jobs/{id}/events. It is
-// written directly to the request writer (not via Job.Publish) ??register is
-// per-request metadata, not job state, so other subscribers do not see it.
+// sseRegister는 POST 응답의 첫 프레임이다. 클라이언트에게 jobId를 넘겨,
+// 새로 고침 시 GET /jobs/{id}/events로 재구독할 수 있게 한다. Job.Publish가
+// 아니라 요청 writer로 직접 쓴다 — register는 요청별 메타데이터지 Job 상태가
+// 아니므로 다른 구독자에게 보일 필요가 없다.
 type sseRegister struct {
 	Phase string `json:"phase"` // always "register"
 	JobID string `json:"jobId"`
@@ -57,10 +57,10 @@ type sseStart struct {
 	Index int    `json:"index"`
 	URL   string `json:"url"`
 	Name  string `json:"name"`
-	// Total is the Content-Length advertised by the origin. HLS has no total
-	// byte count (variable-bitrate remux of streaming segments), so it arrives
-	// as 0 and is omitted from the wire via omitempty ??clients use this
-	// absence to render an indeterminate progress bar.
+	// Total은 origin이 광고한 Content-Length다. HLS는 총 바이트 개수가 없으므로
+	// (스트리밍 세그먼트의 가변 비트레이트 remux) 0으로 도착하고 omitempty로
+	// wire에서 빠진다 — 클라이언트는 이 부재를 보고 진행률을 indeterminate
+	// progress bar로 렌더링한다.
 	Total int64  `json:"total,omitempty"`
 	Type  string `json:"type"`
 }
@@ -96,13 +96,11 @@ type sseSummary struct {
 	Cancelled int    `json:"cancelled,omitempty"`
 }
 
-// sseQueued is the first event published into the job's event stream ??it
-// fires before the handler tries to acquire the process-wide import
-// semaphore. When no other batch is in flight the subsequent semaphore
-// acquire returns immediately and `start` follows without the UI ever
-// rendering the queued state; when another batch holds the semaphore the
-// client has an explicit signal to display "waiting" instead of a stalled
-// progress bar.
+// sseQueued는 Job의 이벤트 스트림에 가장 먼저 발행되는 이벤트다 — 핸들러가
+// 프로세스 단위 import 세마포어를 획득하기 전에 발사된다. 다른 배치가 진행
+// 중이 아니면 뒤이은 세마포어 획득이 즉시 반환되고 `start`가 따라붙어 UI는
+// queued 상태를 렌더링할 일이 없다. 다른 배치가 세마포어를 잡고 있으면
+// 클라이언트는 멈춘 progress bar 대신 "대기 중"을 표시할 명확한 신호를 갖는다.
 type sseQueued struct {
 	Phase string `json:"phase"` // always "queued"
 }
@@ -165,32 +163,31 @@ func (h *Handler) HandleImportURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Subscribe before spawning the worker so the handler cannot miss the
-	// initial queued event the worker will publish immediately.
+	// 워커를 띄우기 전에 Subscribe해 워커가 즉시 발행할 초기 queued 이벤트를
+	// 핸들러가 놓치지 않게 한다.
 	events, unsubscribe := job.Subscribe()
 	defer unsubscribe()
 
-	// Snapshot settings at request arrival time (before queueing) so a PATCH
-	// while this batch is waiting for the semaphore does not change the
-	// cap/timeout it eventually runs with.
+	// 요청 도착 시점(queue 진입 전)에 settings를 스냅샷한다. 이 배치가
+	// 세마포어를 기다리는 동안 PATCH가 들어와도 결국 실행될 때의 cap/timeout이
+	// 바뀌지 않게 한다.
 	snap := h.settingsSnapshot()
 
-	// Worker drives the actual import in the background. It uses job.Ctx()
-	// (server-lifetime, cancellable on shutdown or user-issued Cancel) instead
-	// of the request context so the download keeps running after the client
-	// closes its tab or refreshes.
+	// 워커는 백그라운드에서 실제 import를 구동한다. 요청 컨텍스트가 아닌
+	// job.Ctx()(서버 수명, shutdown이나 사용자 Cancel로 취소 가능)를 쓴다 —
+	// 그래야 클라이언트가 탭을 닫거나 새로 고침해도 다운로드가 계속된다.
 	go h.runImportJob(job, snap, destAbs)
 
 	writeSSEHeaders(w)
 
-	// Hand the jobId to the client straight away so a refresh can rebind to
-	// this job via GET /api/import-url/jobs/{id}/events (added in J4).
+	// jobId를 즉시 클라이언트에 넘긴다 — 새로 고침 시
+	// GET /api/import-url/jobs/{id}/events(J4에 추가됨)로 이 Job에 다시 바인딩할 수 있다.
 	writeSSEEvent(w, flusher, sseRegister{Phase: "register", JobID: job.ID})
 
-	// Pump events from the job into the SSE stream. The summary frame is the
-	// last live event a job emits, so the handler can return as soon as it is
-	// flushed without coordinating with the worker. Client disconnect short-
-	// circuits via r.Context() but never cancels the job.
+	// Job의 이벤트를 SSE 스트림으로 펌프한다. summary 프레임이 Job의 마지막
+	// 라이브 이벤트이므로, flush가 끝나는 즉시 워커와의 조율 없이 핸들러가
+	// 반환할 수 있다. 클라이언트가 끊으면 r.Context()로 short-circuit 되지만,
+	// Job 자체는 절대 취소하지 않는다.
 	for {
 		select {
 		case ev, ok := <-events:
@@ -208,36 +205,33 @@ func (h *Handler) HandleImportURL(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// runImportJob is the worker goroutine that drives one import batch. It
-// owns the URLState mutations and SSE event publication; the HTTP handler
-// is just one of (potentially) many subscribers and never touches Job state
-// directly.
+// runImportJob은 import 배치 하나를 구동하는 워커 고루틴이다. URLState
+// 변형과 SSE 이벤트 발행을 소유한다. HTTP 핸들러는 (잠재적으로) 다수
+// 구독자 중 하나일 뿐이며 Job 상태를 직접 건드리지 않는다.
 //
-// The deferred recover guarantees that even on a panic in urlfetch / ffmpeg
-// helpers the job lands in a terminal state ??without it the goroutine dies
-// silently, Done() never closes, the slot stays counted against
-// MaxQueuedJobs forever, and Handler.Close stalls the full WaitAll
-// deadline on shutdown.
+// defer recover는 urlfetch / ffmpeg 헬퍼에서 panic이 나도 Job이 terminal
+// 상태에 도달함을 보장한다 — 이게 없으면 고루틴이 조용히 죽어 Done()이
+// 닫히지 않고, MaxQueuedJobs 슬롯이 영구 점유되며, shutdown 시
+// Handler.Close가 WaitAll 데드라인을 가득 채워 멈춘다.
 func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destAbs string) {
 	defer func() { recoverImportJob(recover(), job) }()
 
 	maxBytes := snap.URLImportMaxBytes
 	perURLTimeout := time.Duration(snap.URLImportTimeoutSeconds) * time.Second
 
-	// Tell the world this batch is queued. Even when the semaphore is free
-	// the event still fires; the gap before `start` is just shorter.
+	// 이 배치가 queued 상태임을 알린다. 세마포어가 비어 있어도 이벤트는
+	// 그대로 발사되며, `start`까지의 간격이 더 짧을 뿐이다.
 	job.Publish(mustEvent("queued", sseQueued{Phase: "queued"}))
 
-	// Acquire the process-wide batch semaphore. importSem is paired with
-	// job.Ctx() so a graceful-shutdown cancel unblocks the wait ??request
-	// context is intentionally NOT used so closing the browser tab does not
-	// abort the queue position.
+	// 프로세스 단위 배치 세마포어를 획득한다. importSem은 job.Ctx()와 짝을
+	// 이뤄 graceful-shutdown 취소가 대기를 풀어준다 — 요청 컨텍스트는 의도적으로
+	// 쓰지 않아, 브라우저 탭을 닫아도 큐 위치를 잃지 않는다.
 	select {
 	case h.importSem <- struct{}{}:
 		defer func() { <-h.importSem }()
 	case <-job.Ctx().Done():
-		// Cancelled before acquiring the semaphore ??every URL is reported
-		// cancelled, no Start/Done was ever emitted.
+		// 세마포어 획득 전에 취소됨 — 모든 URL을 cancelled로 보고하고
+		// Start/Done은 하나도 발행되지 않은 상태다.
 		urls := job.Snapshot().URLs
 		cancelled := cancelRemainingURLs(job, urls, 0)
 		finalizeBatch(job, 0, 0, cancelled)
@@ -277,18 +271,17 @@ func (h *Handler) runImportURLWorkers(job *importjob.Job, urls []importjob.URLSt
 		go func() {
 			defer wg.Done()
 			for task := range tasks {
-				// Two pre-fetch guards: batch cancel (job.Ctx) and per-URL
-				// cancel (URLStatus). fetchOneJob's RegisterURLCancel re-checks
-				// status under j.mu, so these are the cheap fast-path before
-				// the lock-protected re-check — they can be racy without
-				// causing a double-emit because the lock-protected check is
-				// authoritative.
+				// 두 종류의 fetch 직전 가드: 배치 취소(job.Ctx)와 URL 단위
+				// 취소(URLStatus). fetchOneJob의 RegisterURLCancel이 j.mu
+				// 아래에서 status를 다시 검사하므로 여기는 lock-protected
+				// 재검사 전의 가벼운 fast-path다 — race가 있어도 lock 보호된
+				// 검사가 권위 있는 결정이기 때문에 double-emit이 발생하지 않는다.
 				if job.Ctx().Err() != nil {
 					continue
 				}
-				// Per-URL cancel may have flipped this index to "cancelled"
-				// before this worker received the task. Skip the fetch; the
-				// cancel handler owns the SSE error event for that pending URL.
+				// 워커가 task를 받기 전에 URL 단위 취소가 이 인덱스를
+				// "cancelled"로 뒤집었을 수 있다. fetch를 건너뛴다 — 그 pending
+				// URL의 SSE error 이벤트는 cancel 핸들러가 소유한다.
 				if job.URLStatus(task.index) == "cancelled" {
 					continue
 				}
@@ -316,12 +309,12 @@ dispatch:
 	}
 }
 
-// cancelRemainingURLs marks URLs in [fromIdx, len(urls)) as cancelled and
-// publishes the corresponding error events. Returns the count cancelled by
-// this call. URLs that a prior per-URL CancelOne handler already flipped to
-// "cancelled" are counted but their event is NOT re-emitted ??the handler
-// owns that publish under CancelKindPending and a duplicate would deliver
-// the same error("cancelled") twice for the same index.
+// cancelRemainingURLs는 [fromIdx, len(urls)) 범위의 URL을 cancelled로 표시
+// 하고 해당 error 이벤트를 발행한다. 이 호출에서 취소된 개수를 반환한다.
+// 이전의 URL 단위 CancelOne 핸들러가 이미 "cancelled"로 뒤집은 URL은
+// 카운트는 하되 이벤트를 재발행하지 않는다 — 그 발행은 CancelKindPending에서
+// 핸들러가 소유하고 있으며, 중복은 같은 인덱스에 대해 동일한 error
+// ("cancelled")를 두 번 전달한다.
 func cancelRemainingURLs(job *importjob.Job, urls []importjob.URLState, fromIdx int) int {
 	cancelled := 0
 	for j := fromIdx; j < len(urls); j++ {
@@ -357,12 +350,12 @@ func cancelPendingURLs(job *importjob.Job, urls []importjob.URLState) {
 	}
 }
 
-// finalizeBatch publishes the summary frame, records it on the job, and sets
-// the terminal status. Precedence: any success ??Completed, else any
-// cancellation ??Cancelled, else ??Failed. Single source for this terminal
-// transition so ordering (SetSummary ??Publish ??SetStatus) cannot drift ??
-// SetStatus closes subscriber channels, so summary MUST be published first
-// or live clients race past their last frame.
+// finalizeBatch는 summary 프레임을 발행하고 Job에 기록한 뒤 terminal 상태를
+// 설정한다. 우선순위: 성공이 하나라도 있으면 Completed, 그렇지 않고 취소가
+// 하나라도 있으면 Cancelled, 그 외엔 Failed. terminal 전이의 단일 출처라
+// 순서(SetSummary → Publish → SetStatus)가 어긋나지 않는다 — SetStatus가
+// 구독자 채널을 close하므로 summary는 반드시 먼저 Publish 해야 한다.
+// 그렇지 않으면 라이브 클라이언트가 마지막 프레임을 race로 놓친다.
 func finalizeBatch(job *importjob.Job, succeeded, failed, cancelled int) {
 	summary := importjob.Summary{
 		Succeeded: succeeded, Failed: failed, Cancelled: cancelled,
@@ -387,28 +380,27 @@ const (
 	fetchCancelled
 )
 
-// fetchOneJob downloads a single URL through urlfetch.Fetch and emits every
-// SSE event for it: at most one start, zero or more progress, and exactly
-// one terminal (done or error). It also updates the corresponding URLState
-// on the Job so snapshot replay and live event streams stay in sync.
+// fetchOneJob은 urlfetch.Fetch를 통해 URL 하나를 다운로드하면서 모든 SSE
+// 이벤트를 발행한다 — start 최대 1번, progress 0회 이상, terminal
+// (done 또는 error) 정확히 1번. 동시에 Job의 해당 URLState도 갱신해 스냅샷
+// 재생과 라이브 이벤트 스트림이 동기화되도록 한다.
 func (h *Handler) fetchOneJob(job *importjob.Job, index int, u, destAbs, relDir string,
 	maxBytes int64, perURLTimeout time.Duration) fetchResult {
 
-	// Per-URL context ??registered with the Job so the cancel API added in
-	// J5 can target a single URL without aborting the whole batch.
+	// URL 단위 컨텍스트 — Job에 등록해, J5에 추가된 cancel API가 배치 전체를
+	// 중단하지 않고 특정 URL만 노릴 수 있게 한다.
 	urlCtx, cancelURL := context.WithCancel(job.Ctx())
 	defer cancelURL()
 	job.RegisterURLCancel(index, cancelURL)
 	defer job.UnregisterURLCancel(index)
 
-	// Race-close: a CancelOne call may have flipped this URL to "cancelled"
-	// (CancelKindPending) between the runImportJob loop's URLStatus check
-	// and the RegisterURLCancel above. CancelOne under j.mu observes our
-	// registered entry only AFTER this point, so re-checking status here
-	// ??also under j.mu via URLStatus ??guarantees: either we see the
-	// cancellation now and skip the fetch, or CancelOne saw our entry and
-	// went down the CancelKindRunning path (firing urlCtx). Either way the
-	// URL receives exactly one terminal accounting.
+	// race-close: runImportJob 루프의 URLStatus 검사와 위의 RegisterURLCancel
+	// 사이에 CancelOne 호출이 이 URL을 "cancelled"(CancelKindPending)로
+	// 뒤집었을 수 있다. j.mu 아래의 CancelOne은 이 시점 이후에야 우리의
+	// 등록 항목을 볼 수 있으므로, 여기서 URLStatus(역시 j.mu 아래)로 status를
+	// 다시 검사하면 보장된다 — 우리가 지금 취소를 보고 fetch를 건너뛰거나,
+	// CancelOne이 우리 항목을 보고 CancelKindRunning 경로로 가서 urlCtx를
+	// 트리거하거나. 어느 쪽이든 URL은 정확히 한 번의 terminal 회계만 받는다.
 	if job.URLStatus(index) == "cancelled" {
 		return fetchCancelled
 	}
@@ -442,7 +434,7 @@ func (h *Handler) fetchOneJob(job *importjob.Job, index int, u, destAbs, relDir 
 			select {
 			case progressCh <- received:
 			default:
-				// drop ??slow subscribers must not stall io.Copy
+				// drop — 느린 구독자가 io.Copy를 멈춰 세워서는 안 된다.
 			}
 		},
 	}
@@ -455,9 +447,8 @@ func (h *Handler) fetchOneJob(job *importjob.Job, index int, u, destAbs, relDir 
 	<-writerDone
 
 	if ferr != nil {
-		// Distinguish a per-URL/batch cancellation from a genuine fetch
-		// failure so the worker's success/fail/cancelled counters and the
-		// terminal status are correct.
+		// URL 단위/배치 취소를 진짜 fetch 실패와 구분해, 워커의
+		// success/fail/cancelled 카운터와 terminal 상태가 올바르게 유지되게 한다.
 		if isCancelled(urlCtx, job.Ctx(), ferr) {
 			job.UpdateURL(index, func(s *importjob.URLState) {
 				s.Status = "cancelled"
@@ -503,9 +494,9 @@ func (h *Handler) fetchOneJob(job *importjob.Job, index int, u, destAbs, relDir 
 	return fetchSucceeded
 }
 
-// isCancelled reports whether the urlfetch error is the result of a context
-// cancellation (per-URL or batch-wide) rather than a genuine origin/IO
-// failure. Used to decide whether to count a URL as failed or cancelled.
+// isCancelled는 urlfetch 에러가 진짜 origin/IO 실패가 아닌 컨텍스트 취소
+// (URL 단위 또는 배치 전체)에서 비롯된 것인지 보고한다. URL을 failed로 셀지
+// cancelled로 셀지 결정할 때 쓴다.
 func isCancelled(urlCtx, jobCtx context.Context, ferr *urlfetch.FetchError) bool {
 	if jobCtx.Err() != nil || urlCtx.Err() != nil {
 		return true
@@ -519,14 +510,13 @@ func isCancelled(urlCtx, jobCtx context.Context, ferr *urlfetch.FetchError) bool
 	return false
 }
 
-// logFetchError writes a structured server-side log for failed URL imports.
-// The client only ever receives the opaque error code; this is where operators
-// see what actually broke ??especially useful for ffmpeg_missing (operator
-// must install ffmpeg) and ffmpeg_error (stream-specific stderr can be
-// inspected to tell DRM/format issues apart). URLs are redacted before
-// logging because user-supplied origins commonly carry signed query
-// parameters and credentials (`?token=`, `user:pass@host`) that should not
-// land in journald or pasted log snippets.
+// logFetchError는 실패한 URL import에 대해 구조화된 서버 측 로그를 남긴다.
+// 클라이언트는 불투명 에러 코드만 받기 때문에, 운영자는 여기서 실제로
+// 무엇이 깨졌는지 본다 — ffmpeg_missing(운영자가 ffmpeg를 설치해야 함)과
+// ffmpeg_error(스트림별 stderr를 들여다봐 DRM/포맷 문제를 구분)에 특히
+// 유용하다. URL은 로깅 전에 redact한다 — 사용자가 입력한 origin에는 흔히
+// 서명된 query 파라미터·자격(`?token=`, `user:pass@host`)이 포함되며, 이는
+// journald나 붙여넣어진 로그 조각에 남아서는 안 된다.
 func logFetchError(u string, ferr *urlfetch.FetchError) {
 	attrs := []any{"code", ferr.Code, "url", redactURL(u)}
 	if unwrapped := ferr.Unwrap(); unwrapped != nil {
@@ -535,36 +525,34 @@ func logFetchError(u string, ferr *urlfetch.FetchError) {
 	slog.Warn("url import failed", attrs...)
 }
 
-// sensitiveQueryKeys lists query parameters whose value the URL redactor
-// strips before logging. Match is case-insensitive (lookup lowercases the
-// key, so entries here MUST be lowercase). Intentionally narrow ??broad
-// redaction would obscure useful diagnostic info on benign origins.
-// Hyphenated and snake_case variants are listed separately because URL
-// query keys are not normalized.
+// sensitiveQueryKeys는 URL redactor가 로깅 전에 값을 제거할 query 파라미터
+// 목록이다. 매칭은 대소문자 무시다(lookup이 키를 소문자로 만들므로 여기
+// 항목은 반드시 소문자여야 한다). 의도적으로 좁게 둔다 — 폭넓게 redact
+// 하면 정상 origin의 유용한 진단 정보를 가린다. URL query 키는 정규화되지
+// 않으므로 하이픈과 snake_case 변형을 별도로 나열한다.
 var sensitiveQueryKeys = map[string]struct{}{
-	// Generic auth tokens.
+	// 일반 auth 토큰.
 	"token":        {},
 	"access_token": {},
 	"auth":         {},
-	// Signed-URL signatures.
+	// signed-URL 서명.
 	"signature":       {},
 	"sig":             {},
 	"x-amz-signature": {},
 	"signed_url":      {},
 	"presigned_url":   {},
-	// API keys.
+	// API 키.
 	"key":     {},
 	"apikey":  {},
 	"api_key": {},
-	// Generic credentials.
+	// 일반 자격 정보.
 	"password": {},
 	"secret":   {},
 }
 
-// redactURL strips userinfo and masks values for query parameters that look
-// like credentials or signatures. Returns "<unparseable>" for inputs that
-// fail url.Parse so a malformed string never short-circuits the rest of the
-// log line.
+// redactURL은 userinfo를 제거하고, 자격·서명처럼 보이는 query 파라미터의
+// 값을 마스킹한다. url.Parse가 실패하는 입력에는 "<unparseable>"을 반환해,
+// 잘못된 문자열이 로그 라인의 나머지를 short-circuit 시키지 않게 한다.
 func redactURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -587,9 +575,9 @@ func redactURL(raw string) string {
 	return u.String()
 }
 
-// redactErr applies redactURL to *url.Error wrappers so the URL embedded by
-// net/http inside the error string is also masked. Other errors fall through
-// to err.Error() unchanged.
+// redactErr는 *url.Error 래퍼에 redactURL을 적용해, net/http가 에러 문자열에
+// 박아둔 URL도 함께 마스킹한다. 그 외의 에러는 변경 없이 err.Error()로
+// 흘려 보낸다.
 func redactErr(err error) string {
 	var ue *url.Error
 	if errors.As(err, &ue) {
@@ -600,12 +588,12 @@ func redactErr(err error) string {
 	return err.Error()
 }
 
-// recoverImportJob is the worker's defer body, extracted so the panic-recovery
-// invariant can be unit-tested directly. Skips publishing when SetStatus
-// already drove the job into a terminal state (late-defer panic must not flip
-// Completed/Cancelled to Failed). Skips re-publishing summary when SetSummary
-// already recorded one ??the prior Publish(summary) succeeded and a duplicate
-// would deliver two summary frames to the same client.
+// recoverImportJob은 워커의 defer 본체다 — panic 복구 불변식을 단위 테스트
+// 할 수 있도록 분리했다. SetStatus가 이미 Job을 terminal 상태로 몰아갔으면
+// 발행을 건너뛴다(늦은 defer panic이 Completed/Cancelled를 Failed로 뒤집어선
+// 안 된다). SetSummary가 이미 summary를 기록했으면 재발행을 건너뛴다 —
+// 이전 Publish(summary)가 성공했고, 중복은 같은 클라이언트에게 summary
+// 프레임 두 개를 전달한다.
 func recoverImportJob(rec any, job *importjob.Job) {
 	if rec == nil {
 		return
@@ -621,14 +609,14 @@ func recoverImportJob(rec any, job *importjob.Job) {
 		job.SetSummary(sum)
 		job.Publish(summaryEvent(sum))
 	}
-	// SetStatus(terminal) closes subscriber channels ??clients that missed
-	// the summary still observe ok=false and exit cleanly.
+	// SetStatus(terminal)이 구독자 채널을 close한다 — summary를 놓친
+	// 클라이언트도 ok=false를 관측하고 깔끔하게 종료된다.
 	job.SetStatus(importjob.StatusFailed)
 }
 
-// summarizeURLs folds URLState entries into a Summary by terminal status.
-// Pending/running URLs land in Failed ??used by the panic-recovery path
-// where the worker was interrupted before resolving them either way.
+// summarizeURLs는 URLState 엔트리를 terminal status에 따라 Summary로
+// 접는다. pending/running 상태인 URL은 Failed로 들어간다 — 워커가 어느
+// 쪽으로도 결정짓기 전에 중단된 panic-recovery 경로에서 사용된다.
 func summarizeURLs(urls []importjob.URLState) importjob.Summary {
 	var sum importjob.Summary
 	for _, u := range urls {
@@ -644,8 +632,8 @@ func summarizeURLs(urls []importjob.URLState) importjob.Summary {
 	return sum
 }
 
-// summaryEvent builds the SSE summary frame. Centralizes the "summary"
-// phase string so the wire-format constant lives in one place.
+// summaryEvent는 SSE summary 프레임을 만든다. "summary" phase 문자열을
+// 한 곳에 모아 wire-format 상수의 단일 출처로 둔다.
 func summaryEvent(s importjob.Summary) importjob.Event {
 	return mustEvent("summary", sseSummary{
 		Phase:     "summary",
@@ -655,10 +643,9 @@ func summaryEvent(s importjob.Summary) importjob.Event {
 	})
 }
 
-// mustEvent marshals payload into a importjob.Event with the given phase.
-// JSON marshalling of these stable structs cannot fail in practice; on the
-// pathological miss the broadcast is skipped (logged once) so the worker
-// keeps progressing.
+// mustEvent는 payload를 주어진 phase의 importjob.Event로 마샬한다. 이런
+// 안정 구조체의 JSON 마샬링은 실제로 실패하지 않는다. 만에 하나 실패하면
+// broadcast를 건너뛰고(한 번 로깅) 워커는 진행을 계속한다.
 func mustEvent(phase string, payload any) importjob.Event {
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -668,12 +655,11 @@ func mustEvent(phase string, payload any) importjob.Event {
 	return importjob.Event{Phase: phase, Data: data}
 }
 
-// normalizeURLs trims whitespace, drops empty entries, and discards any URL
-// over maxImportURLLength. Order and intentional duplicates are preserved
-// (collisions get _N suffixes downstream). Over-length entries are silently
-// dropped; the request still goes through with the remaining URLs and the
-// downstream count check (maxImportURLs) catches batches whose every URL was
-// rejected.
+// normalizeURLs는 공백을 제거하고, 빈 엔트리를 버리고, maxImportURLLength를
+// 넘는 URL을 폐기한다. 순서와 의도된 중복은 보존한다(충돌은 downstream에서
+// _N 접미사로 처리된다). 과도하게 긴 엔트리는 조용히 버린다. 요청은 남은
+// URL로 진행되며, downstream 카운트 검사(maxImportURLs)가 모든 URL이 거부된
+// 배치를 잡아낸다.
 func normalizeURLs(in []string) []string {
 	out := make([]string, 0, len(in))
 	for _, u := range in {

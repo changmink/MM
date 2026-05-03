@@ -50,8 +50,8 @@ func (h *Handler) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cap how many missing-sidecar backfills (each forks ffprobe) we run per
-	// request so a directory of legacy thumbnails can't stall the handler.
+	// 요청당 missing-sidecar backfill(매번 ffprobe를 fork) 횟수 상한을 둬,
+	// 레거시 썸네일이 가득한 디렉터리가 핸들러를 멈추지 않게 한다.
 	backfillBudget := 1
 
 	// 사이드카 stat을 entry마다 부르면 1000개 디렉터리 = 1000 syscall이라
@@ -67,7 +67,7 @@ func (h *Handler) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	entries := make([]entry, 0, len(infos))
 	for _, info := range infos {
 		name := info.Name()
-		// hide .thumb directories
+		// .으로 시작하는 항목은 숨긴다 (.thumb 등)
 		if strings.HasPrefix(name, ".") {
 			continue
 		}
@@ -120,11 +120,11 @@ func (h *Handler) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// lookupVideoDuration returns the cached duration sidecar value, or — if the
-// sidecar is missing and the per-request budget allows — performs one
-// ffprobe-backed backfill. Returns nil on any failure so browse never 5xxs
-// over a metadata read. The budget pointer is decremented when a backfill
-// is attempted (regardless of success), bounding ffprobe forks per request.
+// lookupVideoDuration은 캐시된 duration 사이드카 값을 반환한다. 사이드카가
+// 없고 요청당 예산이 허용하면 ffprobe 기반 backfill을 한 번 수행한다.
+// 어떤 실패에서든 nil을 반환해, 메타데이터 읽기로 인해 browse가 5xx를
+// 내지 않도록 한다. backfill 시도 시(성공 여부와 무관하게) budget 포인터를
+// 감소시켜 요청당 ffprobe fork 수에 상한을 둔다.
 func lookupVideoDuration(thumbPath, videoPath string, budget *int) *float64 {
 	if d := thumb.LookupDuration(thumbPath); d != nil {
 		return d

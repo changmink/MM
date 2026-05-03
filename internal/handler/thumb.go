@@ -56,7 +56,7 @@ func (h *Handler) serveVideoThumb(w http.ResponseWriter, r *http.Request, abs, n
 	thumbPath := filepath.Join(filepath.Dir(abs), ".thumb", name+".jpg")
 	if _, err := os.Stat(thumbPath); os.IsNotExist(err) {
 		if err := thumb.GenerateFromVideo(abs, thumbPath); err != nil {
-			// ffmpeg unavailable or all frames blank — serve placeholder
+			// ffmpeg가 없거나 모든 프레임이 비어 있다 — 플레이스홀더 제공
 			w.Header().Set("Content-Type", "image/jpeg")
 			w.WriteHeader(http.StatusOK)
 			w.Write(thumb.Placeholder)

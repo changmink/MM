@@ -12,30 +12,29 @@ import (
 	"file_server/internal/importjob"
 )
 
-// listJobsResponse is the wire shape of GET /api/import-url/jobs. Splitting
-// active and finished up front saves the client a filter pass and matches
-// the two distinct UI affordances (live progress rows vs. dismissible
-// history rows).
+// listJobsResponse는 GET /api/import-url/jobs의 wire 형태다. active와
+// finished를 미리 나눠두면 클라이언트의 필터 통과를 줄이고, 두 가지 UI
+// affordance(라이브 progress 행 vs. dismiss 가능한 history 행)와도 잘
+// 맞아떨어진다.
 type listJobsResponse struct {
 	Active   []importjob.JobSnapshot `json:"active"`
 	Finished []importjob.JobSnapshot `json:"finished"`
 }
 
-// snapshotEnvelope is the first SSE frame on /jobs/{id}/events. Wrapping the
-// snapshot in a phase-tagged envelope keeps the wire format symmetric with
-// the live `start/progress/done/error/summary` events; clients route by
-// `phase` and never have to special-case the first frame.
+// snapshotEnvelope는 /jobs/{id}/events의 첫 SSE 프레임이다. 스냅샷을
+// phase 태그가 달린 envelope로 감싸 라이브 `start/progress/done/error/summary`
+// 이벤트와 wire 형태가 대칭으로 유지된다 — 클라이언트는 `phase`로 라우팅하며
+// 첫 프레임만 특별 처리할 필요가 없다.
 type snapshotEnvelope struct {
 	Phase string                `json:"phase"` // always "snapshot"
 	Job   importjob.JobSnapshot `json:"job"`
 }
 
-// handleJobsRoot routes /api/import-url/jobs (no trailing slash). GET
-// returns the active+finished snapshot; DELETE with `?status=finished`
-// clears every terminal job in one call. Other methods/queries 405/400.
-// The path-with-trailing-slash variant goes through handleJobsByID below ??
-// the two registrations together cover the full /jobs and /jobs/{id}/...
-// space without ambiguity.
+// handleJobsRoot는 /api/import-url/jobs(후행 슬래시 없음)을 라우팅한다.
+// GET은 active+finished 스냅샷을 반환하고, `?status=finished`인 DELETE는
+// 모든 terminal Job을 한 번에 정리한다. 다른 메서드/쿼리는 405/400. 후행
+// 슬래시가 있는 변종은 아래 handleJobsByID로 간다 — 두 등록이 합쳐져 /jobs와
+// /jobs/{id}/... 공간 전체를 모호함 없이 덮는다.
 func (h *Handler) HandleJobsRoot(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -47,11 +46,10 @@ func (h *Handler) HandleJobsRoot(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleListJobs returns a snapshot of every job the registry currently
-// holds, partitioned by terminal state. Encode failures past the header
-// boundary are logged and dropped ??there is nothing useful to send the
-// client at that point and writeError would just produce a malformed
-// response on top of the already-flushed body.
+// handleListJobs는 레지스트리가 현재 보유한 모든 Job의 스냅샷을 terminal
+// 상태별로 나눠 반환한다. 헤더 경계 이후의 인코드 실패는 로그만 남기고
+// 버린다 — 그 시점엔 클라이언트에게 보낼 유용한 것이 없고, writeError를
+// 부르면 이미 flush된 본문 위에 잘못된 응답을 덧붙이게 된다.
 func (h *Handler) handleListJobs(w http.ResponseWriter, _ *http.Request) {
 	active, finished := h.registry.List()
 	body := listJobsResponse{
@@ -64,8 +62,8 @@ func (h *Handler) handleListJobs(w http.ResponseWriter, _ *http.Request) {
 	}
 }
 
-// snapshotSlice fans Snapshot() across a slice of jobs. Pulled out so list
-// and (later) cancel-broadcast helpers share the conversion.
+// snapshotSlice는 Job 슬라이스에 Snapshot()을 펼친다. list와 (이후)
+// cancel-broadcast 헬퍼가 변환 로직을 공유하도록 분리해 두었다.
 func snapshotSlice(jobs []*importjob.Job) []importjob.JobSnapshot {
 	out := make([]importjob.JobSnapshot, len(jobs))
 	for i, j := range jobs {
@@ -74,15 +72,15 @@ func snapshotSlice(jobs []*importjob.Job) []importjob.JobSnapshot {
 	return out
 }
 
-// handleJobsByID dispatches /api/import-url/jobs/{id}/{action}. Three
-// shapes are wired:
+// handleJobsByID는 /api/import-url/jobs/{id}/{action}을 분배한다. 세 형태가
+// 연결되어 있다:
 //
-//	GET  /jobs/{id}/events         ??SSE snapshot + live stream (J4)
-//	POST /jobs/{id}/cancel         ??batch or per-URL cancel (J5)
-//	DEL  /jobs/{id}                ??remove a terminal job (J5)
+//	GET  /jobs/{id}/events         — SSE 스냅샷 + 라이브 스트림 (J4)
+//	POST /jobs/{id}/cancel         — 배치 또는 URL 단위 취소 (J5)
+//	DEL  /jobs/{id}                — terminal Job 제거 (J5)
 //
-// Anything else (typo'd action, extra path segments, wrong method) returns
-// 404 / 405 so nothing falls through to a default handler.
+// 그 외(오타 action, 추가 path 세그먼트, 잘못된 메서드)는 404 / 405를 반환해
+// 기본 핸들러로 흘러가지 않게 한다.
 func (h *Handler) HandleJobsByID(w http.ResponseWriter, r *http.Request) {
 	suffix := strings.TrimPrefix(r.URL.Path, "/api/import-url/jobs/")
 	parts := strings.Split(suffix, "/")
@@ -92,7 +90,7 @@ func (h *Handler) HandleJobsByID(w http.ResponseWriter, r *http.Request) {
 	}
 	jobID := parts[0]
 	if len(parts) == 1 {
-		// /jobs/{id} bare ??only DELETE is valid here.
+		// /jobs/{id} 단독 — 여기는 DELETE만 유효하다.
 		switch r.Method {
 		case http.MethodDelete:
 			h.handleDeleteJob(w, r, jobID)
@@ -127,18 +125,17 @@ func (h *Handler) HandleJobsByID(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleCancelJob fires either a per-URL cancel (?index=N) or a whole-batch
-// cancel. Per-URL cancellation has two paths:
+// handleCancelJob은 URL 단위 취소(?index=N) 또는 배치 전체 취소를 발사한다.
+// URL 단위 취소에는 두 경로가 있다:
 //
-//   - Currently in flight: CancelURL fires the registered ctx and the
-//     worker translates that into the standard error("cancelled") event +
-//     summary counter increment.
-//   - Pending (not yet started): we set URLState to cancelled and emit the
-//     error event ourselves; the worker's loop checks URLStatus before
-//     each fetch and skips already-terminal entries.
+//   - 진행 중: CancelURL이 등록된 ctx를 트리거하고 워커가 이를 표준
+//     error("cancelled") 이벤트와 summary 카운터 증분으로 번역한다.
+//   - Pending(아직 시작 안 됨): URLState를 cancelled로 설정하고 우리가 직접
+//     error 이벤트를 발행한다. 워커 루프는 매 fetch 직전 URLStatus를 검사해
+//     이미 terminal인 항목을 건너뛴다.
 //
-// Already-terminal URLs return 409. The job itself must still be active
-// (queued or running); a cancel against a finished job is 409.
+// 이미 terminal인 URL은 409를 반환한다. Job 자체는 여전히 active(queued
+// 또는 running)여야 한다 — finished Job에 대한 cancel은 409.
 func (h *Handler) handleCancelJob(w http.ResponseWriter, r *http.Request, jobID string) {
 	job, ok := h.registry.Get(jobID)
 	if !ok {
@@ -152,8 +149,8 @@ func (h *Handler) handleCancelJob(w http.ResponseWriter, r *http.Request, jobID 
 
 	indexStr := r.URL.Query().Get("index")
 	if indexStr == "" {
-		// Whole-batch cancel ??worker observes job.Ctx().Done() and emits
-		// the cancelled events / summary itself.
+		// 배치 전체 취소 — 워커가 job.Ctx().Done()을 관측해 cancelled 이벤트와
+		// summary를 스스로 발행한다.
 		job.Cancel()
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -169,34 +166,33 @@ func (h *Handler) handleCancelJob(w http.ResponseWriter, r *http.Request, jobID 
 		return
 	}
 
-	// Atomic decision: registered cancel takes precedence (worker emits the
-	// error frame); pending ??mark + handler emits the error frame; else
-	// terminal ??409. Doing both checks under one lock closes the previous
-	// race window where the worker could RegisterURLCancel between the two
-	// separate handler-side checks.
+	// 원자적 판단: 등록된 cancel이 우선한다(워커가 error 프레임을 발행).
+	// pending이면 mark + 핸들러가 error 프레임을 발행. 그 외 terminal이면 409.
+	// 두 검사를 한 번의 잠금에서 함께 수행해, 핸들러 측 두 검사 사이에 워커가
+	// RegisterURLCancel을 끼워넣을 수 있던 race 창을 닫는다.
 	url, kind := job.CancelOne(idx)
 	switch kind {
 	case importjob.CancelKindRunning:
-		// Worker observes ctx.Done() and emits error("cancelled") via
-		// fetchOneJob's existing cancellation path ??handler stays silent.
+		// 워커가 ctx.Done()을 관측해 fetchOneJob의 기존 cancellation 경로로
+		// error("cancelled")를 발행한다 — 핸들러는 침묵한다.
 		w.WriteHeader(http.StatusNoContent)
 	case importjob.CancelKindPending:
-		// Worker bypasses this index on its next URLStatus check; we own
-		// the lifecycle event for the row.
+		// 워커는 다음 URLStatus 검사에서 이 인덱스를 우회한다. 이 행의
+		// 라이프사이클 이벤트는 우리가 소유한다.
 		job.Publish(mustEvent("error", sseError{
 			Phase: "error", Index: idx, URL: url, Error: "cancelled",
 		}))
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		// Terminal or unknown ??nothing to cancel.
+		// terminal이거나 알 수 없음 — 취소할 대상이 없다.
 		writeError(w, r, http.StatusConflict, "url already finished", nil)
 	}
 }
 
-// handleDeleteJob removes a terminal job from the registry. Active jobs
-// (queued/running) require an explicit cancel first ??409. Unknown ids 404.
-// Subscribers, if any, were already detached at SetStatus(terminal) time so
-// no broadcast is needed here.
+// handleDeleteJob은 terminal Job을 레지스트리에서 제거한다. Active Job
+// (queued/running)은 먼저 명시적 cancel을 요구한다 — 409. 알 수 없는 id는
+// 404. 구독자가 있었다면 SetStatus(terminal) 시점에 이미 분리되었으므로
+// 여기서 broadcast가 필요 없다.
 func (h *Handler) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID string) {
 	if err := h.registry.Remove(jobID); err != nil {
 		switch {
@@ -212,9 +208,9 @@ func (h *Handler) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleDeleteFinishedJobs removes every terminal job at once. Validates
-// the `status=finished` query so a stray DELETE without filter cannot be
-// silently interpreted as "wipe everything".
+// handleDeleteFinishedJobs는 모든 terminal Job을 한 번에 제거한다. 필터
+// 없는 우연한 DELETE가 조용히 "전부 지우기"로 해석되는 일이 없도록
+// `status=finished` 쿼리를 검증한다.
 func (h *Handler) handleDeleteFinishedJobs(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("status") != "finished" {
 		writeError(w, r, http.StatusBadRequest, "missing status=finished filter", nil)
@@ -227,11 +223,11 @@ func (h *Handler) handleDeleteFinishedJobs(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-// handleSubscribeJob streams the named job's lifecycle as SSE: a single
-// snapshot frame followed by every subsequent live event until the job
-// terminates. A subscriber that arrives after the job is already finished
-// receives only the snapshot ??SubscribeWithSnapshot pre-closes its
-// channel in that case so the loop falls out immediately on the first read.
+// handleSubscribeJob은 지정된 Job의 라이프사이클을 SSE로 스트리밍한다 —
+// 스냅샷 프레임 한 개, 그 후 Job이 종료될 때까지의 모든 라이브 이벤트.
+// Job이 이미 끝난 뒤에 도착한 구독자는 스냅샷만 받는다 — 그 경우
+// SubscribeWithSnapshot이 채널을 미리 close하므로 루프가 첫 read에서 즉시
+// 빠져나간다.
 func (h *Handler) handleSubscribeJob(w http.ResponseWriter, r *http.Request, jobID string) {
 	job, ok := h.registry.Get(jobID)
 	if !ok {
@@ -244,10 +240,9 @@ func (h *Handler) handleSubscribeJob(w http.ResponseWriter, r *http.Request, job
 		return
 	}
 
-	// Atomic snapshot+subscribe under a single j.mu hold ??closes the race
-	// window where an event published between Snapshot() and Subscribe()
-	// would land in both the snapshot AND the channel and double-count on
-	// the client.
+	// 단일 j.mu 잠금 안에서 원자적 snapshot+subscribe — Snapshot()과
+	// Subscribe() 사이에 발행된 이벤트가 스냅샷과 채널 모두에 들어가서 클라이언트
+	// 측에서 중복 카운트되는 race 창을 닫는다.
 	snapshot, events, unsubscribe := job.SubscribeWithSnapshot()
 	defer unsubscribe()
 
@@ -259,9 +254,9 @@ func (h *Handler) handleSubscribeJob(w http.ResponseWriter, r *http.Request, job
 		select {
 		case ev, open := <-events:
 			if !open {
-				// Job reached terminal state ??SetStatus closed our channel.
-				// Snapshot already reflects the terminal status (the handler
-				// always returns after delivering it).
+				// Job이 terminal 상태에 도달했다 — SetStatus가 채널을 닫았다.
+				// 스냅샷이 이미 terminal 상태를 반영한다(핸들러는 그 스냅샷을
+				// 전달한 뒤 항상 반환한다).
 				return
 			}
 			fmt.Fprintf(w, "data: %s\n\n", ev.Data)
