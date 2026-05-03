@@ -2,7 +2,7 @@
 
 > 부모 SPEC: [`/SPEC.md`](../SPEC.md). 이 문서는 **§2~§3 전반의 프론트엔드 구현 구조**만 다룬다 — 제품 행동·API·SSE 이벤트 스키마는 변경하지 않는다.
 >
-> **Status: draft** — 사용자 승인 대기.
+> **Status: implemented** — 12개 spec 목표 + 후속 5개(`convertImage` / `convertWebp` / `sseConvertModal` / `modalDismiss` / `dragSelect`) 추가 분할로 총 17개 모듈 머지 완료.
 
 ## 1. Objective
 

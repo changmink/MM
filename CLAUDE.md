@@ -34,7 +34,7 @@ internal/
     import_url_jobs.go     /api/import-url/jobs — 백그라운드 잡 list/cancel/dismiss/SSE 재구독
     convert.go             TS→MP4 영구 변환 SSE 핸들러
     convert_image.go       /api/convert-image — 이미지 포맷 변환
-    convert_webp.go        /api/convert-webp — 동영상 → WebP 움짤 변환 SSE
+    convert_webp.go        /api/convert-webp — 움짤(GIF/짧은 동영상) → animated WebP 변환 SSE
     settings.go            GET/PATCH /api/settings
   media/                   타입 판별, MIME, SafePath, MoveFile (path traversal 차단)
   thumb/                   이미지·동영상 썸네일 + duration 사이드카, 워커 풀
@@ -66,7 +66,7 @@ docker compose up -d       # 컨테이너로 실행
 - API는 클라이언트에 `/`-prefixed slash 경로를 돌려주고(`filepath.ToSlash`), 내부는 OS 경로로 다룬다.
 
 ### 같은-출처 보호
-- 변경 작업 핸들러(`/api/upload`, `/api/file`, `/api/folder`, `/api/import-url{,/jobs,/jobs/}`, `/api/convert`, `/api/settings`)는 **`requireSameOrigin`** 으로 감싸서 등록 — 새 변경 핸들러를 추가하면 같은 패턴을 따른다. 읽기 전용(`/api/browse`, `/api/tree`, `/api/stream`, `/api/thumb`)은 래핑 대상 아님.
+- 변경 작업 핸들러(`/api/upload`, `/api/file`, `/api/folder`, `/api/import-url{,/jobs,/jobs/}`, `/api/convert`, `/api/convert-image`, `/api/convert-webp`, `/api/settings`)는 **`requireSameOrigin`** 으로 감싸서 등록 — 새 변경 핸들러를 추가하면 같은 패턴을 따른다. 읽기 전용(`/api/browse`, `/api/tree`, `/api/stream`, `/api/thumb`)은 래핑 대상 아님.
 
 ### 원자성
 - 새 파일 쓰기는 **temp 파일 → fsync(있으면) → `os.Rename`** 패턴. 예시: `settings.writeFile`, `convert.RemuxTSToMP4`, `urlfetch.Fetch`.
@@ -74,7 +74,7 @@ docker compose up -d       # 컨테이너로 실행
 - 파일 rename은 `atomicRenameFile`(os.Link + os.Remove). 대소문자만 다른 rename은 플레인 `os.Rename` 폴백 — 대소문자 무시 FS에서 Link가 EEXIST로 실패하기 때문.
 
 ### 동시성
-- `Handler`에 `streamLocks`·`convertLocks` `sync.Map`이 있어 **per-path 뮤텍스**로 같은 소스의 ffmpeg 호출을 직렬화. 새로운 ffmpeg 경로를 추가하면 비슷한 패턴으로 보호.
+- `Handler`에 `streamLocks`·`convertLocks`·`webpLocks` `sync.Map`이 있어 **per-path 뮤텍스**로 같은 소스의 ffmpeg 호출을 직렬화. 새로운 ffmpeg 경로를 추가하면 비슷한 패턴으로 보호.
 - 썸네일 생성은 `thumb.Pool`(CPU 수만큼 워커). `Submit`이 false 반환하면 `/api/thumb`의 lazy 경로가 대신 생성 — 실패 시 서버를 세우지 말고 그쪽으로 위임.
 - SSE 쓰기는 핸들러 goroutine 하나에서만. fetcher/converter는 **채널로 이벤트만 넘기고** flush는 핸들러가 수행.
 
@@ -90,8 +90,8 @@ docker compose up -d       # 컨테이너로 실행
 - `urlfetch`, `urlfetch/hls`, `convert` 모두 동일 상수: **1 MiB 또는 250 ms** 중 먼저 도달한 쪽에서 progress emit. 새 스트리밍 작업이 생기면 같은 값을 맞춘다 (`progressByteThreshold`, `progressTimeThreshold`).
 
 ### 에러 응답
-- `writeError(w, r, code, msg, err)` 하나로 통일. 5xx 또는 err != nil이면 `slog.Error`로 자동 로그. 직접 `http.Error` 쓰지 말 것.
-- 클라이언트에 노출되는 에러 코드는 짧은 ASCII 식별자(`out_of_range`, `too_large`, `unsupported_content_type`, `ffmpeg_error`...). 원문 stderr나 내부 경로는 응답 본문으로 내보내지 말 것.
+- `writeError(w, r, code, msg, err)` 하나로 통일. 5xx면 `slog.Error`, 4xx + err != nil이면 `slog.Warn`(client 실수 진단용), 그 외는 무로깅. 직접 `http.Error` 쓰지 말 것.
+- 클라이언트에 노출되는 에러 코드는 짧은 ASCII 식별자(`out_of_range`, `too_large`, `unsupported_content_type`, `ffmpeg_error`, `cross_device`...). 원문 stderr나 내부 경로는 응답 본문으로 내보내지 말 것.
 
 ### Rename 확장자
 - 파일 rename은 **원본 확장자 고정**. 서버의 `fileExtension`(dotfile carveout 포함)·`stripTrailingExt`와 `web/util.js`의 `splitExtension`은 **동일 규칙**이어야 한다. 한쪽만 바꾸면 UX가 깨진다.

@@ -1,5 +1,7 @@
 # HLS URL Import SSRF 강화 핸드오프
 
+> **Status: merged** — `internal/urlfetch/dialer.go` SSRF 가드 + HLS playlist size cap이 develop에 들어갔다. 본 핸드오프는 historical record로 보존.
+
 ## 현재 상태
 
 - 작업 브랜치: `feature/harden-hls-url-import-ssrf`

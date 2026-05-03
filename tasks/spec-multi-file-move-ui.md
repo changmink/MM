@@ -6,7 +6,7 @@ Status: implemented (`feature/multi-file-move-ui`)
 현재 UI는 파일 하나를 드래그해서 폴더로 이동할 수 있다. 사용자가 현재 폴더의 여러 파일 또는 필터/검색 결과 전체 파일을 선택한 뒤, 선택 묶음을 사이드바 폴더나 breadcrumb 경로로 드래그해 한 번에 이동할 수 있게 한다.
 
 ## Tech Stack
-- Frontend: vanilla HTML/CSS/JS (`web/index.html`, `web/style.css`, `web/app.js`)
+- Frontend: vanilla HTML/CSS/JS (`web/index.html`, `web/style.css`, ES module 분할 후 `web/main.js` 진입 + `web/browse.js`/`web/fileOps.js` 등 — 본 spec 작성 시점은 `app.js` 단일 파일 시절)
 - Backend: 기존 `PATCH /api/file?path=<src>` + body `{"to":"<destDir>"}` 재사용
 - Tests: Go handler/media 회귀 테스트 + 브라우저 수동 검증
 
@@ -17,7 +17,7 @@ Status: implemented (`feature/multi-file-move-ui`)
 - Manual dev: `go run ./cmd/server`
 
 ## Project Structure
-- `web/app.js`: 선택 상태, 전체 선택, 다중 drag payload, 순차 move 요청
+- `web/app.js`: 선택 상태, 전체 선택, 다중 drag payload, 순차 move 요청 *(머지 후 ES module 분할로 `web/state.js` (selectedPaths) + `web/browse.js` (selection UI) + `web/fileOps.js` (drag payload·move 요청)으로 이전됨)*
 - `web/index.html`: 툴바 선택 컨트롤, cache bust version
 - `web/style.css`: 카드/테이블 선택 체크박스와 선택 상태 스타일
 - `tasks/todo.md`: Phase 22 진행 상태

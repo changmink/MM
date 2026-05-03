@@ -54,7 +54,7 @@
 - **동일 부모 거부:** `filepath.Dir(srcAbs) == destDir`이면 `400 {"error": "same directory"}` — 기존 파일 이동(`files.go`의 `moveFile`)과 동일. 의미 없는 이동을 노이즈로 만들지 않음.
 - **루트 이동 방지:** `srcAbs == h.dataDir`이면 `400 {"error": "cannot move root"}`. rename 가드와 동일.
 - **원자성:** 단일 `os.Rename` 호출(폴더 전체 + 내부 `.thumb/` + 하위 모든 파일이 함께 이동). 사이드카 별도 처리 불필요(폴더 rename과 동일 원리, §2.1.1).
-- **Cross-volume 처리:** `os.Rename`이 `EXDEV` 반환 시 **재귀 copy+remove 폴백 없이** `500 {"error": "cross_device"}` 반환. 단일 데이터 볼륨이 전제이며(SPEC §1, Docker volume 단일 마운트), 폴더 재귀 복사는 race·디스크 공간·중간 실패 처리 비용이 크므로 의도적 out-of-scope. 파일 이동은 EXDEV 시 copy+remove 폴백을 유지(`media/move.go:93`) — 단일 파일 단위라 안전.
+- **Cross-volume 처리:** `os.Rename`이 `EXDEV` 반환 시 **재귀 copy+remove 폴백 없이** `400 {"error": "cross_device"}` 반환 (단일 볼륨 가정 미충족은 운영 precondition이라 5xx가 아닌 4xx). 단일 데이터 볼륨이 전제이며(SPEC §1, Docker volume 단일 마운트), 폴더 재귀 복사는 race·디스크 공간·중간 실패 처리 비용이 크므로 의도적 out-of-scope. 파일 이동은 EXDEV 시 copy+remove 폴백을 유지(`media/move.go:93`) — 단일 파일 단위라 안전.
 - **사이드 효과:** 이동된 폴더 안의 파일 경로가 모두 바뀌므로, **현재 browse 경로(`currentPath`)가 이동된 폴더 자신 또는 그 자손**이라면 클라이언트가 새 경로로 navigate 해야 한다 — `rewritePathAfterFolderRename`(폴더 rename에서 사용 중)을 재사용해 `srcOldPath` → `destDir + "/" + baseName`으로 다시 계산.
 - **응답:** `200 OK`, `{"path": "/movies/sub", "name": "sub"}` — 새 위치의 절대 상대 경로 + base name(불변).
 - **UI 트리거:**
@@ -117,7 +117,7 @@
 - [ ] **browse API 확장:** 동영상 entry에 `duration_sec: float | null` 필드 추가 (다른 타입은 항상 null)
 - [ ] **UI 렌더링 (`buildVideoGrid`):**
   - `duration_sec`이 null 또는 0 이하이면 오버레이 숨김
-  - 포맷팅은 클라이언트(`app.js`)에서 수행
+  - 포맷팅은 클라이언트(`web/util.js`의 `formatDuration`)에서 수행
   - 폴더 삭제 시 `.thumb/` 전체 삭제로 사이드카도 함께 정리됨 (기존 동작 그대로)
 
 ### 2.3.3 TS → MP4 영구 변환
@@ -196,7 +196,7 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
 
 ### 2.5.1 파일 용량 표시
 
-현재 browse 경로에 직접 있는 파일들의 개수·합계를 상단에 요약하고, 개별 파일 크기를 모든 뷰에서 볼 수 있게 한다. 서버 API 변경 없음 — `/api/browse` 응답에 `size` 필드가 이미 존재하므로 클라이언트(`web/app.js`, `web/style.css`)만 수정한다.
+현재 browse 경로에 직접 있는 파일들의 개수·합계를 상단에 요약하고, 개별 파일 크기를 모든 뷰에서 볼 수 있게 한다. 서버 API 변경 없음 — `/api/browse` 응답에 `size` 필드가 이미 존재하므로 클라이언트(`web/main.js` 진입점 + 도메인 모듈, `web/style.css`)만 수정한다.
 
 - **범위(scope):** 현재 browse 경로에 직접 있는 파일만. 하위 폴더 재귀 합산은 **하지 않음**. 폴더는 메인 리스트에 표시되지 않으므로(`renderFileList`가 파일만 분류) 자연스럽게 제외됨.
 - [ ] **합계 표시 위치:** breadcrumb 줄 오른쪽 끝에 `파일 {N}개 · {formatSize(total)}` 형태로 렌더. 파일 0개이면 요약 영역 숨김(빈 텍스트).
@@ -741,10 +741,24 @@ file_server/
 │   ├── imageconv/              # PNG → JPG 변환 (§2.8) — disintegration/imaging 기반, 흰 배경 합성
 │   ├── importjob/              # 잡 라이프사이클·이벤트 채널·Registry (인메모리)
 │   └── settings/               # §2.7 URL import 설정 — JSON 영속화 + 스냅샷 getter
-├── web/
+├── web/                          # vanilla HTML/CSS/JS — 번들러·외부 의존성 없음
 │   ├── index.html
 │   ├── style.css
-│   └── app.js
+│   ├── main.js                   # 진입점 (init/wire/popstate)
+│   ├── state.js / dom.js / util.js   # 공유 상태·DOM ref·유틸
+│   ├── router.js                 # URL 쿼리 동기 + history 관리
+│   ├── browse.js                 # 디렉터리 조회·렌더·라이트박스·오디오
+│   ├── tree.js                   # 사이드바 폴더 트리
+│   ├── fileOps.js                # drag/drop, rename/delete 모달
+│   ├── dragSelect.js             # rubber-band 영역 선택 (§2.5.4)
+│   ├── settings.js               # 설정 모달
+│   ├── urlImport.js              # URL/HLS import SSE 클라이언트
+│   ├── urlImportJobs.js          # 백그라운드 잡 복원/취소/dismiss
+│   ├── convert.js                # TS→MP4 변환 (sseConvertModal 주입)
+│   ├── convertImage.js           # 이미지 포맷 변환 모달
+│   ├── convertWebp.js            # 움짤 → WebP 변환 (sseConvertModal 주입)
+│   ├── sseConvertModal.js        # SSE 변환 공유 모달 팩토리
+│   └── modalDismiss.js           # 폼 모달 ESC + 백드롭 닫기 헬퍼
 ├── Dockerfile
 ├── docker-compose.yml
 └── SPEC.md
@@ -918,7 +932,7 @@ Body 형태로 두 동작 분기 (`PATCH /api/file`과 동일 패턴):
 - 자기 자손으로 이동 시도 (`/a` → `/a/b`): `400 {"error": "invalid destination"}`
 - 동일 부모 (이동 의미 없음): `400 {"error": "same directory"}`
 - 동일 base name이 destDir에 이미 존재: `409 {"error": "already exists"}`
-- cross-volume(`EXDEV`): `500 {"error": "cross_device"}` — 폴더 재귀 copy 폴백 없음
+- cross-volume(`EXDEV`): `400 {"error": "cross_device"}` — 운영 precondition 미충족(단일 볼륨), 폴더 재귀 copy 폴백 없음
 - traversal: `400 {"error": "invalid path"}`
 
 #### GET /api/stream
