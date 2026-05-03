@@ -8,7 +8,7 @@
 >
 > 핸드오프: [`tasks/handoff-hls-url-import-ssrf.md`](handoff-hls-url-import-ssrf.md)
 >
-> **Status: draft** — 구현 시작 전.
+> **Status: merged** — SPEC §2.6.1로 흡수, `internal/urlfetch/dialer.go` 등이 머지됨. 본 문서는 historical record.
 
 ---
 
