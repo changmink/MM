@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	handlerconvert "file_server/internal/handler/convert"
+	handlerimport "file_server/internal/handler/import"
 	"file_server/internal/importjob"
 	"file_server/internal/settings"
 	"file_server/internal/thumb"
@@ -27,6 +29,8 @@ type Handler struct {
 	convertLocks sync.Map            // absSrcPath -> *sync.Mutex; serializes TS → MP4 per source
 	webpLocks    sync.Map            // absSrcPath -> *sync.Mutex; serializes clip → WebP per source
 	importSem    chan struct{}       // size-1 semaphore; serializes URL import batches process-wide
+	importAPI    *handlerimport.Handler
+	convertAPI   *handlerconvert.Handler
 }
 
 // Option configures a Handler. Use with Register so tests can keep their
@@ -78,6 +82,8 @@ func Register(mux *http.ServeMux, dataDir, webDir string, settingsStore *setting
 	// (possibly overridden) serverCtx and propagates a graceful shutdown
 	// cancel into every active job.
 	h.registry = importjob.New(h.serverCtx)
+	h.importAPI = handlerimport.New(h.dataDir, h.thumbPool, h.urlClient, h.settings, h.registry, h.importSem)
+	h.convertAPI = handlerconvert.New(h.dataDir, &h.convertLocks, &h.webpLocks)
 
 	// Read-only routes pass through directly. Mutating routes go through
 	// requireSameOrigin so a request whose Origin (when present) does not
@@ -92,12 +98,12 @@ func Register(mux *http.ServeMux, dataDir, webDir string, settingsStore *setting
 	mux.HandleFunc("/api/upload", requireSameOrigin(h.handleUpload))
 	mux.HandleFunc("/api/file", requireSameOrigin(h.handleFile))
 	mux.HandleFunc("/api/folder", requireSameOrigin(h.handleFolder))
-	mux.HandleFunc("/api/import-url", requireSameOrigin(h.handleImportURL))
-	mux.HandleFunc("/api/import-url/jobs", requireSameOrigin(h.handleJobsRoot))
-	mux.HandleFunc("/api/import-url/jobs/", requireSameOrigin(h.handleJobsByID))
-	mux.HandleFunc("/api/convert", requireSameOrigin(h.handleConvert))
-	mux.HandleFunc("/api/convert-image", requireSameOrigin(h.handleConvertImage))
-	mux.HandleFunc("/api/convert-webp", requireSameOrigin(h.handleConvertWebP))
+	mux.HandleFunc("/api/import-url", requireSameOrigin(h.importAPI.HandleImportURL))
+	mux.HandleFunc("/api/import-url/jobs", requireSameOrigin(h.importAPI.HandleJobsRoot))
+	mux.HandleFunc("/api/import-url/jobs/", requireSameOrigin(h.importAPI.HandleJobsByID))
+	mux.HandleFunc("/api/convert", requireSameOrigin(h.convertAPI.HandleConvert))
+	mux.HandleFunc("/api/convert-image", requireSameOrigin(h.convertAPI.HandleConvertImage))
+	mux.HandleFunc("/api/convert-webp", requireSameOrigin(h.convertAPI.HandleConvertWebP))
 	mux.HandleFunc("/api/settings", requireSameOrigin(h.handleSettings))
 
 	mux.Handle("/", http.FileServer(http.Dir(webDir)))

@@ -1,4 +1,4 @@
-package handler
+package importurl
 
 import (
 	"encoding/json"
@@ -26,17 +26,17 @@ type listJobsResponse struct {
 // the live `start/progress/done/error/summary` events; clients route by
 // `phase` and never have to special-case the first frame.
 type snapshotEnvelope struct {
-	Phase string                 `json:"phase"` // always "snapshot"
-	Job   importjob.JobSnapshot  `json:"job"`
+	Phase string                `json:"phase"` // always "snapshot"
+	Job   importjob.JobSnapshot `json:"job"`
 }
 
 // handleJobsRoot routes /api/import-url/jobs (no trailing slash). GET
 // returns the active+finished snapshot; DELETE with `?status=finished`
 // clears every terminal job in one call. Other methods/queries 405/400.
-// The path-with-trailing-slash variant goes through handleJobsByID below —
+// The path-with-trailing-slash variant goes through handleJobsByID below ??
 // the two registrations together cover the full /jobs and /jobs/{id}/...
 // space without ambiguity.
-func (h *Handler) handleJobsRoot(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleJobsRoot(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		h.handleListJobs(w, r)
@@ -49,7 +49,7 @@ func (h *Handler) handleJobsRoot(w http.ResponseWriter, r *http.Request) {
 
 // handleListJobs returns a snapshot of every job the registry currently
 // holds, partitioned by terminal state. Encode failures past the header
-// boundary are logged and dropped — there is nothing useful to send the
+// boundary are logged and dropped ??there is nothing useful to send the
 // client at that point and writeError would just produce a malformed
 // response on top of the already-flushed body.
 func (h *Handler) handleListJobs(w http.ResponseWriter, _ *http.Request) {
@@ -76,12 +76,14 @@ func snapshotSlice(jobs []*importjob.Job) []importjob.JobSnapshot {
 
 // handleJobsByID dispatches /api/import-url/jobs/{id}/{action}. Three
 // shapes are wired:
-//   GET  /jobs/{id}/events         → SSE snapshot + live stream (J4)
-//   POST /jobs/{id}/cancel         → batch or per-URL cancel (J5)
-//   DEL  /jobs/{id}                → remove a terminal job (J5)
+//
+//	GET  /jobs/{id}/events         ??SSE snapshot + live stream (J4)
+//	POST /jobs/{id}/cancel         ??batch or per-URL cancel (J5)
+//	DEL  /jobs/{id}                ??remove a terminal job (J5)
+//
 // Anything else (typo'd action, extra path segments, wrong method) returns
 // 404 / 405 so nothing falls through to a default handler.
-func (h *Handler) handleJobsByID(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleJobsByID(w http.ResponseWriter, r *http.Request) {
 	suffix := strings.TrimPrefix(r.URL.Path, "/api/import-url/jobs/")
 	parts := strings.Split(suffix, "/")
 	if len(parts) == 0 || parts[0] == "" {
@@ -90,7 +92,7 @@ func (h *Handler) handleJobsByID(w http.ResponseWriter, r *http.Request) {
 	}
 	jobID := parts[0]
 	if len(parts) == 1 {
-		// /jobs/{id} bare — only DELETE is valid here.
+		// /jobs/{id} bare ??only DELETE is valid here.
 		switch r.Method {
 		case http.MethodDelete:
 			h.handleDeleteJob(w, r, jobID)
@@ -150,7 +152,7 @@ func (h *Handler) handleCancelJob(w http.ResponseWriter, r *http.Request, jobID 
 
 	indexStr := r.URL.Query().Get("index")
 	if indexStr == "" {
-		// Whole-batch cancel — worker observes job.Ctx().Done() and emits
+		// Whole-batch cancel ??worker observes job.Ctx().Done() and emits
 		// the cancelled events / summary itself.
 		job.Cancel()
 		w.WriteHeader(http.StatusNoContent)
@@ -168,15 +170,15 @@ func (h *Handler) handleCancelJob(w http.ResponseWriter, r *http.Request, jobID 
 	}
 
 	// Atomic decision: registered cancel takes precedence (worker emits the
-	// error frame); pending → mark + handler emits the error frame; else
-	// terminal → 409. Doing both checks under one lock closes the previous
+	// error frame); pending ??mark + handler emits the error frame; else
+	// terminal ??409. Doing both checks under one lock closes the previous
 	// race window where the worker could RegisterURLCancel between the two
 	// separate handler-side checks.
 	url, kind := job.CancelOne(idx)
 	switch kind {
 	case importjob.CancelKindRunning:
 		// Worker observes ctx.Done() and emits error("cancelled") via
-		// fetchOneJob's existing cancellation path — handler stays silent.
+		// fetchOneJob's existing cancellation path ??handler stays silent.
 		w.WriteHeader(http.StatusNoContent)
 	case importjob.CancelKindPending:
 		// Worker bypasses this index on its next URLStatus check; we own
@@ -186,13 +188,13 @@ func (h *Handler) handleCancelJob(w http.ResponseWriter, r *http.Request, jobID 
 		}))
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		// Terminal or unknown — nothing to cancel.
+		// Terminal or unknown ??nothing to cancel.
 		writeError(w, r, http.StatusConflict, "url already finished", nil)
 	}
 }
 
 // handleDeleteJob removes a terminal job from the registry. Active jobs
-// (queued/running) require an explicit cancel first → 409. Unknown ids 404.
+// (queued/running) require an explicit cancel first ??409. Unknown ids 404.
 // Subscribers, if any, were already detached at SetStatus(terminal) time so
 // no broadcast is needed here.
 func (h *Handler) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID string) {
@@ -228,7 +230,7 @@ func (h *Handler) handleDeleteFinishedJobs(w http.ResponseWriter, r *http.Reques
 // handleSubscribeJob streams the named job's lifecycle as SSE: a single
 // snapshot frame followed by every subsequent live event until the job
 // terminates. A subscriber that arrives after the job is already finished
-// receives only the snapshot — SubscribeWithSnapshot pre-closes its
+// receives only the snapshot ??SubscribeWithSnapshot pre-closes its
 // channel in that case so the loop falls out immediately on the first read.
 func (h *Handler) handleSubscribeJob(w http.ResponseWriter, r *http.Request, jobID string) {
 	job, ok := h.registry.Get(jobID)
@@ -242,7 +244,7 @@ func (h *Handler) handleSubscribeJob(w http.ResponseWriter, r *http.Request, job
 		return
 	}
 
-	// Atomic snapshot+subscribe under a single j.mu hold — closes the race
+	// Atomic snapshot+subscribe under a single j.mu hold ??closes the race
 	// window where an event published between Snapshot() and Subscribe()
 	// would land in both the snapshot AND the channel and double-count on
 	// the client.
@@ -257,7 +259,7 @@ func (h *Handler) handleSubscribeJob(w http.ResponseWriter, r *http.Request, job
 		select {
 		case ev, open := <-events:
 			if !open {
-				// Job reached terminal state — SetStatus closed our channel.
+				// Job reached terminal state ??SetStatus closed our channel.
 				// Snapshot already reflects the terminal status (the handler
 				// always returns after delivering it).
 				return
@@ -272,4 +274,3 @@ func (h *Handler) handleSubscribeJob(w http.ResponseWriter, r *http.Request, job
 		}
 	}
 }
-

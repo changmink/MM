@@ -1,4 +1,4 @@
-package handler
+package convertapi
 
 import (
 	"context"
@@ -19,8 +19,8 @@ import (
 const (
 	maxConvertWebPPaths    = 500
 	webpConvertFileTimeout = 5 * time.Minute
-	clipMaxBytes           = 50 * 1024 * 1024 // SPEC §2.5.3 / §2.9 — 50 MiB
-	clipMaxDurationSec     = 30.0             // SPEC §2.5.3 / §2.9 — 30s
+	clipMaxBytes           = 50 * 1024 * 1024 // SPEC §2.5.3 / §2.9 ??50 MiB
+	clipMaxDurationSec     = 30.0             // SPEC §2.5.3 / §2.9 ??30s
 )
 
 type webpConvertRequest struct {
@@ -28,13 +28,13 @@ type webpConvertRequest struct {
 	DeleteOriginal bool     `json:"delete_original"`
 }
 
-// handleConvertWebP drives the SSE batch endpoint for clip → animated WebP
-// conversion. Wire schema mirrors POST /api/convert (TS → MP4) — same
-// start/progress/done/error/summary phases — so the frontend can reuse the
+// handleConvertWebP drives the SSE batch endpoint for clip ??animated WebP
+// conversion. Wire schema mirrors POST /api/convert (TS ??MP4) ??same
+// start/progress/done/error/summary phases ??so the frontend can reuse the
 // SSE consumer pattern. Per-file gate validation (GIF unconditional /
-// video ≤50MiB && ≤30s) runs before any encoding work and surfaces as a
+// video ??0MiB && ??0s) runs before any encoding work and surfaces as a
 // terminal error event, not an HTTP error.
-func (h *Handler) handleConvertWebP(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleConvertWebP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
 		return
@@ -75,7 +75,7 @@ func (h *Handler) handleConvertWebP(w http.ResponseWriter, r *http.Request) {
 	emit(convSummary{Phase: "summary", Succeeded: succeeded, Failed: failed})
 }
 
-// convertWebPOneSSE drives one clip → WebP conversion and emits exactly one
+// convertWebPOneSSE drives one clip ??WebP conversion and emits exactly one
 // terminal event (done or error) plus zero-or-one start and zero-or-more
 // progress events. Returns true on success.
 func (h *Handler) convertWebPOneSSE(parentCtx context.Context, emit func(any),
@@ -114,7 +114,7 @@ func (h *Handler) convertWebPOneSSE(parentCtx context.Context, emit func(any),
 	switch {
 	case ext == ".gif":
 		inputType = "image"
-		// GIF containers carry no audio stream — skip ProbeStreamInfo.
+		// GIF containers carry no audio stream ??skip ProbeStreamInfo.
 	case media.IsVideo(origName):
 		if fi.Size() > clipMaxBytes {
 			return emitErr("not_clip")
@@ -226,7 +226,7 @@ func (h *Handler) convertWebPOneSSE(parentCtx context.Context, emit func(any),
 
 // videoDurationForGate returns the cached duration sidecar value if present,
 // otherwise probes via ffprobe (writing a sidecar for future calls). Returns
-// nil when duration cannot be determined — caller surfaces as
+// nil when duration cannot be determined ??caller surfaces as
 // "duration_unknown". The thumb sidecar lives at <srcDir>/.thumb/<name>.jpg.dur.
 func videoDurationForGate(srcDir, origName, absVideoPath string) *float64 {
 	thumbPath := filepath.Join(srcDir, ".thumb", origName+".jpg")
@@ -269,7 +269,7 @@ func deleteOriginalAndSidecars(abs, inputType string) string {
 }
 
 // lockWebPKey serializes producers for the same source path. Mirrors
-// convert.go's lockConvertKey — leaves the map entry in place after unlock,
+// convert.go's lockConvertKey ??leaves the map entry in place after unlock,
 // bounded by the set of unique source files on disk.
 func (h *Handler) lockWebPKey(key string) func() {
 	v, _ := h.webpLocks.LoadOrStore(key, &sync.Mutex{})

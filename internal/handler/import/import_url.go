@@ -1,4 +1,4 @@
-package handler
+package importurl
 
 import (
 	"context"
@@ -39,7 +39,7 @@ type importRequest struct {
 
 // sseRegister is the first frame of the POST response. It hands the client
 // the jobId so a refresh can re-subscribe via GET /jobs/{id}/events. It is
-// written directly to the request writer (not via Job.Publish) — register is
+// written directly to the request writer (not via Job.Publish) ??register is
 // per-request metadata, not job state, so other subscribers do not see it.
 type sseRegister struct {
 	Phase string `json:"phase"` // always "register"
@@ -53,7 +53,7 @@ type sseStart struct {
 	Name  string `json:"name"`
 	// Total is the Content-Length advertised by the origin. HLS has no total
 	// byte count (variable-bitrate remux of streaming segments), so it arrives
-	// as 0 and is omitted from the wire via omitempty — clients use this
+	// as 0 and is omitted from the wire via omitempty ??clients use this
 	// absence to render an indeterminate progress bar.
 	Total int64  `json:"total,omitempty"`
 	Type  string `json:"type"`
@@ -90,7 +90,7 @@ type sseSummary struct {
 	Cancelled int    `json:"cancelled,omitempty"`
 }
 
-// sseQueued is the first event published into the job's event stream — it
+// sseQueued is the first event published into the job's event stream ??it
 // fires before the handler tries to acquire the process-wide import
 // semaphore. When no other batch is in flight the subsequent semaphore
 // acquire returns immediately and `start` follows without the UI ever
@@ -101,7 +101,7 @@ type sseQueued struct {
 	Phase string `json:"phase"` // always "queued"
 }
 
-func (h *Handler) handleImportURL(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleImportURL(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
 		return
@@ -208,7 +208,7 @@ func (h *Handler) handleImportURL(w http.ResponseWriter, r *http.Request) {
 // directly.
 //
 // The deferred recover guarantees that even on a panic in urlfetch / ffmpeg
-// helpers the job lands in a terminal state — without it the goroutine dies
+// helpers the job lands in a terminal state ??without it the goroutine dies
 // silently, Done() never closes, the slot stays counted against
 // MaxQueuedJobs forever, and Handler.Close stalls the full WaitAll
 // deadline on shutdown.
@@ -223,14 +223,14 @@ func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destA
 	job.Publish(mustEvent("queued", sseQueued{Phase: "queued"}))
 
 	// Acquire the process-wide batch semaphore. importSem is paired with
-	// job.Ctx() so a graceful-shutdown cancel unblocks the wait — request
+	// job.Ctx() so a graceful-shutdown cancel unblocks the wait ??request
 	// context is intentionally NOT used so closing the browser tab does not
 	// abort the queue position.
 	select {
 	case h.importSem <- struct{}{}:
 		defer func() { <-h.importSem }()
 	case <-job.Ctx().Done():
-		// Cancelled before acquiring the semaphore — every URL is reported
+		// Cancelled before acquiring the semaphore ??every URL is reported
 		// cancelled, no Start/Done was ever emitted.
 		urls := job.Snapshot().URLs
 		cancelled := cancelRemainingURLs(job, urls, 0)
@@ -253,7 +253,7 @@ func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destA
 		// Per-URL cancel may have flipped this index to "cancelled" before we
 		// reached it (cancel API sets state + emits error event for pending
 		// URLs). Skip the fetch entirely; the count is correct because the
-		// cancel handler did NOT increment counters — we own that.
+		// cancel handler did NOT increment counters ??we own that.
 		if job.URLStatus(i) == "cancelled" {
 			cancelled++
 			continue
@@ -274,7 +274,7 @@ func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destA
 // cancelRemainingURLs marks URLs in [fromIdx, len(urls)) as cancelled and
 // publishes the corresponding error events. Returns the count cancelled by
 // this call. URLs that a prior per-URL CancelOne handler already flipped to
-// "cancelled" are counted but their event is NOT re-emitted — the handler
+// "cancelled" are counted but their event is NOT re-emitted ??the handler
 // owns that publish under CancelKindPending and a duplicate would deliver
 // the same error("cancelled") twice for the same index.
 func cancelRemainingURLs(job *importjob.Job, urls []importjob.URLState, fromIdx int) int {
@@ -298,9 +298,9 @@ func cancelRemainingURLs(job *importjob.Job, urls []importjob.URLState, fromIdx 
 }
 
 // finalizeBatch publishes the summary frame, records it on the job, and sets
-// the terminal status. Precedence: any success → Completed, else any
-// cancellation → Cancelled, else → Failed. Single source for this terminal
-// transition so ordering (SetSummary → Publish → SetStatus) cannot drift —
+// the terminal status. Precedence: any success ??Completed, else any
+// cancellation ??Cancelled, else ??Failed. Single source for this terminal
+// transition so ordering (SetSummary ??Publish ??SetStatus) cannot drift ??
 // SetStatus closes subscriber channels, so summary MUST be published first
 // or live clients race past their last frame.
 func finalizeBatch(job *importjob.Job, succeeded, failed, cancelled int) {
@@ -334,7 +334,7 @@ const (
 func (h *Handler) fetchOneJob(job *importjob.Job, index int, u, destAbs, relDir string,
 	maxBytes int64, perURLTimeout time.Duration) fetchResult {
 
-	// Per-URL context — registered with the Job so the cancel API added in
+	// Per-URL context ??registered with the Job so the cancel API added in
 	// J5 can target a single URL without aborting the whole batch.
 	urlCtx, cancelURL := context.WithCancel(job.Ctx())
 	defer cancelURL()
@@ -345,7 +345,7 @@ func (h *Handler) fetchOneJob(job *importjob.Job, index int, u, destAbs, relDir 
 	// (CancelKindPending) between the runImportJob loop's URLStatus check
 	// and the RegisterURLCancel above. CancelOne under j.mu observes our
 	// registered entry only AFTER this point, so re-checking status here
-	// — also under j.mu via URLStatus — guarantees: either we see the
+	// ??also under j.mu via URLStatus ??guarantees: either we see the
 	// cancellation now and skip the fetch, or CancelOne saw our entry and
 	// went down the CancelKindRunning path (firing urlCtx). Either way the
 	// URL receives exactly one terminal accounting.
@@ -382,7 +382,7 @@ func (h *Handler) fetchOneJob(job *importjob.Job, index int, u, destAbs, relDir 
 			select {
 			case progressCh <- received:
 			default:
-				// drop — slow subscribers must not stall io.Copy
+				// drop ??slow subscribers must not stall io.Copy
 			}
 		},
 	}
@@ -461,7 +461,7 @@ func isCancelled(urlCtx, jobCtx context.Context, ferr *urlfetch.FetchError) bool
 
 // logFetchError writes a structured server-side log for failed URL imports.
 // The client only ever receives the opaque error code; this is where operators
-// see what actually broke — especially useful for ffmpeg_missing (operator
+// see what actually broke ??especially useful for ffmpeg_missing (operator
 // must install ffmpeg) and ffmpeg_error (stream-specific stderr can be
 // inspected to tell DRM/format issues apart). URLs are redacted before
 // logging because user-supplied origins commonly carry signed query
@@ -477,7 +477,7 @@ func logFetchError(u string, ferr *urlfetch.FetchError) {
 
 // sensitiveQueryKeys lists query parameters whose value the URL redactor
 // strips before logging. Match is case-insensitive (lookup lowercases the
-// key, so entries here MUST be lowercase). Intentionally narrow — broad
+// key, so entries here MUST be lowercase). Intentionally narrow ??broad
 // redaction would obscure useful diagnostic info on benign origins.
 // Hyphenated and snake_case variants are listed separately because URL
 // query keys are not normalized.
@@ -544,7 +544,7 @@ func redactErr(err error) string {
 // invariant can be unit-tested directly. Skips publishing when SetStatus
 // already drove the job into a terminal state (late-defer panic must not flip
 // Completed/Cancelled to Failed). Skips re-publishing summary when SetSummary
-// already recorded one — the prior Publish(summary) succeeded and a duplicate
+// already recorded one ??the prior Publish(summary) succeeded and a duplicate
 // would deliver two summary frames to the same client.
 func recoverImportJob(rec any, job *importjob.Job) {
 	if rec == nil {
@@ -561,13 +561,13 @@ func recoverImportJob(rec any, job *importjob.Job) {
 		job.SetSummary(sum)
 		job.Publish(summaryEvent(sum))
 	}
-	// SetStatus(terminal) closes subscriber channels — clients that missed
+	// SetStatus(terminal) closes subscriber channels ??clients that missed
 	// the summary still observe ok=false and exit cleanly.
 	job.SetStatus(importjob.StatusFailed)
 }
 
 // summarizeURLs folds URLState entries into a Summary by terminal status.
-// Pending/running URLs land in Failed — used by the panic-recovery path
+// Pending/running URLs land in Failed ??used by the panic-recovery path
 // where the worker was interrupted before resolving them either way.
 func summarizeURLs(urls []importjob.URLState) importjob.Summary {
 	var sum importjob.Summary

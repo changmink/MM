@@ -1,4 +1,4 @@
-package handler
+package convertapi
 
 import (
 	"context"
@@ -66,7 +66,7 @@ type convSummary struct {
 	Failed    int    `json:"failed"`
 }
 
-func (h *Handler) handleConvert(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleConvert(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
 		return
@@ -107,7 +107,7 @@ func (h *Handler) handleConvert(w http.ResponseWriter, r *http.Request) {
 	emit(convSummary{Phase: "summary", Succeeded: succeeded, Failed: failed})
 }
 
-// convertOneSSE drives one TS → MP4 conversion and emits exactly one terminal
+// convertOneSSE drives one TS ??MP4 conversion and emits exactly one terminal
 // event (done or error) plus zero-or-one start and zero-or-more progress
 // events. Returns true on success.
 func (h *Handler) convertOneSSE(parentCtx context.Context, emit func(any),
@@ -211,7 +211,7 @@ func (h *Handler) convertOneSSE(parentCtx context.Context, emit func(any),
 		} else {
 			// Best-effort sidecar cleanup. The sidecars are regenerated on
 			// demand for the new .mp4, so failure here doesn't require a
-			// warning — the only observable effect is a stale thumb that the
+			// warning ??the only observable effect is a stale thumb that the
 			// user can clear by touching the folder.
 			thumbDir := filepath.Join(srcDir, ".thumb")
 			for _, suffix := range []string{".jpg", ".jpg.dur"} {
@@ -266,7 +266,7 @@ func logConvertError(relPath string, err error, code string) {
 }
 
 // lockConvertKey serializes producers for the same source TS path. Matches
-// stream.go:lockStreamKey — leaves the map entry in place after unlock,
+// stream.go:lockStreamKey ??leaves the map entry in place after unlock,
 // bounded by the set of unique TS files on disk.
 func (h *Handler) lockConvertKey(key string) func() {
 	v, _ := h.convertLocks.LoadOrStore(key, &sync.Mutex{})

@@ -1,4 +1,4 @@
-package handler
+package convertapi
 
 import (
 	"context"
@@ -28,7 +28,7 @@ type convertImageRequest struct {
 
 // convertImageResult mirrors one entry of the response array. Output/Name/
 // Size/Warnings populate on success; Error populates on failure (mutually
-// exclusive — never both).
+// exclusive ??never both).
 type convertImageResult struct {
 	Index    int      `json:"index"`
 	Path     string   `json:"path"`
@@ -45,13 +45,13 @@ type convertImageResponse struct {
 	Results   []convertImageResult `json:"results"`
 }
 
-// handleConvertImage drives the synchronous PNG → JPG batch endpoint. SSE is
-// intentionally avoided (SPEC §2.8.2) — image conversions complete in well
+// handleConvertImage drives the synchronous PNG ??JPG batch endpoint. SSE is
+// intentionally avoided (SPEC §2.8.2) ??image conversions complete in well
 // under a second per file, so a streaming protocol would add complexity
 // without UX benefit. Per-item failures are returned via results[i].Error
 // rather than HTTP error codes; the request as a whole returns 200 unless
 // the request envelope itself is malformed.
-func (h *Handler) handleConvertImage(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleConvertImage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
 		return
@@ -73,7 +73,7 @@ func (h *Handler) handleConvertImage(w http.ResponseWriter, r *http.Request) {
 	resp := convertImageResponse{Results: make([]convertImageResult, len(body.Paths))}
 	for i, p := range body.Paths {
 		if r.Context().Err() != nil {
-			// Honor request cancellation — populate remaining slots with
+			// Honor request cancellation ??populate remaining slots with
 			// a cancellation marker so the client sees a result for every
 			// requested path instead of a short array.
 			for j := i; j < len(body.Paths); j++ {
@@ -94,8 +94,8 @@ func (h *Handler) handleConvertImage(w http.ResponseWriter, r *http.Request) {
 }
 
 // convertImageOne handles a single path and returns one result entry.
-// Validation order matches the spec: SafePath → exists → file (not dir) →
-// .png extension → target collision → conversion → optional original delete.
+// Validation order matches the spec: SafePath ??exists ??file (not dir) ??
+// .png extension ??target collision ??conversion ??optional original delete.
 func (h *Handler) convertImageOne(parentCtx context.Context, index int, relPath string, deleteOriginal bool) convertImageResult {
 	res := convertImageResult{Index: index, Path: relPath}
 
@@ -126,7 +126,7 @@ func (h *Handler) convertImageOne(parentCtx context.Context, index int, relPath 
 	srcDir := filepath.Dir(abs)
 	dstAbs := filepath.Join(srcDir, base+".jpg")
 
-	// Conflict check before any work — keeps the failure cheap and avoids
+	// Conflict check before any work ??keeps the failure cheap and avoids
 	// touching disk when the target slot is taken.
 	if _, err := os.Stat(dstAbs); err == nil {
 		res.Error = "already_exists"
@@ -159,12 +159,10 @@ func (h *Handler) convertImageOne(parentCtx context.Context, index int, relPath 
 		} else {
 			res.Error = "canceled"
 		}
-		// Best-effort cleanup: imageconv는 ctx를 받지 않으므로 timeout 후에도
-		// 워커가 dstAbs를 atomic rename으로 commit할 수 있다. 사용자가 취소한
-		// 결과물을 디스크에 남기면 (a) 다음 요청이 already_exists로 거부되고
-		// (b) browse가 갑자기 .jpg를 보여 UX가 망가지므로, 워커가 끝난 뒤
-		// 성공 케이스에 한해 출력 파일을 제거. done은 버퍼=1이라 워커가
-		// 결국 write하면 goroutine이 종료된다 (누수 없음).
+		// Best-effort cleanup: imageconv does not accept a context, so the
+		// worker may still commit dstAbs after this request has timed out or
+		// been cancelled. Remove that late output when conversion eventually
+		// succeeds so a later request does not hit already_exists.
 		go func() {
 			if werr := <-done; werr == nil {
 				_ = os.Remove(dstAbs)
