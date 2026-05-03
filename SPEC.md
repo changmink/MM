@@ -1337,6 +1337,16 @@ PNG 파일을 JPG로 영구 변환 (§2.8.2). **동기 JSON 응답** — SSE가 
 
 LAN 단일 사용자 모델에는 인증이 없으므로, 다른 오리진의 페이지가 사용자 브라우저를 통해 본 서버로 mutating 요청을 보내는 시나리오는 **요청 자체의 진위(authenticity)** 로만 막는다. `internal/handler/handler.go`의 `requireSameOrigin` 미들웨어가 모든 mutating 라우트(POST·PATCH·DELETE·PUT)에 걸려 있다. GET·HEAD·SSE 구독 (`EventSource`) 은 통과 — 읽기 전용이며 EventSource는 `Origin` 헤더를 일관되게 전송하지 않기 때문.
 
+`requireSameOrigin`으로 래핑되는 mutating 라우트(단일 출처 — CLAUDE.md / README 등은 본 절을 참조):
+- `POST /api/upload`
+- `PATCH /api/file`, `DELETE /api/file`
+- `POST /api/folder`, `PATCH /api/folder`, `DELETE /api/folder`
+- `POST /api/import-url`, `/api/import-url/jobs`, `/api/import-url/jobs/` (cancel/dismiss; SSE 재구독 GET은 비대상)
+- `POST /api/convert`, `POST /api/convert-image`, `POST /api/convert-webp`
+- `PATCH /api/settings`
+
+읽기 전용(`/api/browse`, `/api/tree`, `/api/stream`, `/api/thumb`, `GET /api/settings`)은 래핑 대상 아님. 새 mutating 라우트를 추가하면 본 목록과 `Register`의 wrap 호출을 같이 갱신한다.
+
 검사 규칙:
 
 1. `Origin` 헤더가 있으면 `url.Parse(Origin).Host == r.Host` 일 때만 허용.
@@ -1619,12 +1629,12 @@ volumes:
 
 첫 공식 릴리즈. 폴더 운영(생성·이름 변경·삭제·이동)이 모두 갖춰져 single-user 미디어 서버로서 기본 기능이 닫힌다.
 
-**포함:**
-- [ ] 폴더 이동 백엔드 (§2.1.2 — `media.MoveDir` 신설, `PATCH /api/folder` body 분기)
-- [ ] 폴더 이동 UI (§2.1.2, §2.1.3 — 사이드바 트리 ↔ 트리 / 메인 표 폴더 행 → 트리·breadcrumb DnD)
-- [ ] 사이드바 트리 노드 🗑 삭제 버튼 (§2.1.3)
-- [ ] 새 폴더 버튼 위치 이동 (메인 툴바 → 사이드바 헤더, §2.1.3)
-- [ ] README 갱신 — 본 SPEC §2.1.2 / §2.1.3을 README features 목록에 반영, 0.0.1 릴리즈 노트 추가, 기존 폴더 작업 설명 업데이트
+**포함 (모두 머지 완료 — 0.0.1 릴리즈됨, README §0.0.1 릴리즈 노트 참고):**
+- [x] 폴더 이동 백엔드 (§2.1.2 — `media.MoveDir` 신설, `PATCH /api/folder` body 분기)
+- [x] 폴더 이동 UI (§2.1.2, §2.1.3 — 사이드바 트리 ↔ 트리 / 메인 표 폴더 행 → 트리·breadcrumb DnD)
+- [x] 사이드바 트리 노드 🗑 삭제 버튼 (§2.1.3)
+- [x] 새 폴더 버튼 위치 이동 (메인 툴바 → 사이드바 헤더, §2.1.3)
+- [x] README 갱신 — 본 SPEC §2.1.2 / §2.1.3을 README features 목록에 반영, 0.0.1 릴리즈 노트 추가, 기존 폴더 작업 설명 업데이트
 
 **범위 외 (후속 버전):**
 - 사이드바 트리 노드별 + 버튼으로 임의 위치 폴더 생성
