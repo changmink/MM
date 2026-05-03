@@ -1,4 +1,4 @@
-package urlfetch
+package hls
 
 import (
 	"bytes"
@@ -21,6 +21,44 @@ import (
 	"file_server/internal/ffmpeg"
 )
 
+// Result describes a successful HLS import.
+type Result struct {
+	URL      string
+	Path     string
+	Name     string
+	Size     int64
+	Type     string
+	Warnings []string
+}
+
+// FetchError is the typed failure returned by Fetch.
+type FetchError struct {
+	Code string
+	Err  error
+}
+
+func (e *FetchError) Error() string { return e.Code }
+func (e *FetchError) Unwrap() error { return e.Err }
+
+// Callbacks lets a caller observe an HLS fetch in flight.
+type Callbacks struct {
+	Start    func(name string, total int64, fileType string)
+	Progress func(received int64)
+}
+
+// Deps carries parent-package helpers into the HLS subpackage without creating
+// an import cycle.
+type Deps struct {
+	ClassifyHTTPError func(error) *FetchError
+	RenameUnique      func(tmpPath, destDir, name string) (string, bool, error)
+	SanitizeFilename  func(string) string
+}
+
+const (
+	progressByteThreshold = 1 << 20
+	progressTimeThreshold = 250 * time.Millisecond
+)
+
 // Sentinel errors for HLS handling. classifyHLSRemuxError maps these plus
 // context.Canceled / context.DeadlineExceeded to stable FetchError.Code values
 // documented in SPEC §5.1.
@@ -36,11 +74,13 @@ var (
 )
 
 // hlsMaxSegments caps how many #EXTINF segments a single media playlist may
-// declare. 10,000 ≈ 16 hours of 6-second VOD — comfortably above any normal
+// declare. 10,000 ??16 hours of 6-second VOD ??comfortably above any normal
 // movie or lecture, but below an attacker's "1 byte × millions" request-rate
 // flood that the cumulative byte cap (url_import_max_bytes) cannot stop on
 // its own. See spec §3.2 D-8.
-const hlsMaxSegments = 10000
+const MaxSegments = 10000
+
+const hlsMaxSegments = MaxSegments
 
 // hlsMaxKeyEntries caps the number of #EXT-X-KEY rotations a single media
 // playlist may declare. Real-world HLS rarely rotates keys more than a few
@@ -76,17 +116,19 @@ const hlsWatchInterval = 500 * time.Millisecond
 // hlsMaxPlaylistBytes bounds how much of the initial response body we read to
 // parse the master playlist. Real-world master playlists are a few KiB; 1 MiB
 // is a generous defense-in-depth ceiling that still lets us fit in memory.
-const hlsMaxPlaylistBytes = 1 << 20
+const MaxPlaylistBytes = 1 << 20
+
+const hlsMaxPlaylistBytes = MaxPlaylistBytes
 
 // isHLSResponse decides whether to take the HLS branch. The primary signal is
 // a canonical HLS Content-Type. "audio/mpegurl" is the pre-RFC-8216 legacy
 // form still emitted by several real-world CDNs (Mux test streams on GCS,
-// some Akamai configs) — treating it as HLS avoids a false
+// some Akamai configs) ??treating it as HLS avoids a false
 // unsupported_content_type for valid public streams. The fallback covers
 // CDNs that mislabel .m3u8 as text/plain or application/octet-stream; it
 // only applies when the URL path clearly names a playlist so a generic text
 // response from an unrelated URL does not get miscategorized.
-func isHLSResponse(contentType, urlPath string) bool {
+func IsResponse(contentType, urlPath string) bool {
 	mt, _, _ := mime.ParseMediaType(contentType)
 	mt = strings.ToLower(mt)
 	switch mt {
@@ -104,6 +146,10 @@ func isHLSResponse(contentType, urlPath string) bool {
 		return true
 	}
 	return false
+}
+
+func isHLSResponse(contentType, urlPath string) bool {
+	return IsResponse(contentType, urlPath)
 }
 
 var bandwidthRE = regexp.MustCompile(`BANDWIDTH=(\d+)`)
@@ -163,7 +209,7 @@ func parseMasterPlaylist(body []byte, base *url.URL) (*url.URL, error) {
 	// Guard against a (hostile or broken) master playlist whose chosen variant
 	// resolves back to itself: handing the same URL to ffmpeg would loop
 	// through the same master again. Fall back to treating it as a media
-	// playlist — ffmpeg will then either succeed if it is one, or fail with
+	// playlist ??ffmpeg will then either succeed if it is one, or fail with
 	// ffmpeg_error, which is the right outcome either way.
 	if sameURL(resolved, base) {
 		return base, nil
@@ -171,7 +217,7 @@ func parseMasterPlaylist(body []byte, base *url.URL) (*url.URL, error) {
 	return resolved, nil
 }
 
-// entryKind tags playlistEntry by its source tag — needed by materializeHLS to
+// entryKind tags playlistEntry by its source tag ??needed by materializeHLS to
 // decide naming convention (seg_NNNN.ext vs key_N.bin vs init.ext) and what
 // kind of URI rewrite to perform.
 type entryKind int
@@ -183,7 +229,7 @@ const (
 )
 
 // playlistEntry represents one remote resource referenced by a media playlist.
-// lineIdx points at the rawLines element materializeHLS should rewrite — for
+// lineIdx points at the rawLines element materializeHLS should rewrite ??for
 // segments that's the URI line, for #EXT-X-KEY / #EXT-X-MAP it's the tag line
 // itself (the URI is an attribute embedded in the tag).
 type playlistEntry struct {
@@ -215,7 +261,7 @@ var uriAttrRE = regexp.MustCompile(`URI="([^"]*)"`)
 //   - errHLSTooManySegments / errHLSTooManyKeys / errHLSTooManyInits past caps
 //   - errHLSDuplicateURIAttr if a single #EXT-X-KEY/#EXT-X-MAP line declares
 //     more than one URI="..." attribute (parser took the first; rewriter
-//     would touch all — refuse the playlist to keep the two in lockstep)
+//     would touch all ??refuse the playlist to keep the two in lockstep)
 //   - errHLSMissingMapURI for an #EXT-X-MAP without URI
 //
 // Per RFC 8216 §4.1.1, between #EXTINF and the segment URI line a media
@@ -225,7 +271,7 @@ var uriAttrRE = regexp.MustCompile(`URI="([^"]*)"`)
 // does not consume the latch).
 //
 // Empty / comment-only bodies return a playlist with no entries (no error)
-// — fetchHLS will treat that as a degenerate stream and let ffmpeg fail
+// ??fetchHLS will treat that as a degenerate stream and let ffmpeg fail
 // naturally.
 func parseMediaPlaylist(body []byte, base *url.URL) (*mediaPlaylist, error) {
 	rawLines := splitPlaylistLines(body)
@@ -249,7 +295,7 @@ func parseMediaPlaylist(body []byte, base *url.URL) (*mediaPlaylist, error) {
 			}
 			uriStr := uriAttrValue(trim)
 			if uriStr == "" {
-				// METHOD=NONE has no URI — nothing to download. Other tags
+				// METHOD=NONE has no URI ??nothing to download. Other tags
 				// without URI also fall through (defensive).
 				continue
 			}
@@ -280,16 +326,15 @@ func parseMediaPlaylist(body []byte, base *url.URL) (*mediaPlaylist, error) {
 				return nil, errHLSTooManyInits
 			}
 		case strings.HasPrefix(trim, "#"):
-			// Other tag (#EXTM3U, #EXT-X-VERSION, #EXT-X-BYTERANGE, etc.) —
-			// preserved in rawLines, no entry created. materializeHLS's
+			// Other tag (#EXTM3U, #EXT-X-VERSION, #EXT-X-BYTERANGE, etc.) ??			// preserved in rawLines, no entry created. materializeHLS's
 			// rewrite pass normalizes any URI="..." attribute here to "" so
 			// unrecognized tags can never carry a remote URL into ffmpeg's
 			// input even if a future ffmpeg whitelist relaxation occurred.
 		case trim == "":
-			// Blank line — preserved in rawLines, no entry.
+			// Blank line ??preserved in rawLines, no entry.
 		default:
 			// Non-comment, non-blank line. If a segment is pending, this is
-			// the segment URI. Otherwise treat as orphan and ignore — could
+			// the segment URI. Otherwise treat as orphan and ignore ??could
 			// be a continuation of an unknown tag.
 			if !pendingSeg {
 				continue
@@ -333,7 +378,7 @@ func uriAttrValue(tagLine string) string {
 	return m[1]
 }
 
-// splitPlaylistLines normalizes CRLF → LF and splits on LF, preserving every
+// splitPlaylistLines normalizes CRLF ??LF and splits on LF, preserving every
 // line (including the trailing empty one when the body ends with a newline).
 // Used by parseMediaPlaylist so rawLines indices match the original byte
 // layout for materializeHLS rewrite.
@@ -345,7 +390,7 @@ func splitPlaylistLines(body []byte) []string {
 	return strings.Split(normalized, "\n")
 }
 
-// sameURL compares two URLs by scheme/host/path — query/fragment ignored — so
+// sameURL compares two URLs by scheme/host/path ??query/fragment ignored ??so
 // a variant link with a differing token still counts as the same endpoint for
 // loop detection.
 func sameURL(a, b *url.URL) bool {
@@ -371,12 +416,18 @@ func extractBandwidth(line string) int64 {
 // into the supplied io.Writer for log surfacing.
 //
 // Concurrency note: runFfmpeg is a package-level var; tests that swap it
-// MUST NOT use t.Parallel() — code review enforces this rather than a hard
+// MUST NOT use t.Parallel() ??code review enforces this rather than a hard
 // runtime guard.
 var runFfmpeg = defaultRunFfmpeg
 
+func SetRunFfmpegForTest(fn func(context.Context, []string, io.Writer) error) func() {
+	orig := runFfmpeg
+	runFfmpeg = fn
+	return func() { runFfmpeg = orig }
+}
+
 // defaultRunFfmpeg surfaces errFFmpegMissing when the binary is absent so that
-// runHLSRemux can short-circuit at the same place — this also lets test swaps
+// runHLSRemux can short-circuit at the same place ??this also lets test swaps
 // bypass the LookPath check entirely (no ffmpeg needed for argv invariant
 // tests).
 func defaultRunFfmpeg(ctx context.Context, args []string, stderr io.Writer) error {
@@ -393,7 +444,7 @@ func defaultRunFfmpeg(ctx context.Context, args []string, stderr io.Writer) erro
 // same throttling rules as progressReader (byte OR time threshold).
 //
 // Security: ffmpeg is launched with -protocol_whitelist file,crypto and
-// -allowed_extensions ALL — local file reads only, no network access. This
+// -allowed_extensions ALL ??local file reads only, no network access. This
 // is the core invariant that closes the HLS DNS rebinding window: ffmpeg
 // can't perform its own hostname resolution because the input is a fully
 // local playlist and its referenced segments / keys are local files. argv
@@ -414,12 +465,12 @@ func runHLSRemux(ctx context.Context, localPlaylistPath, outputPath string, cb *
 	// -protocol_whitelist file,crypto: ffmpeg may only open local files
 	// (segments / keys / init segments materializeHLS staged) and use its
 	// AES decryption layer for #EXT-X-KEY. All network protocols are
-	// removed — there is no way for ffmpeg to perform a DNS lookup or
+	// removed ??there is no way for ffmpeg to perform a DNS lookup or
 	// network fetch from inside this invocation.
 	// -allowed_extensions ALL: segments and init files keep their original
-	// extension (.m4s, .vtt, .aac, …) under materializeHLS's whitelist
+	// extension (.m4s, .vtt, .aac, ?? under materializeHLS's whitelist
 	// scheme. ffmpeg's default extension allowlist is too narrow for some
-	// containers, so we widen it — safe because every input path is a
+	// containers, so we widen it ??safe because every input path is a
 	// local file we just wrote.
 	args := []string{
 		"-hide_banner", "-loglevel", "error",
@@ -435,7 +486,7 @@ func runHLSRemux(ctx context.Context, localPlaylistPath, outputPath string, cb *
 
 	// ffmpegCtx is a child of ctx so external cancel/timeout still propagates
 	// to the process. The watcher cancels via cancelFfmpeg() on size-cap
-	// breach — that path also routes through ctx, so runFfmpeg only ever
+	// breach ??that path also routes through ctx, so runFfmpeg only ever
 	// terminates ffmpeg through its supplied context (no out-of-band Kill).
 	ffmpegCtx, cancelFfmpeg := context.WithCancel(ctx)
 	defer cancelFfmpeg()
@@ -490,15 +541,15 @@ func runHLSRemux(ctx context.Context, localPlaylistPath, outputPath string, cb *
 // origin URLs to ffmpeg. The flow (spec §3.1):
 //
 //  1. Read master playlist body from the already-issued response (1 MiB cap).
-//  2. parseMasterPlaylist → variantURL.
-//  3. If variantURL ≠ master URL, fetch the variant playlist body via the
+//  2. parseMasterPlaylist ??variantURL.
+//  3. If variantURL ??master URL, fetch the variant playlist body via the
 //     protected client (IP-pin + DNS validation per request).
-//  4. parseMediaPlaylist on the variant body → segment / key / init entries.
+//  4. parseMediaPlaylist on the variant body ??segment / key / init entries.
 //  5. Create destDir/.urlimport-hls-<random>/ as a self-contained workspace.
 //  6. materializeHLS downloads every segment / key / init through the same
 //     protected client and writes a rewritten playlist with local-only URIs.
 //  7. runHLSRemux invokes ffmpeg on that local playlist (-protocol_whitelist
-//     file,crypto). ffmpeg never performs DNS — DNS rebinding is closed.
+//     file,crypto). ffmpeg never performs DNS ??DNS rebinding is closed.
 //  8. Atomic rename the output MP4 into destDir; defer cleanup wipes the
 //     working directory.
 //
@@ -506,7 +557,7 @@ func runHLSRemux(ctx context.Context, localPlaylistPath, outputPath string, cb *
 // classifyHLSRemuxError / classifyMaterializeError. Cumulative byte cap
 // (maxBytes) is shared between segment downloads and ffmpeg output via a
 // single atomic.Int64 counter.
-func fetchHLS(
+func Fetch(
 	ctx context.Context,
 	client *http.Client,
 	resp *http.Response,
@@ -515,7 +566,11 @@ func fetchHLS(
 	warnings []string,
 	maxBytes int64,
 	cb *Callbacks,
+	deps Deps,
 ) (*Result, *FetchError) {
+	if deps.ClassifyHTTPError == nil || deps.RenameUnique == nil || deps.SanitizeFilename == nil {
+		return nil, &FetchError{Code: "ffmpeg_error", Err: errors.New("missing HLS dependencies")}
+	}
 	masterBody, err := io.ReadAll(io.LimitReader(resp.Body, hlsMaxPlaylistBytes+1))
 	if err != nil {
 		return nil, &FetchError{Code: "network_error", Err: err}
@@ -537,7 +592,7 @@ func fetchHLS(
 
 	// Variant body source: the master itself if parseMasterPlaylist returned
 	// the original (no #EXT-X-STREAM-INF), or a fresh fetch via the protected
-	// client otherwise. The fetch path is what makes DNS rebinding-safe — the
+	// client otherwise. The fetch path is what makes DNS rebinding-safe ??the
 	// client's publicOnlyDialContext re-resolves and IP-pins per request.
 	var variantBody []byte
 	var variantBase *url.URL
@@ -545,7 +600,7 @@ func fetchHLS(
 		variantBody = masterBody
 		variantBase = parsed
 	} else {
-		body, ferr := fetchPlaylistBody(ctx, client, variantURL.String())
+		body, ferr := fetchPlaylistBody(ctx, client, variantURL.String(), deps)
 		if ferr != nil {
 			return nil, ferr
 		}
@@ -560,8 +615,7 @@ func fetchHLS(
 
 	// Workspace lives inside destDir so atomic rename of the final MP4 stays
 	// on the same filesystem (no EXDEV) and so browse's dot-prefix filter
-	// hides the directory automatically. RemoveAll runs unconditionally —
-	// success / failure / panic all converge on cleanup.
+	// hides the directory automatically. RemoveAll runs unconditionally ??	// success / failure / panic all converge on cleanup.
 	hlsTempDir, err := os.MkdirTemp(destDir, ".urlimport-hls-*")
 	if err != nil {
 		return nil, &FetchError{Code: "write_error", Err: err}
@@ -569,14 +623,14 @@ func fetchHLS(
 	defer os.RemoveAll(hlsTempDir)
 
 	// Single cumulative counter shared by segment downloads and ffmpeg
-	// output — spec D-9. atomic.Int64 keeps it safe under any future
+	// output ??spec D-9. atomic.Int64 keeps it safe under any future
 	// parallelization of segment fetches.
 	remaining := atomic.Int64{}
 	remaining.Store(maxBytes)
 
 	// Wrap progress callbacks so the materialize phase (Phase 1: segment
 	// bytes) and the remux phase (Phase 2: output MP4 bytes) emit a single
-	// monotonically increasing counter — spec D-4. Phase 2 emits are
+	// monotonically increasing counter ??spec D-4. Phase 2 emits are
 	// offset by Phase 1's total.
 	//
 	// Concurrency contract: phase1Total is written exactly once after
@@ -586,8 +640,7 @@ func fetchHLS(
 	// watcher does not start firing Progress until materializeHLS has
 	// returned. If a future change introduces concurrent Progress emit
 	// from materializeHLS (e.g. parallel segment downloads), this closure
-	// must be replaced with an atomic.Int64 read of the running total —
-	// the captured-by-reference `phase1Total` would otherwise produce a
+	// must be replaced with an atomic.Int64 read of the running total ??	// the captured-by-reference `phase1Total` would otherwise produce a
 	// torn read.
 	var phase1Total int64
 	wrappedCb := cb
@@ -605,11 +658,11 @@ func fetchHLS(
 
 	localPlaylistPath, totalDownloaded, mErr := materializeHLS(ctx, client, pl, hlsTempDir, &remaining, wrappedCb)
 	if mErr != nil {
-		return nil, classifyMaterializeError(mErr)
+		return nil, classifyMaterializeError(mErr, deps)
 	}
 	phase1Total = totalDownloaded
 
-	name := deriveHLSFilename(parsed)
+	name := deriveHLSFilename(parsed, deps)
 	// Extension is always forced to .mp4 (we remux away from .m3u8).
 	warnings = append(warnings, "extension_replaced")
 
@@ -627,7 +680,7 @@ func fetchHLS(
 		return nil, &FetchError{Code: "write_error", Err: err}
 	}
 
-	finalName, didRename, err := renameUnique(outputPath, destDir, name)
+	finalName, didRename, err := deps.RenameUnique(outputPath, destDir, name)
 	if err != nil {
 		return nil, &FetchError{Code: "write_error", Err: err}
 	}
@@ -649,14 +702,14 @@ func fetchHLS(
 // returns its body capped at hlsMaxPlaylistBytes. Errors map onto stable
 // FetchError codes so the caller can surface them in the SSE error frame
 // without wrapping again.
-func fetchPlaylistBody(ctx context.Context, client *http.Client, urlStr string) ([]byte, *FetchError) {
+func fetchPlaylistBody(ctx context.Context, client *http.Client, urlStr string, deps Deps) ([]byte, *FetchError) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
 	if err != nil {
 		return nil, &FetchError{Code: "invalid_url", Err: err}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, classifyHTTPError(err)
+		return nil, deps.ClassifyHTTPError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -674,10 +727,9 @@ func fetchPlaylistBody(ctx context.Context, client *http.Client, urlStr string) 
 
 // classifyMediaPlaylistError maps parseMediaPlaylist sentinels to public
 // FetchError codes. The three "too many" caps share a single wire code
-// (hls_too_many_segments) — operators can grep server logs for the
+// (hls_too_many_segments) ??operators can grep server logs for the
 // underlying sentinel name to distinguish segment / key / init flooding.
-// Defaults to ffmpeg_error for unrecognized parser issues (defensive —
-// keeps the wire contract narrow).
+// Defaults to ffmpeg_error for unrecognized parser issues (defensive ??// keeps the wire contract narrow).
 func classifyMediaPlaylistError(err error) *FetchError {
 	switch {
 	case errors.Is(err, errHLSVariantScheme):
@@ -695,7 +747,7 @@ func classifyMediaPlaylistError(err error) *FetchError {
 // FetchError codes. errHLSTooLarge surfaces as "too_large"; ctx errors map
 // to download_timeout / network_error; anything else flows through
 // classifyHTTPError so dial / TLS / private_network / http_error stay stable.
-func classifyMaterializeError(err error) *FetchError {
+func classifyMaterializeError(err error, deps Deps) *FetchError {
 	switch {
 	case errors.Is(err, errHLSTooLarge):
 		return &FetchError{Code: "too_large", Err: err}
@@ -704,24 +756,28 @@ func classifyMaterializeError(err error) *FetchError {
 	case errors.Is(err, context.Canceled):
 		return &FetchError{Code: "network_error", Err: err}
 	default:
-		return classifyHTTPError(err)
+		return deps.ClassifyHTTPError(err)
 	}
 }
 
 // deriveHLSFilename strips the URL's last path segment of its extension and
 // appends .mp4. Empty / "." / ".." basenames fall back to "video.mp4" so the
 // remuxed output always has a sensible filename.
-func deriveHLSFilename(parsed *url.URL) string {
+func DeriveFilename(parsed *url.URL, deps Deps) string {
 	base := path.Base(parsed.Path)
 	if decoded, err := url.PathUnescape(base); err == nil {
 		base = decoded
 	}
-	base = sanitizeFilename(base)
+	base = deps.SanitizeFilename(base)
 	stem := strings.TrimSuffix(base, path.Ext(base))
 	if stem == "" || stem == "." || stem == ".." {
 		return "video.mp4"
 	}
 	return stem + ".mp4"
+}
+
+func deriveHLSFilename(parsed *url.URL, deps Deps) string {
+	return DeriveFilename(parsed, deps)
 }
 
 // classifyHLSRemuxError maps runHLSRemux sentinels to public FetchError codes.

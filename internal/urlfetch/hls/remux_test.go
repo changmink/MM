@@ -1,4 +1,4 @@
-package urlfetch
+package hls
 
 import (
 	"bytes"
@@ -24,7 +24,7 @@ import (
 // that accumulates argv across calls. Cleanup restores the original
 // runFfmpeg via t.Cleanup.
 //
-// IMPORTANT: tests using captureFfmpeg MUST NOT call t.Parallel() —
+// IMPORTANT: tests using captureFfmpeg MUST NOT call t.Parallel() ??
 // runFfmpeg is a package-level var and concurrent swaps would race. Code
 // review enforces this.
 func captureFfmpeg(t *testing.T) *[][]string {
@@ -115,7 +115,7 @@ func slowHLSServer(t *testing.T, dir string, perSegment time.Duration) *httptest
 func TestRunHLSRemux_Success(t *testing.T) {
 	// makeHLSFixture writes playlist.m3u8 + .ts segments into fixtureDir.
 	// Post-D2 ffmpeg invocation only accepts local file paths, so we feed
-	// the playlist path directly — no httptest server in the loop.
+	// the playlist path directly ??no httptest server in the loop.
 	fixtureDir := t.TempDir()
 	playlistName := makeHLSFixture(t, fixtureDir, 1)
 	localPlaylist := filepath.Join(fixtureDir, playlistName)
@@ -145,7 +145,7 @@ func TestRunHLSRemux_Success(t *testing.T) {
 // stalled ffmpeg by serving a slow segment over HTTP. Post-D2 ffmpeg only reads
 // local files (no network), so we cannot stall it on I/O the same way. Test
 // the wiring directly instead: a stub runFfmpeg that blocks until ctx fires
-// confirms the same property — that an external ctx cancel propagates to the
+// confirms the same property ??that an external ctx cancel propagates to the
 // process. ffmpeg is not required (this runs without the binary).
 func TestRunHLSRemux_CtxCancelPropagates(t *testing.T) {
 	orig := runFfmpeg
@@ -283,7 +283,7 @@ func TestWatchOutputFile_EmitsProgress(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if len(seen) == 0 {
-		t.Fatal("expected ≥1 progress sample, got 0")
+		t.Fatal("expected ?? progress sample, got 0")
 	}
 	for i := 1; i < len(seen); i++ {
 		if seen[i] < seen[i-1] {
@@ -327,7 +327,7 @@ func TestRunHLSRemux_ExitError(t *testing.T) {
 	}
 }
 
-// TestClassifyHLSRemuxError pins the sentinel → FetchError.Code mapping so a
+// TestClassifyHLSRemuxError pins the sentinel ??FetchError.Code mapping so a
 // future refactor cannot silently collapse ffmpeg_missing back into
 // ffmpeg_error (which hides the operator-misconfig case) or swap
 // download_timeout and network_error on context failures.
@@ -362,7 +362,7 @@ func TestClassifyHLSRemuxError(t *testing.T) {
 //   - -protocol_whitelist is exactly file,crypto (no http/https/tcp/tls/etc)
 //   - -i input has no http://, https:// prefix
 // E3 adds the fetchHLS-level integration test that exercises the full
-// materialize → runHLSRemux flow.
+// materialize ??runHLSRemux flow.
 func TestRunHLSRemux_ArgvLocalOnly(t *testing.T) {
 	captured := captureFfmpeg(t)
 
@@ -410,7 +410,7 @@ func TestRunHLSRemux_ArgvLocalOnly(t *testing.T) {
 
 // TestRunFfmpegSwap_StubBypassesBinary locks the captureFfmpeg contract used
 // by AC-10 / AC-11 argv invariant tests: with the stub installed, runHLSRemux
-// fully replaces the production path — no real ffmpeg executes, argv is
+// fully replaces the production path ??no real ffmpeg executes, argv is
 // captured, and the stub MP4 is created at the output path so subsequent
 // rename / Stat in fetchHLS succeed. This is the prerequisite that lets
 // argv-checking tests run on machines without ffmpeg.
@@ -435,7 +435,7 @@ func TestRunFfmpegSwap_StubBypassesBinary(t *testing.T) {
 	}
 	// Sanity: runHLSRemux forwards its first argument verbatim as the -i
 	// input. Post-D2 production callers must already have a local playlist
-	// path here — TestRunHLSRemux_ArgvLocalOnly enforces that no remote URL
+	// path here ??TestRunHLSRemux_ArgvLocalOnly enforces that no remote URL
 	// reaches ffmpeg in real usage. This test only verifies the swap
 	// mechanism, hence the dummy URL.
 	args := (*captured)[0]
@@ -447,4 +447,3 @@ func TestRunFfmpegSwap_StubBypassesBinary(t *testing.T) {
 		}
 	}
 }
-

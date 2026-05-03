@@ -1,4 +1,4 @@
-package urlfetch
+package hls
 
 import (
 	"context"
@@ -70,7 +70,7 @@ func TestDownloadOne_HTTPError404(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for HTTP 404")
 	}
-	// classifyHTTPError should map this to http_error — we just verify the
+	// classifyHTTPError should map this to http_error ??we just verify the
 	// error string contains the status code so callers get useful diagnostics.
 	if !strings.Contains(err.Error(), "404") {
 		t.Errorf("err = %v, want to contain status 404", err)
@@ -97,7 +97,7 @@ func TestDownloadOne_HTTPError500(t *testing.T) {
 }
 
 func TestDownloadOne_PreflightContentLengthCap(t *testing.T) {
-	// Server advertises a body bigger than perResourceMax — downloadOne must
+	// Server advertises a body bigger than perResourceMax ??downloadOne must
 	// reject before reading any bytes.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", "1000000")
@@ -121,7 +121,7 @@ func TestDownloadOne_RuntimeCapPerResource(t *testing.T) {
 	// Server omits Content-Length so preflight cannot reject; the runtime cap
 	// must catch the body once it grows past perResourceMax.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Stream out without setting Content-Length — chunked encoding.
+		// Stream out without setting Content-Length ??chunked encoding.
 		flusher, _ := w.(http.Flusher)
 		_, _ = w.Write(make([]byte, 2048))
 		if flusher != nil {
@@ -163,7 +163,7 @@ func TestDownloadOne_RuntimeCapCumulative(t *testing.T) {
 }
 
 func TestDownloadOne_NoPerResourceCap(t *testing.T) {
-	// perResourceMax=0 means "no per-resource cap" — only cumulative applies.
+	// perResourceMax=0 means "no per-resource cap" ??only cumulative applies.
 	body := make([]byte, 2048)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(body)
@@ -184,7 +184,7 @@ func TestDownloadOne_NoPerResourceCap(t *testing.T) {
 
 func TestDownloadOne_PrivateIPBlocked(t *testing.T) {
 	// Production client (no AllowPrivateNetworks) + sequenceResolver pointing
-	// "blocked.example" at 127.0.0.1 — publicOnlyDialContext must reject the
+	// "blocked.example" at 127.0.0.1 ??publicOnlyDialContext must reject the
 	// dial with errPrivateNetwork before any HTTP attempt.
 	resolver := newSequenceResolver(map[string][]net.IPAddr{
 		"blocked.example": {{IP: net.ParseIP("127.0.0.1")}},
@@ -201,7 +201,7 @@ func TestDownloadOne_PrivateIPBlocked(t *testing.T) {
 
 func TestDownloadOne_ContextCancelBeforeRequest(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Slow handler — but ctx cancel should bail before this runs.
+		// Slow handler ??but ctx cancel should bail before this runs.
 		<-r.Context().Done()
 	}))
 	defer srv.Close()
@@ -223,7 +223,7 @@ func TestDownloadOne_ContextCancelBeforeRequest(t *testing.T) {
 
 func TestDownloadOne_DestExists_OEXCL(t *testing.T) {
 	// downloadOne uses O_CREATE|O_EXCL so a duplicate destPath is a write
-	// error — guards against materializeHLS bugs that would name two
+	// error ??guards against materializeHLS bugs that would name two
 	// resources to the same file. Use a closed httptest server because the
 	// failure happens before any HTTP exchange.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

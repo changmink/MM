@@ -1,4 +1,4 @@
-package urlfetch
+package hls
 
 import (
 	"errors"
@@ -224,7 +224,7 @@ low.m3u8
 }
 
 // ----------------------------------------------------------------------------
-// parseMediaPlaylist — Phase B / Task B1
+// parseMediaPlaylist ??Phase B / Task B1
 // ----------------------------------------------------------------------------
 
 // segmentURIs is a small assertion helper for parseMediaPlaylist tests:
@@ -290,7 +290,7 @@ seg2.ts
 			t.Errorf("seg[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
-	// rawLines must preserve the full input verbatim — materializeHLS will
+	// rawLines must preserve the full input verbatim ??materializeHLS will
 	// rewrite individual lines by index.
 	if len(pl.rawLines) < 10 {
 		t.Errorf("rawLines len = %d, want >= 10 (full input preserved)", len(pl.rawLines))
@@ -486,7 +486,7 @@ func TestParseMediaPlaylist_EmptyBody(t *testing.T) {
 }
 
 func TestParseMediaPlaylist_TooManyKeys(t *testing.T) {
-	// hlsMaxKeyEntries + 1 keys → errHLSTooManyKeys.
+	// hlsMaxKeyEntries + 1 keys ??errHLSTooManyKeys.
 	var buf strings.Builder
 	buf.WriteString("#EXTM3U\n")
 	for i := 0; i <= hlsMaxKeyEntries; i++ {
@@ -501,7 +501,7 @@ func TestParseMediaPlaylist_TooManyKeys(t *testing.T) {
 }
 
 func TestParseMediaPlaylist_TooManyInits(t *testing.T) {
-	// hlsMaxInitEntries + 1 init segments → errHLSTooManyInits.
+	// hlsMaxInitEntries + 1 init segments ??errHLSTooManyInits.
 	var buf strings.Builder
 	buf.WriteString("#EXTM3U\n")
 	for i := 0; i <= hlsMaxInitEntries; i++ {
@@ -516,7 +516,7 @@ func TestParseMediaPlaylist_TooManyInits(t *testing.T) {
 }
 
 func TestParseMediaPlaylist_DuplicateURIAttribute(t *testing.T) {
-	// Hostile playlist with two URI attributes on a single tag — parser
+	// Hostile playlist with two URI attributes on a single tag ??parser
 	// extracts the first, but rewriter would replace all. Refuse the
 	// playlist to keep the two stages in lockstep.
 	body := []byte(`#EXTM3U
@@ -533,7 +533,7 @@ seg.ts
 }
 
 func TestParseMediaPlaylist_TooManySegments(t *testing.T) {
-	// hlsMaxSegments + 1 segments → errHLSTooManySegments. Build the body
+	// hlsMaxSegments + 1 segments ??errHLSTooManySegments. Build the body
 	// programmatically because writing 10001 #EXTINF blocks by hand is silly.
 	var buf strings.Builder
 	buf.WriteString("#EXTM3U\n#EXT-X-TARGETDURATION:1\n")
@@ -568,7 +568,7 @@ seg1.ts
 	if len(pl.entries) != 3 {
 		t.Fatalf("entries len = %d, want 3 (1 key + 2 segs); entries = %+v", len(pl.entries), pl.entries)
 	}
-	// Order: entries appear in line order — key first, then seg0, then seg1.
+	// Order: entries appear in line order ??key first, then seg0, then seg1.
 	if pl.entries[0].kind != entryKey {
 		t.Errorf("entries[0].kind = %v, want entryKey", pl.entries[0].kind)
 	}
@@ -580,9 +580,9 @@ seg1.ts
 		entry int
 		want  string
 	}{
-		{0, "k.bin"},      // key URI line
-		{1, "seg0.ts"},    // segment URI line
-		{2, "seg1.ts"},    // segment URI line
+		{0, "k.bin"},   // key URI line
+		{1, "seg0.ts"}, // segment URI line
+		{2, "seg1.ts"}, // segment URI line
 	}
 	for _, tc := range cases {
 		idx := pl.entries[tc.entry].lineIdx
@@ -596,4 +596,3 @@ seg1.ts
 		}
 	}
 }
-

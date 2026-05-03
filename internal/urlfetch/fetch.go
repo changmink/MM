@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"file_server/internal/media"
+	hlsfetch "file_server/internal/urlfetch/hls"
 )
 
 const (
@@ -315,8 +316,23 @@ func Fetch(ctx context.Context, client *http.Client, rawURL, destDir, relDir str
 	}
 
 	rawContentType := resp.Header.Get("Content-Type")
-	if isHLSResponse(rawContentType, parsed.Path) {
-		return fetchHLS(ctx, client, resp, parsed, rawURL, destDir, relDir, warnings, maxBytes, cb)
+	if hlsfetch.IsResponse(rawContentType, parsed.Path) {
+		result, ferr := hlsfetch.Fetch(ctx, client, resp, parsed, rawURL, destDir, relDir, warnings, maxBytes, hlsCallbacks(cb), hlsfetch.Deps{
+			ClassifyHTTPError: classifyHLSError,
+			RenameUnique:      renameUnique,
+			SanitizeFilename:  sanitizeFilename,
+		})
+		if ferr != nil {
+			return nil, &FetchError{Code: ferr.Code, Err: ferr.Err}
+		}
+		return &Result{
+			URL:      result.URL,
+			Path:     result.Path,
+			Name:     result.Name,
+			Size:     result.Size,
+			Type:     result.Type,
+			Warnings: result.Warnings,
+		}, nil
 	}
 
 	// A declared Content-Length above the cap is rejected up front so we
@@ -420,6 +436,21 @@ func classifyHTTPError(err error) *FetchError {
 		return &FetchError{Code: "connect_timeout", Err: err}
 	}
 	return &FetchError{Code: "network_error", Err: err}
+}
+
+func hlsCallbacks(cb *Callbacks) *hlsfetch.Callbacks {
+	if cb == nil {
+		return nil
+	}
+	return &hlsfetch.Callbacks{
+		Start:    cb.Start,
+		Progress: cb.Progress,
+	}
+}
+
+func classifyHLSError(err error) *hlsfetch.FetchError {
+	ferr := classifyHTTPError(err)
+	return &hlsfetch.FetchError{Code: ferr.Code, Err: ferr.Err}
 }
 
 // deriveFilename returns the basename to save plus a flag indicating whether

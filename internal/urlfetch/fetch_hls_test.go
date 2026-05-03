@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	hlsfetch "file_server/internal/urlfetch/hls"
 )
 
 // TestFetch_HLS_MediaPlaylist_Success covers the end-to-end happy path for a
@@ -174,7 +176,7 @@ func TestFetch_HLS_UppercaseExtension(t *testing.T) {
 // just over the limit must be rejected before any ffmpeg spawn, so this test
 // does NOT require ffmpeg to run.
 func TestFetch_HLS_PlaylistTooLarge(t *testing.T) {
-	oversize := make([]byte, hlsMaxPlaylistBytes+1)
+	oversize := make([]byte, hlsfetch.MaxPlaylistBytes+1)
 	for i := range oversize {
 		oversize[i] = '#'
 	}
@@ -203,7 +205,7 @@ func TestFetch_HLS_PlaylistExactlyAtCap(t *testing.T) {
 	// exactly. ffmpeg will still fail to remux (no usable segments) so we
 	// only assert the size check doesn't trip.
 	head := []byte("#EXTM3U\n#EXT-X-VERSION:3\n")
-	body := make([]byte, hlsMaxPlaylistBytes)
+	body := make([]byte, hlsfetch.MaxPlaylistBytes)
 	copy(body, head)
 	for i := len(head); i < len(body); i++ {
 		body[i] = '#'
@@ -274,7 +276,7 @@ func TestDeriveHLSFilename_Fallbacks(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := deriveHLSFilename(u); got != tc.want {
+			if got := hlsfetch.DeriveFilename(u, hlsfetch.Deps{SanitizeFilename: sanitizeFilename}); got != tc.want {
 				t.Errorf("deriveHLSFilename(%q) = %q, want %q", tc.raw, got, tc.want)
 			}
 		})

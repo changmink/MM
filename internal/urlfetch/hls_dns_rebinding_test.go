@@ -34,12 +34,16 @@ package urlfetch
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+
+	hlsfetch "file_server/internal/urlfetch/hls"
 )
 
 func TestFetch_HLS_TooManySegments_WireCode(t *testing.T) {
@@ -49,7 +53,7 @@ func TestFetch_HLS_TooManySegments_WireCode(t *testing.T) {
 	// generic "too_large".
 	var buf strings.Builder
 	buf.WriteString("#EXTM3U\n#EXT-X-TARGETDURATION:1\n")
-	for i := 0; i <= hlsMaxSegments; i++ {
+	for i := 0; i <= hlsfetch.MaxSegments; i++ {
 		buf.WriteString("#EXTINF:1.0,\nseg.ts\n")
 	}
 	body := buf.String()
@@ -69,6 +73,33 @@ func TestFetch_HLS_TooManySegments_WireCode(t *testing.T) {
 	if ferr.Code != "hls_too_many_segments" {
 		t.Errorf("Code = %q, want hls_too_many_segments", ferr.Code)
 	}
+}
+
+func captureFfmpeg(t *testing.T) *[][]string {
+	t.Helper()
+	var captured [][]string
+	var mu sync.Mutex
+
+	restore := hlsfetch.SetRunFfmpegForTest(func(_ context.Context, args []string, _ io.Writer) error {
+		mu.Lock()
+		captured = append(captured, append([]string(nil), args...))
+		mu.Unlock()
+
+		for i := 0; i < len(args)-1; i++ {
+			if args[i] == "-y" {
+				_ = os.WriteFile(args[i+1], []byte{
+					0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p',
+					'm', 'p', '4', '2', 0x00, 0x00, 0x00, 0x00,
+					'i', 's', 'o', 'm', 'm', 'p', '4', '2',
+				}, 0644)
+				break
+			}
+		}
+		return nil
+	})
+	t.Cleanup(restore)
+
+	return &captured
 }
 
 func TestFetch_HLS_VariantPlaylistTooLarge(t *testing.T) {

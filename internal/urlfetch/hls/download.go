@@ -1,4 +1,4 @@
-package urlfetch
+package hls
 
 import (
 	"context"
@@ -37,7 +37,7 @@ var segmentExtWhitelist = map[string]struct{}{
 }
 
 // downloadOne fetches urlStr through client and writes the body to destPath
-// (created with O_CREATE|O_EXCL — caller must guarantee destPath is unique
+// (created with O_CREATE|O_EXCL ??caller must guarantee destPath is unique
 // within the materializeHLS temp directory). Two caps gate the transfer:
 //
 //   - perResourceMax > 0: rejects responses whose Content-Length exceeds the
@@ -75,7 +75,7 @@ func downloadOne(
 	}
 
 	// Preflight Content-Length when the server provided one. Skipping when
-	// ContentLength <= 0 (chunked / unknown) is fine — runtime cap will
+	// ContentLength <= 0 (chunked / unknown) is fine ??runtime cap will
 	// catch oversize bodies.
 	if cl := resp.ContentLength; cl > 0 {
 		if perResourceMax > 0 && cl > perResourceMax {
@@ -109,7 +109,7 @@ func downloadOne(
 // through client (so DNS validation and IP-pin happen for each fetch), and a
 // rewritten playlist named "playlist.m3u8" is written with all URIs replaced
 // by relative local file names. Returns the rewritten playlist path and total
-// bytes downloaded — caller passes total to the SSE progress accounting and
+// bytes downloaded ??caller passes total to the SSE progress accounting and
 // uses localPlaylistPath as the ffmpeg -i argument.
 //
 // Cap policy:
@@ -225,7 +225,7 @@ func segmentExt(u *url.URL) string {
 // through unchanged. This is defense in depth: parseMediaPlaylist only
 // recognizes #EXT-X-KEY and #EXT-X-MAP as URI sources, but RFC 8216 + LL-HLS
 // + future extensions define more (#EXT-X-SESSION-DATA, #EXT-X-PRELOAD-HINT,
-// #EXT-X-PART, …). ffmpeg's protocol whitelist already blocks the resulting
+// #EXT-X-PART, ??. ffmpeg's protocol whitelist already blocks the resulting
 // remote fetch, but neutering the URL string itself means even a hypothetical
 // whitelist relaxation cannot turn unrecognized tags into SSRF.
 func stripUnrecognizedURIAttr(line string) string {
@@ -243,7 +243,7 @@ func stripUnrecognizedURIAttr(line string) string {
 // attribute line, or replaces the entire URI line for a segment, with the
 // local relative name. Leading whitespace on segment URI lines is preserved
 // so ffmpeg's playlist parser sees identical structure. Segment URI lines
-// are standalone per RFC 8216 §4.3 — any trailing whitespace or comment is
+// are standalone per RFC 8216 §4.3 ??any trailing whitespace or comment is
 // not preserved (it would not be valid HLS anyway).
 func rewritePlaylistLine(line, newName string) string {
 	trim := strings.TrimSpace(line)
@@ -263,14 +263,14 @@ func rewritePlaylistLine(line, newName string) string {
 // writing the bytes that fit; the caller removes the partial file.
 //
 // Concurrency contract: this function is meant to be called by a single
-// goroutine at a time on a given remaining counter — its Load + Add pattern
+// goroutine at a time on a given remaining counter ??its Load + Add pattern
 // is non-atomic across the two operations and so does NOT prevent races if
 // multiple goroutines decrement the same counter concurrently. atomic.Int64
 // is used for two reasons that don't require strict sequential consistency:
-//   1. visibility — runHLSRemux's watcher goroutine can call remaining.Load()
+//   1. visibility ??runHLSRemux's watcher goroutine can call remaining.Load()
 //      from a different goroutine to compute its remaining output budget,
 //      and atomic guarantees the value is observed without tearing.
-//   2. forward compatibility — if/when materializeHLS is parallelized, the
+//   2. forward compatibility ??if/when materializeHLS is parallelized, the
 //      check-then-add window must be replaced with a CAS loop. Using
 //      atomic.Int64 today makes that a local change rather than a type
 //      migration.
@@ -283,7 +283,7 @@ func copyWithCaps(dst io.Writer, src io.Reader, perResourceMax int64, remaining 
 			if perResourceMax > 0 && written+int64(n) > perResourceMax {
 				return written, errHLSTooLarge
 			}
-			// Check before debit so the counter cannot go negative — keeps
+			// Check before debit so the counter cannot go negative ??keeps
 			// other in-flight reads' view of the counter accurate.
 			if remaining.Load() < int64(n) {
 				return written, errHLSTooLarge

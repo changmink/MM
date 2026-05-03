@@ -1,4 +1,4 @@
-package urlfetch
+package hls
 
 import (
 	"bytes"
@@ -15,7 +15,7 @@ import (
 )
 
 // servePaths spins up an httptest server that returns canned bodies for the
-// given path → bytes mapping, and 404 for anything else. Used by
+// given path ??bytes mapping, and 404 for anything else. Used by
 // materializeHLS tests to mock CDN responses.
 func servePaths(t *testing.T, paths map[string][]byte) *httptest.Server {
 	t.Helper()
@@ -102,7 +102,7 @@ func TestMaterializeHLS_SimpleMediaPlaylist(t *testing.T) {
 }
 
 func TestMaterializeHLS_WithKeyAndSegments(t *testing.T) {
-	keyBody := []byte("0123456789abcdef") // 16 bytes — AES-128 raw key
+	keyBody := []byte("0123456789abcdef") // 16 bytes ??AES-128 raw key
 	seg := []byte("encrypted-segment-data")
 	srv := servePaths(t, map[string][]byte{
 		"/k.bin": keyBody, "/seg.ts": seg,
@@ -248,7 +248,7 @@ func TestMaterializeHLS_RelativePathsResolved(t *testing.T) {
 	seg := []byte("seg-content")
 	srv := servePaths(t, map[string][]byte{"/streams/a/sub/seg.ts": seg})
 
-	// Playlist references a relative URL — parseMediaPlaylist resolves it
+	// Playlist references a relative URL ??parseMediaPlaylist resolves it
 	// against the base, materializeHLS then downloads from the resolved URL.
 	body := []byte(`#EXTM3U
 #EXTINF:4.0,
@@ -275,7 +275,7 @@ sub/seg.ts
 }
 
 func TestMaterializeHLS_ExtensionPreserved(t *testing.T) {
-	// One playlist with mixed segment extensions — local file names must
+	// One playlist with mixed segment extensions ??local file names must
 	// preserve the original ext from the URL path.
 	srv := servePaths(t, map[string][]byte{
 		"/a.ts":  []byte("ts-data"),
@@ -318,7 +318,7 @@ func TestMaterializeHLS_ExtensionPreserved(t *testing.T) {
 }
 
 func TestMaterializeHLS_UnknownExtensionFallsToBin(t *testing.T) {
-	// .xyz is not in the whitelist — local name must end in .bin.
+	// .xyz is not in the whitelist ??local name must end in .bin.
 	srv := servePaths(t, map[string][]byte{"/seg.xyz": []byte("data")})
 	body := []byte(fmt.Sprintf(`#EXTM3U
 #EXTINF:4.0,
@@ -341,7 +341,7 @@ func TestMaterializeHLS_UnknownExtensionFallsToBin(t *testing.T) {
 }
 
 func TestMaterializeHLS_DownloadFailureReturnsEarly(t *testing.T) {
-	// Second segment 404s — first should still land on disk, function returns
+	// Second segment 404s ??first should still land on disk, function returns
 	// early with the error, total reflects what was downloaded so far.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/seg0.ts", func(w http.ResponseWriter, r *http.Request) {
@@ -381,7 +381,7 @@ func TestMaterializeHLS_DownloadFailureReturnsEarly(t *testing.T) {
 }
 
 func TestMaterializeHLS_RawLinesPreserved(t *testing.T) {
-	// Non-URI lines must be passed through verbatim — only segment/key/init
+	// Non-URI lines must be passed through verbatim ??only segment/key/init
 	// URI substrings are rewritten. Especially #EXT-X-VERSION,
 	// #EXT-X-TARGETDURATION, #EXT-X-BYTERANGE, #EXT-X-ENDLIST.
 	srv := servePaths(t, map[string][]byte{"/seg.ts": []byte("d")})
@@ -414,9 +414,9 @@ func TestMaterializeHLS_RawLinesPreserved(t *testing.T) {
 
 func TestMaterializeHLS_UnrecognizedTagURINeutered(t *testing.T) {
 	// A media playlist that includes an LL-HLS / unknown tag with a remote
-	// URI attribute — parseMediaPlaylist does not recognize the tag, so it
+	// URI attribute ??parseMediaPlaylist does not recognize the tag, so it
 	// produces no entry, and the URI passes through rawLines verbatim. The
-	// rewrite pass must normalize URI="..." → URI="" so that even if a
+	// rewrite pass must normalize URI="..." ??URI="" so that even if a
 	// future ffmpeg whitelist relaxation occurred, no remote URL could
 	// reach the binary via an unrecognized tag.
 	srv := servePaths(t, map[string][]byte{"/seg.ts": []byte("d")})
@@ -454,7 +454,7 @@ func TestMaterializeHLS_UnrecognizedTagURINeutered(t *testing.T) {
 }
 
 func TestMaterializeHLS_CumulativeCapEnforced(t *testing.T) {
-	// First segment fits, second exceeds remaining — error surfaces.
+	// First segment fits, second exceeds remaining ??error surfaces.
 	srv := servePaths(t, map[string][]byte{
 		"/a.ts": make([]byte, 800),
 		"/b.ts": make([]byte, 800),
