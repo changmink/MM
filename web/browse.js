@@ -14,17 +14,12 @@ import {
   playlistIndex, setPlaylistIndex,
   view,
 } from './state.js';
-import { esc, iconFor, formatSize, formatDuration } from './util.js';
+import { esc, formatSize } from './util.js';
 import { syncURL } from './router.js';
-import {
-  attachDragHandlers, attachDropHandlers,
-  openRenameModal, deleteFile, deleteFolder,
-} from './fileOps.js';
+import { attachDropHandlers, deleteFile } from './fileOps.js';
 import { highlightTreeCurrent } from './tree.js';
 import { openConvertModal } from './convert.js';
-import { openConvertImageModal } from './convertImage.js';
-import { openConvertWebPModal } from './convertWebp.js';
-import { attachClipHoverPlayback, isClip } from './clipPlayback.js';
+import { isClip } from './clipPlayback.js';
 import {
   visibleTSPaths,
   updateConvertAllBtn,
@@ -39,9 +34,13 @@ import {
   wireSelection,
   syncSelectionWithVisible,
   renderSelectionControls,
-  syncCardSelectionStates,
-  bindEntrySelection,
 } from './selection.js';
+import {
+  sectionTitle,
+  buildImageGrid,
+  buildVideoGrid,
+  buildTable,
+} from './cardBuilders.js';
 
 // browse.js 외부 surface 보존 — 기존 export 함수들이 외부에서 직접
 // import 되던 사실은 없지만 (현 grep 0건), 회귀 차단을 위한 보수적
@@ -183,21 +182,21 @@ function renderFileList(entries) {
 
   if (images.length) {
     $.fileList.appendChild(sectionTitle('이미지'));
-    const grid = buildImageGrid(images);
+    const grid = buildImageGrid(images, openLightboxImage);
     if (view.type === 'clip') grid.classList.add('image-grid-clip');
     $.fileList.appendChild(grid);
   }
   if (videos.length) {
     $.fileList.appendChild(sectionTitle('동영상'));
-    $.fileList.appendChild(buildVideoGrid(videos));
+    $.fileList.appendChild(buildVideoGrid(videos, openLightboxVideo));
   }
   if (audios.length) {
     $.fileList.appendChild(sectionTitle('음악'));
-    $.fileList.appendChild(buildTable(audios));
+    $.fileList.appendChild(buildTable(audios, handleClick));
   }
   if (others.length) {
     $.fileList.appendChild(sectionTitle('기타'));
-    $.fileList.appendChild(buildTable(others));
+    $.fileList.appendChild(buildTable(others, handleClick));
   }
 
   const fileCount = images.length + videos.length + audios.length + others.length;
@@ -207,187 +206,6 @@ function renderFileList(entries) {
       : '파일이 없습니다.';
     $.fileList.innerHTML = `<p style="color:var(--text-dim);padding:20px 0">${msg}</p>`;
   }
-}
-
-function sectionTitle(text) {
-  const el = document.createElement('div');
-  el.className = 'section-title';
-  el.textContent = text;
-  return el;
-}
-
-function buildImageGrid(images) {
-  const grid = document.createElement('div');
-  grid.className = 'image-grid';
-  images.forEach((entry, i) => {
-    const card = document.createElement('div');
-    card.className = 'thumb-card';
-    card.dataset.path = entry.path;
-
-    const thumbURL = '/api/thumb?path=' + encodeURIComponent(entry.path);
-    const streamURL = '/api/stream?path=' + encodeURIComponent(entry.path);
-    const isPNG = entry.mime === 'image/png';
-    const isGIF = entry.mime === 'image/gif';
-    const isWebP = entry.mime === 'image/webp';
-    // GIF/WebP 카드는 평시 정적 첫 프레임(/api/thumb, lazy 생성 backstop)
-    // 을 표시하고 hover/IntersectionObserver 시에만 stream URL 로 토글한다
-    // (§2.5.6). 비-움짤 이미지는 기존 thumb_available 폴백 유지.
-    const isAnimatedClip = isGIF || isWebP;
-    const initialSrc = isAnimatedClip
-      ? thumbURL
-      : (entry.thumb_available ? thumbURL : streamURL);
-
-    const pngConvertBtn = isPNG
-      ? `<button class="png-convert-btn" title="JPG로 변환" aria-label="JPG로 변환">JPG</button>`
-      : '';
-    const webpConvertBtn = isGIF
-      ? `<button class="webp-convert-btn" title="WebP로 변환" aria-label="WebP로 변환">WEBP</button>`
-      : '';
-
-    card.innerHTML = `
-      <label class="select-check" title="선택">
-        <input type="checkbox" aria-label="${esc(entry.name)} 선택">
-      </label>
-      <img src="${esc(initialSrc)}" alt="${esc(entry.name)}" loading="lazy">
-      <div class="thumb-name">${esc(entry.name)}</div>
-      <span class="size-badge">${esc(formatSize(entry.size))}</span>
-      ${pngConvertBtn}
-      ${webpConvertBtn}
-      <button class="rename-btn" title="이름 변경" aria-label="이름 변경">✎</button>
-      <button class="delete-btn" title="삭제" aria-label="삭제">✕</button>
-    `;
-    bindEntrySelection(card, entry);
-    card.querySelector('img').addEventListener('click', () => openLightboxImage(i));
-    card.querySelector('.rename-btn').addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      openRenameModal(entry);
-    });
-    card.querySelector('.delete-btn').addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      deleteFile(entry.path);
-    });
-    if (isPNG) {
-      card.querySelector('.png-convert-btn').addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        openConvertImageModal([entry.path]);
-      });
-    }
-    if (isGIF) {
-      card.querySelector('.webp-convert-btn').addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        openConvertWebPModal([entry.path]);
-      });
-    }
-    if (isAnimatedClip) {
-      const img = card.querySelector('img');
-      img.dataset.thumbSrc = thumbURL;
-      img.dataset.streamSrc = streamURL;
-      attachClipHoverPlayback(card);
-    }
-    attachDragHandlers(card, entry);
-    grid.appendChild(card);
-  });
-  return grid;
-}
-
-function buildVideoGrid(videos) {
-  const grid = document.createElement('div');
-  grid.className = 'image-grid';
-  videos.forEach((entry, i) => {
-    const card = document.createElement('div');
-    card.className = 'thumb-card';
-    card.dataset.path = entry.path;
-
-    const thumbSrc = '/api/thumb?path=' + encodeURIComponent(entry.path);
-    const dur = formatDuration(entry.duration_sec);
-    const durBadge = dur ? `<span class="duration-badge">${esc(dur)}</span>` : '';
-    const isTS = entry.name.toLowerCase().endsWith('.ts');
-    const convertBtn = isTS
-      ? `<button class="convert-btn" title="MP4로 변환" aria-label="MP4로 변환">MP4</button>`
-      : '';
-    const isClipVideo = isClip(entry);
-    const webpConvertBtn = isClipVideo
-      ? `<button class="webp-convert-btn" title="WebP로 변환" aria-label="WebP로 변환">WEBP</button>`
-      : '';
-
-    card.innerHTML = `
-      <label class="select-check" title="선택">
-        <input type="checkbox" aria-label="${esc(entry.name)} 선택">
-      </label>
-      <img src="${esc(thumbSrc)}" alt="${esc(entry.name)}" loading="lazy">
-      <div class="thumb-name">${esc(entry.name)}</div>
-      <span class="size-badge">${esc(formatSize(entry.size))}</span>
-      ${durBadge}
-      ${convertBtn}
-      ${webpConvertBtn}
-      <button class="rename-btn" title="이름 변경" aria-label="이름 변경">✎</button>
-      <button class="delete-btn" title="삭제" aria-label="삭제">✕</button>
-    `;
-    bindEntrySelection(card, entry);
-    card.querySelector('img').addEventListener('click', () => openLightboxVideo(entry));
-    card.querySelector('.rename-btn').addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      openRenameModal(entry);
-    });
-    card.querySelector('.delete-btn').addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      deleteFile(entry.path);
-    });
-    if (isTS) {
-      card.querySelector('.convert-btn').addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        openConvertModal([entry.path]);
-      });
-    }
-    if (isClipVideo) {
-      card.querySelector('.webp-convert-btn').addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        openConvertWebPModal([entry.path]);
-      });
-    }
-    attachDragHandlers(card, entry);
-    grid.appendChild(card);
-  });
-  return grid;
-}
-
-function buildTable(entries) {
-  const table = document.createElement('table');
-  table.className = 'file-table';
-  table.innerHTML = `<thead><tr>
-    <th class="select-cell"></th>
-    <th>이름</th>
-    <th class="size-cell">크기</th>
-    <th></th>
-  </tr></thead>`;
-  const tbody = document.createElement('tbody');
-
-  entries.forEach(entry => {
-    const tr = document.createElement('tr');
-    tr.dataset.path = entry.path;
-    const icon = iconFor(entry.type, entry.is_dir);
-    const size = entry.is_dir ? '—' : formatSize(entry.size);
-    tr.innerHTML = `
-      <td class="select-cell"><input type="checkbox" aria-label="${esc(entry.name)} 선택"></td>
-      <td class="name-cell"><span class="icon">${icon}</span>${esc(entry.name)}</td>
-      <td class="size-cell">${size}</td>
-      <td class="action-cell">
-        <button class="rename-action" title="이름 변경" aria-label="이름 변경">✎</button>
-        <button class="delete-action" title="삭제" aria-label="삭제">🗑</button>
-      </td>
-    `;
-    bindEntrySelection(tr, entry);
-    tr.querySelector('.name-cell').addEventListener('click', () => handleClick(entry));
-    tr.querySelector('.rename-action').addEventListener('click', () => openRenameModal(entry));
-    tr.querySelector('.delete-action').addEventListener('click', () =>
-      entry.is_dir ? deleteFolder(entry.path) : deleteFile(entry.path)
-    );
-    attachDragHandlers(tr, entry);
-    tbody.appendChild(tr);
-  });
-
-  table.appendChild(tbody);
-  return table;
 }
 
 function handleClick(entry) {
