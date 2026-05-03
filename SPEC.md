@@ -856,6 +856,7 @@ file_server/
 - `warnings` 가능 값:
   - `"renamed"` — 자동 변환 후 목표 `.jpg` 충돌로 `_1`/`_2` 자동 suffix 부착 (§2.8.1).
   - `"convert_failed"` — PNG → JPG 변환 시도가 실패해 원본 PNG로 폴백 저장 (§2.8.1). 업로드 자체는 성공.
+- 본문 크기 상한: `413 {"error": "too_large"}` — multipart 본문이 100 GiB 초과 (`internal/handler/limits.go::maxUploadBytes`, `http.MaxBytesReader`로 진입부에서 cap; §9 참고)
 
 #### DELETE /api/file
 - 성공: `204 No Content` (body 없음)
@@ -878,6 +879,7 @@ file_server/
 - 새 이름 = 기존 이름: `400 {"error": "name unchanged"}`
 - 충돌 (동일 디렉토리 내 동일 이름 존재): `409 {"error": "already exists"}`
 - traversal: `400 {"error": "invalid path"}`
+- JSON body 크기 상한: `413 {"error": "too_large"}` — body 64 KiB 초과 (`internal/handler/limits.go::maxJSONBodyBytes`, `http.MaxBytesReader`로 진입부에서 cap; §9 참고)
 
 #### POST /api/folder
 - Body: `{"name": "new-folder"}` (현재 `path` 파라미터 경로 아래에 생성)
@@ -899,6 +901,8 @@ Body 형태로 두 동작 분기 (`PATCH /api/file`과 동일 패턴):
 - `{"to":   "..."}` → **이동** (다른 디렉토리로, base name 유지)
 
 두 필드를 동시에 보내면 `400 {"error": "specify either name or to, not both"}`. 둘 다 없으면 `400 {"error": "missing name or to"}`.
+
+JSON body 크기 상한(두 분기 공통): `413 {"error": "too_large"}` — body 64 KiB 초과 (`internal/handler/limits.go::maxJSONBodyBytes`, `http.MaxBytesReader`로 진입부에서 cap; §9 참고)
 
 ##### 이름 변경 (`{"name": "..."}`)
 - 성공: `200 OK`
@@ -1570,6 +1574,7 @@ volumes:
 **항상 할 것 (Always)**
 - Range 요청 지원 (스트리밍 seek 필수)
 - 업로드 파일은 `/data` 볼륨 내부에만 저장 (path traversal 방지)
+- Mutating 진입부에서 `http.MaxBytesReader`로 streaming/메모리 적재 cap 적용 — multipart 업로드 100 GiB(`maxUploadBytes`), JSON body 64 KiB(`maxJSONBodyBytes`). 초과 시 `413 {"error": "too_large"}` 반환 (`internal/handler/limits.go`, §5 각 엔드포인트 4xx 표 참고)
 - 섬네일은 비동기로 생성 (업로드 응답 차단 안 함)
 - Rename 시 `media.SafePath`로 원본·대상 경로 모두 검증 (path traversal 방지)
 - Rename은 동일 부모 디렉토리 내에서만 허용 (경로 이동 금지 — 이동은 별도 PATCH body)
