@@ -81,6 +81,7 @@ func TestRequireSameOrigin_RejectsCrossOriginMutations(t *testing.T) {
 		{"DELETE /api/file", http.MethodDelete, "/api/file?path=/x.jpg", ""},
 		{"POST /api/folder", http.MethodPost, "/api/folder?path=/", `{"name":"new"}`},
 		{"POST /api/convert", http.MethodPost, "/api/convert?path=/", `{"paths":["/x.ts"]}`},
+		{"POST /api/download-folder", http.MethodPost, "/api/download-folder?path=/", `{"items":[]}`},
 		{"PATCH /api/settings", http.MethodPatch, "/api/settings", `{}`},
 	}
 	for _, tc := range cases {

@@ -101,6 +101,7 @@ func Register(mux *http.ServeMux, dataDir, webDir string, settingsStore *setting
 	mux.HandleFunc("/api/convert", requireSameOrigin(h.convertAPI.HandleConvert))
 	mux.HandleFunc("/api/convert-image", requireSameOrigin(h.convertAPI.HandleConvertImage))
 	mux.HandleFunc("/api/convert-webp", requireSameOrigin(h.convertAPI.HandleConvertWebP))
+	mux.HandleFunc("/api/download-folder", requireSameOrigin(h.handleDownloadFolder))
 	mux.HandleFunc("/api/settings", requireSameOrigin(h.handleSettings))
 
 	mux.Handle("/", http.FileServer(http.Dir(webDir)))
