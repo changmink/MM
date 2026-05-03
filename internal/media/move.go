@@ -22,17 +22,16 @@ var (
 	ErrCrossDevice  = errors.New("cross-device folder move not supported")
 )
 
-// MoveFile moves srcAbs into destDir and returns the resulting absolute path.
+// MoveFile은 srcAbs를 destDir 아래로 옮기고 결과 절대경로를 반환한다.
 //
-// If destDir already contains a file with the same base name, the destination
-// gets a _1, _2, ... suffix to match upload semantics. Sidecar files
-// (.thumb/<name>.jpg and .thumb/<name>.jpg.dur) are moved alongside on a
-// best-effort basis — sidecar failures are logged but never fail the move,
-// since handleThumb can lazily regenerate.
+// destDir에 같은 base name이 이미 있으면 업로드와 동일한 의미로 _1, _2, ...
+// 접미사를 붙인다. 사이드카 파일(.thumb/<name>.jpg 및 .thumb/<name>.jpg.dur)
+// 은 best-effort로 함께 이동한다 — handleThumb가 lazy 재생성할 수 있으니
+// 사이드카 실패는 로그만 남기고 이동 자체를 막지 않는다.
 //
-// Same-volume moves use os.Rename (atomic). Cross-device moves (EXDEV) fall
-// back to copy+fsync+remove. The unique-name probe is stat-then-rename, which
-// has a small TOCTOU window; acceptable for the single-user deployment model.
+// 동일 볼륨 이동은 os.Rename(atomic)을 쓰고, cross-device(EXDEV)는
+// copy+fsync+remove로 폴백한다. 고유 이름 탐색은 stat-then-rename이라 짧은
+// TOCTOU 창이 있지만, 단일 사용자 배포 모델에서는 허용된다.
 func MoveFile(srcAbs, destDir string) (string, error) {
 	srcInfo, err := os.Stat(srcAbs)
 	if err != nil {
@@ -70,13 +69,12 @@ func MoveFile(srcAbs, destDir string) (string, error) {
 	return destPath, nil
 }
 
-// NameWithSuffix returns name unchanged for attempt ≤ 0, otherwise
-// "<stem>_<attempt><ext>" where stem/ext split on filepath.Ext (so compound
-// extensions like .tar.gz only split off the final segment). Single source
-// for the _N collision-avoidance scheme shared by upload, URL-import, file
-// rename, and folder move — preserves identical naming across all entry
-// points so a user-visible "foo_3.png" means the same thing regardless of
-// which path produced it.
+// NameWithSuffix는 attempt ≤ 0이면 name을 그대로 반환하고, 그 외엔
+// "<stem>_<attempt><ext>" 형태를 만든다. stem/ext는 filepath.Ext로 자르므로
+// .tar.gz 같은 합성 확장자는 마지막 세그먼트만 분리된다. 업로드·URL import·
+// 파일 rename·폴더 이동이 모두 공유하는 _N 충돌 회피 규칙의 단일 출처 —
+// 어느 경로로 만들어졌든 사용자 입장에서 "foo_3.png"의 의미가 동일하게
+// 유지되도록 한다.
 func NameWithSuffix(name string, attempt int) string {
 	if attempt <= 0 {
 		return name
@@ -86,8 +84,8 @@ func NameWithSuffix(name string, attempt int) string {
 	return fmt.Sprintf("%s_%d%s", stem, attempt, ext)
 }
 
-// uniqueDestPath probes destDir for the first free name in the
-// "name", "name_1", "name_2", ... sequence. The bound matches createUniqueFile.
+// uniqueDestPath는 destDir에서 "name", "name_1", "name_2", ... 순서로
+// 처음 비어 있는 이름을 찾아 반환한다. 상한은 createUniqueFile과 동일하다.
 func uniqueDestPath(destDir, name string) (string, error) {
 	const maxAttempts = 10000
 	for i := 0; i < maxAttempts; i++ {
@@ -136,28 +134,27 @@ func copyAndRemove(src, dst string) error {
 		return err
 	}
 	if err := os.Remove(src); err != nil {
-		// Both copies now exist; drop the new one to keep src as truth.
+		// 이 시점엔 양쪽 사본이 모두 존재한다. src를 진실로 유지하기 위해 dst를 지운다.
 		os.Remove(dst)
 		return err
 	}
 	return nil
 }
 
-// MoveDir moves srcAbs (a directory) into destDir, returning the new absolute
-// path destDir/<basename(srcAbs)>.
+// MoveDir은 디렉터리 srcAbs를 destDir 아래로 옮기고 새 절대경로
+// destDir/<basename(srcAbs)>을 반환한다.
 //
-// Unlike MoveFile, name conflicts return ErrDestExists rather than auto-
-// suffixing — folders are renamed only by explicit user action and a silent
-// _N suffix is more confusing than helpful here.
+// MoveFile과 달리 이름 충돌 시 자동 접미사 대신 ErrDestExists를 반환한다 —
+// 폴더 rename은 사용자 명시 행동이라 조용한 _N 접미사가 도움보다 혼란을
+//준다.
 //
-// destDir == srcAbs or any descendant of srcAbs returns ErrCircular. The
-// descendant check uses a path-separator boundary so /a/b is not treated as
-// inside /a/bc.
+// destDir이 srcAbs와 같거나 그 하위면 ErrCircular를 반환한다. 하위 판정은
+// 경로 구분자 경계를 사용해 /a/b가 /a/bc 안에 있다고 잘못 인식되지 않게 한다.
 //
-// Cross-volume moves (EXDEV) return ErrCrossDevice — recursive copy fallback
-// is intentionally out of scope for the single-volume deployment model
-// (SPEC §10). The folder's contents (including .thumb/) follow the os.Rename
-// in a single atomic step, so no sidecar bookkeeping is needed.
+// 다른 볼륨 간 이동(EXDEV)은 ErrCrossDevice로 처리한다 — 재귀 복사 폴백은
+// 단일 볼륨 배포 모델(SPEC §10)에서 의도적으로 범위 밖이다. 폴더의 내용물
+// (.thumb/ 포함)은 os.Rename에 의해 한 번에 원자적으로 따라가므로 별도
+// 사이드카 처리도 필요하지 않다.
 func MoveDir(srcAbs, destDir string) (string, error) {
 	srcInfo, err := os.Stat(srcAbs)
 	if err != nil {
@@ -186,7 +183,7 @@ func MoveDir(srcAbs, destDir string) (string, error) {
 	if destClean == srcClean {
 		return "", ErrCircular
 	}
-	// Separator boundary prevents /tmp/ab being read as a descendant of /tmp/a.
+	// 구분자 경계가 있어 /tmp/ab가 /tmp/a의 하위로 잘못 인식되는 것을 막는다.
 	if strings.HasPrefix(destClean, srcClean+string(filepath.Separator)) {
 		return "", ErrCircular
 	}
@@ -207,9 +204,9 @@ func MoveDir(srcAbs, destDir string) (string, error) {
 	return dstPath, nil
 }
 
-// moveSidecars relocates .thumb/<name>.jpg and .thumb/<name>.jpg.dur to match
-// the new file location. Failures are logged but never propagated, so a
-// missing/locked sidecar can't block the user-visible move.
+// moveSidecars는 .thumb/<name>.jpg와 .thumb/<name>.jpg.dur를 새 파일 위치에
+// 맞춰 옮긴다. 실패는 로그만 남기고 전파하지 않아, 누락되거나 잠긴 사이드카
+// 때문에 사용자 가시 이동이 막히지 않게 한다.
 func moveSidecars(srcFile, dstFile string) {
 	srcDir, srcName := filepath.Split(srcFile)
 	dstDir, dstName := filepath.Split(dstFile)

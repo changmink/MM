@@ -1,4 +1,4 @@
-// Package ffmpeg centralizes ffmpeg/ffprobe process execution.
+// Package ffmpeg는 ffmpeg/ffprobe 프로세스 실행을 한 곳에 모아둔다.
 package ffmpeg
 
 import (
@@ -11,10 +11,10 @@ import (
 	"strings"
 )
 
-// ErrMissing is returned when the requested ffmpeg-family binary is not on PATH.
+// ErrMissing은 ffmpeg 계열 바이너리가 PATH에서 발견되지 않을 때 반환된다.
 var ErrMissing = errors.New("ffmpeg not found in PATH")
 
-// Require verifies that binary is available on PATH.
+// Require는 binary가 PATH에 있는지 확인한다.
 func Require(binary string) error {
 	if _, err := exec.LookPath(binary); err != nil {
 		return ErrMissing
@@ -22,7 +22,7 @@ func Require(binary string) error {
 	return nil
 }
 
-// ExitError wraps a non-zero process exit with captured stderr.
+// ExitError는 non-zero 프로세스 종료 코드와 캡처된 stderr를 함께 감싼다.
 type ExitError struct {
 	Binary   string
 	ExitCode int
@@ -41,18 +41,18 @@ func (e *ExitError) Unwrap() error {
 	return e.Err
 }
 
-// Run executes ffmpeg with stderr captured.
+// Run은 ffmpeg를 실행하면서 stderr를 캡처한다.
 func Run(ctx context.Context, args ...string) error {
 	var stderr bytes.Buffer
 	return RunWithStderr(ctx, &stderr, args...)
 }
 
-// RunWithStderr executes ffmpeg and writes process stderr to stderr.
+// RunWithStderr는 ffmpeg를 실행하면서 프로세스 stderr를 stderr 인자로 전달한다.
 func RunWithStderr(ctx context.Context, stderr io.Writer, args ...string) error {
 	return runBinary(ctx, "ffmpeg", nil, stderr, args...)
 }
 
-// Probe executes ffprobe and returns stdout.
+// Probe는 ffprobe를 실행하고 stdout을 반환한다.
 func Probe(ctx context.Context, args ...string) ([]byte, error) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

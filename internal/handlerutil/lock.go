@@ -2,7 +2,7 @@ package handlerutil
 
 import "sync"
 
-// LockPath serializes producers keyed by path against a shared sync.Map.
+// LockPath는 공유 sync.Map을 키로 사용해 path 단위 producer를 직렬화한다.
 // 각 키는 첫 호출 시 LoadOrStore로 *sync.Mutex를 생성하고 그 뮤텍스를 잠근
 // 뒤 Unlock 함수를 반환한다. 호출자는 `defer unlock()` 패턴으로 사용.
 //
