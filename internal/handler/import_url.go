@@ -231,28 +231,10 @@ func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destA
 		defer func() { <-h.importSem }()
 	case <-job.Ctx().Done():
 		// Cancelled before acquiring the semaphore — every URL is reported
-		// cancelled, no Start/Done was ever emitted. URLs that were already
-		// flipped to "cancelled" by a prior per-URL CancelOne handler keep
-		// their existing event (the handler already published it under
-		// CancelKindPending) — re-emitting here would deliver the same
-		// error("cancelled") twice for the same index.
+		// cancelled, no Start/Done was ever emitted.
 		urls := job.Snapshot().URLs
-		for i, u := range urls {
-			if job.URLStatus(i) == "cancelled" {
-				continue
-			}
-			job.UpdateURL(i, func(s *importjob.URLState) {
-				s.Status = "cancelled"
-				s.Error = "cancelled"
-			})
-			job.Publish(mustEvent("error", sseError{
-				Phase: "error", Index: i, URL: u.URL, Error: "cancelled",
-			}))
-		}
-		summary := importjob.Summary{Cancelled: len(urls)}
-		job.SetSummary(summary)
-		job.Publish(summaryEvent(summary))
-		job.SetStatus(importjob.StatusCancelled)
+		cancelled := cancelRemainingURLs(job, urls, 0)
+		finalizeBatch(job, 0, 0, cancelled)
 		return
 	}
 
@@ -264,25 +246,8 @@ func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destA
 	for i, urlState := range urls {
 		if job.Ctx().Err() != nil {
 			// Batch cancelled mid-flight: mark every remaining URL cancelled
-			// and stop hitting origins. Skip indices that a prior per-URL
-			// CancelOne handler already flipped to "cancelled" — the handler
-			// owns that lifecycle event and re-emitting here would double-
-			// deliver error("cancelled") for the same index.
-			for j := i; j < len(urls); j++ {
-				if job.URLStatus(j) == "cancelled" {
-					cancelled++
-					continue
-				}
-				u := urls[j].URL
-				job.UpdateURL(j, func(s *importjob.URLState) {
-					s.Status = "cancelled"
-					s.Error = "cancelled"
-				})
-				job.Publish(mustEvent("error", sseError{
-					Phase: "error", Index: j, URL: u, Error: "cancelled",
-				}))
-				cancelled++
-			}
+			// and stop hitting origins.
+			cancelled += cancelRemainingURLs(job, urls, i)
 			break
 		}
 		// Per-URL cancel may have flipped this index to "cancelled" before we
@@ -303,12 +268,47 @@ func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destA
 		}
 	}
 
+	finalizeBatch(job, succeeded, failed, cancelled)
+}
+
+// cancelRemainingURLs marks URLs in [fromIdx, len(urls)) as cancelled and
+// publishes the corresponding error events. Returns the count cancelled by
+// this call. URLs that a prior per-URL CancelOne handler already flipped to
+// "cancelled" are counted but their event is NOT re-emitted — the handler
+// owns that publish under CancelKindPending and a duplicate would deliver
+// the same error("cancelled") twice for the same index.
+func cancelRemainingURLs(job *importjob.Job, urls []importjob.URLState, fromIdx int) int {
+	cancelled := 0
+	for j := fromIdx; j < len(urls); j++ {
+		if job.URLStatus(j) == "cancelled" {
+			cancelled++
+			continue
+		}
+		u := urls[j].URL
+		job.UpdateURL(j, func(s *importjob.URLState) {
+			s.Status = "cancelled"
+			s.Error = "cancelled"
+		})
+		job.Publish(mustEvent("error", sseError{
+			Phase: "error", Index: j, URL: u, Error: "cancelled",
+		}))
+		cancelled++
+	}
+	return cancelled
+}
+
+// finalizeBatch publishes the summary frame, records it on the job, and sets
+// the terminal status. Precedence: any success → Completed, else any
+// cancellation → Cancelled, else → Failed. Single source for this terminal
+// transition so ordering (SetSummary → Publish → SetStatus) cannot drift —
+// SetStatus closes subscriber channels, so summary MUST be published first
+// or live clients race past their last frame.
+func finalizeBatch(job *importjob.Job, succeeded, failed, cancelled int) {
 	summary := importjob.Summary{
 		Succeeded: succeeded, Failed: failed, Cancelled: cancelled,
 	}
 	job.SetSummary(summary)
 	job.Publish(summaryEvent(summary))
-
 	switch {
 	case succeeded > 0:
 		job.SetStatus(importjob.StatusCompleted)
