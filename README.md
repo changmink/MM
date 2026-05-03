@@ -6,7 +6,7 @@
 - **Go 단일 바이너리 + ffmpeg** — Docker 컨테이너 하나로 배포
 - **데이터는 Docker named volume**에 영속 저장 (`/data`)
 
-현재 버전: **0.0.1** — 폴더 CRUD(생성·이름변경·삭제·이동)가 모두 닫힌 첫 공식 릴리즈. 자세한 설계는 [SPEC.md](SPEC.md) 참조.
+현재 버전: **0.0.2** — 이미지/움짤 변환(PNG → JPG, 움짤 → animated WebP) + 다중 선택 UX 추가. 자세한 설계는 [SPEC.md](SPEC.md) 참조.
 
 ---
 
@@ -150,6 +150,17 @@ go test ./...
 ---
 
 ## 릴리즈 노트
+
+### 0.0.2 — 이미지/움짤 변환 + 선택 UX
+- **PNG → JPG 변환** (Phase 25): 업로드 시 자동(설정 토글, 기본 ON, 흰 배경 합성) + 카드/일괄 수동 변환(`POST /api/convert-image`). 새 패키지 `internal/imageconv`. PNG decompression bomb 방어(`DecodeConfig` 픽셀 cap).
+- **움짤 → animated WebP 변환** (Phase 29): GIF·짧은 동영상을 `libwebp`로 영구 변환(SSE 진행, audio strip + warning). `POST /api/convert-webp` + 모달/카드/일괄 버튼.
+- **선택 UX** (Phase 26-27): 카드/행 체크박스 + 빈 영역 rubber-band 드래그로 visible 항목 일괄 선택. selection-aware PNG/움짤 일괄 변환, 사이드바 폴더로 한 번에 이동.
+- **라이트박스 내 삭제** (Phase 28): 원본 보기 중 🗑 버튼 또는 `Delete` 키. 이미지는 다음 항목으로, 동영상은 닫고 새로고침.
+- **움짤 자동재생** (Phase 30): 카드 hover / IntersectionObserver로 src 토글, 움짤 탭 카드 240px. animated WebP thumb 첫 프레임 폴백(`webpmux + dwebp`).
+- **Batch cap 상향**: URL import / TS convert / PNG convert 모두 50 → 500.
+- **운영 안정성**: upload/JSON body `MaxBytesReader` 캡, 외부 도구(`webpmux`/`dwebp`/`ffprobe`) timeout + stderr 캡처, import job 워커 panic recovery, `createFolder` TOCTOU 제거, browse 사이드카 stat 최적화(ReadDir 1회 + map lookup).
+- **Module path**: 외부 import 대상이 아닌 단일 바이너리 가정으로 `file_server`로 단축.
+- **Breaking changes**: 없음.
 
 ### 0.0.1 — 폴더 CRUD 완성판
 - **폴더 이동 백엔드**: `media.MoveDir` + `PATCH /api/folder` body 분기(`{name}` rename | `{to}` move). 자기 자신·자손 거부, 충돌 시 409 (자동 suffix 없음 — rename과 일관). EXDEV는 500 (단일 볼륨 전제).
