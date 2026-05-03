@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -177,7 +178,7 @@ func dirHasSubdirs(dirAbs string) (bool, error) {
 			}
 		}
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				return false, nil
 			}
 			return false, err
