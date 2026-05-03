@@ -96,18 +96,35 @@ func decodeAnimatedWebPFirstFrame(src string) (image.Image, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
 
-	if err := exec.CommandContext(ctx, "webpmux",
+	var muxErr strings.Builder
+	muxCmd := exec.CommandContext(ctx, "webpmux",
 		"-get", "frame", "1",
 		src, "-o", tmpWebpPath,
-	).Run(); err != nil {
-		return nil, fmt.Errorf("webpmux extract: %w", err)
+	)
+	muxCmd.Stderr = &muxErr
+	if err := muxCmd.Run(); err != nil {
+		return nil, fmt.Errorf("webpmux extract: %w%s", err, stderrSuffix(muxErr.String()))
 	}
-	if err := exec.CommandContext(ctx, "dwebp",
+	var dwebpErr strings.Builder
+	dwebpCmd := exec.CommandContext(ctx, "dwebp",
 		tmpWebpPath, "-o", tmpPngPath,
-	).Run(); err != nil {
-		return nil, fmt.Errorf("dwebp decode: %w", err)
+	)
+	dwebpCmd.Stderr = &dwebpErr
+	if err := dwebpCmd.Run(); err != nil {
+		return nil, fmt.Errorf("dwebp decode: %w%s", err, stderrSuffix(dwebpErr.String()))
 	}
 	return imaging.Open(tmpPngPath, imaging.AutoOrientation(true))
+}
+
+// stderrSuffix appends "(stderr: ...)" when a captured stderr is non-empty,
+// otherwise returns "". 운영자가 만성 libwebp 실패 원인을 파악할 수 있도록
+// 에러 wrap에 stderr를 첨부하는 공유 헬퍼.
+func stderrSuffix(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	return " (stderr: " + s + ")"
 }
 
 // ErrWebPMuxMissing signals that webpmux from libwebp-tools is unavailable.
@@ -286,7 +303,13 @@ func extractFrame(src string, offsetSec float64) (string, error) {
 	tmpPath := tmp.Name()
 	tmp.Close()
 
-	cmd := exec.Command("ffmpeg",
+	// 손상된 입력에 ffmpeg가 영구 hang하면 thumb.Pool 워커가 고갈된다.
+	// videoDuration의 probeTimeout과 동일 상한으로 방어.
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+
+	var stderr strings.Builder
+	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-y",
 		"-loglevel", "error",
 		"-ss", strconv.FormatFloat(offsetSec, 'f', 3, 64),
@@ -296,8 +319,15 @@ func extractFrame(src string, offsetSec float64) (string, error) {
 			thumbWidth, thumbHeight, thumbWidth, thumbHeight),
 		tmpPath,
 	)
+	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		os.Remove(tmpPath)
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("ffmpeg extractFrame timeout after %v: %w", probeTimeout, err)
+		}
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return "", fmt.Errorf("ffmpeg extractFrame: %w (stderr: %s)", err, msg)
+		}
 		return "", err
 	}
 	return tmpPath, nil

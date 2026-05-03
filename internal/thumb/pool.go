@@ -1,6 +1,7 @@
 package thumb
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -39,13 +40,18 @@ func (p *Pool) worker() {
 	for j := range p.jobs {
 		_ = os.MkdirAll(filepath.Dir(j.dst), 0755)
 		// Dispatch by source type so videos take the ffmpeg path instead of
-		// the image decoder. Errors are swallowed here (best-effort async
-		// generation); handleThumb regenerates lazily on first view.
+		// the image decoder. Errors are best-effort logged (handleThumb still
+		// regenerates lazily on first view) so 만성 ffmpeg/libwebp 실패 원인을
+		// 운영자가 파악할 수 있다.
+		var err error
 		switch {
 		case media.IsVideo(j.src):
-			_ = GenerateFromVideo(j.src, j.dst)
+			err = GenerateFromVideo(j.src, j.dst)
 		case media.IsImage(j.src):
-			_ = Generate(j.src, j.dst)
+			err = Generate(j.src, j.dst)
+		}
+		if err != nil {
+			slog.Warn("thumbnail generation failed", "src", j.src, "err", err)
 		}
 	}
 }
