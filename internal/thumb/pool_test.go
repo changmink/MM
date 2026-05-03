@@ -25,7 +25,7 @@ func TestPoolGeneratesThumbnails(t *testing.T) {
 
 func TestPoolDispatchesVideoThumbnails(t *testing.T) {
 	dir := t.TempDir()
-	src := makeTestMP4(t, dir) // skips if ffmpeg unavailable
+	src := makeTestMP4(t, dir) // ffmpeg가 없으면 skip 한다
 	dst := filepath.Join(dir, ".thumb", "clip.mp4.jpg")
 
 	p := NewPool(1)
@@ -52,5 +52,5 @@ func TestPoolShutdownDrains(t *testing.T) {
 	}
 
 	p.Shutdown()
-	// If Shutdown returned, all in-flight workers exited cleanly.
+	// Shutdown이 반환됐다는 건 진행 중이던 워커가 모두 정상 종료됐다는 뜻.
 }

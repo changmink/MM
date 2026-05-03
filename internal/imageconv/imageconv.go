@@ -1,8 +1,7 @@
-// Package imageconv converts PNG images to JPEG. JPEG has no alpha channel
-// so any transparent pixels are composited over an opaque white background
-// before encoding (SPEC §2.8). The package performs no path validation,
-// extension checks, or sidecar handling — those are the caller's
-// responsibility.
+// Package imageconv는 PNG 이미지를 JPEG로 변환한다. JPEG는 알파 채널이
+// 없으므로 인코딩 전에 투명 픽셀을 불투명 흰 배경 위에 합성한다(SPEC §2.8).
+// 이 패키지는 경로 검증·확장자 검사·사이드카 처리를 하지 않는다 — 모두
+// 호출자의 책임이다.
 package imageconv
 
 import (
@@ -12,42 +11,42 @@ import (
 	"image/color"
 	"image/draw"
 	"image/jpeg"
-	_ "image/png" // register PNG decoder for image.DecodeConfig
+	_ "image/png" // image.DecodeConfig가 사용할 PNG 디코더 등록
 	"os"
 	"path/filepath"
 
 	"github.com/disintegration/imaging"
 )
 
-// MaxPixels caps the total pixel count (width × height) we will decode.
-// 64M pixels ≈ 8K×8K, which decodes to ~256 MiB of RGBA + a same-sized
-// composite buffer (~512 MiB peak per concurrent request). A pathological
-// PNG header can claim 65535×65535 ≈ 16 GiB; the gate below rejects such
-// input by reading the IHDR chunk before any pixel allocation.
+// MaxPixels는 디코딩을 허용하는 총 픽셀 수(width × height)의 상한이다.
+// 64M 픽셀 ≈ 8K×8K. RGBA로 펼치면 ~256 MiB이고 합성 버퍼까지 합치면 동시
+// 요청당 약 512 MiB까지 치솟는다. 악성 PNG 헤더는 65535×65535 ≈ 16 GiB를
+// 주장할 수 있다 — 아래 게이트는 픽셀 메모리를 할당하기 전에 IHDR chunk를
+// 읽어 그런 입력을 거부한다.
 //
-// Variable, not const, so tests can override with a small value to exercise
-// the rejection branch without allocating a real oversize fixture.
+// const가 아닌 var인 이유는 테스트에서 작은 값으로 오버라이드해 거대한
+// 더미 픽스처 없이도 거부 분기를 검증하기 위함이다.
 var MaxPixels = 64_000_000
 
-// ErrImageTooLarge is returned when the source PNG's declared dimensions
-// would exceed MaxPixels. Callers map this to a stable wire code so
-// clients can distinguish "decode failed" from "we refused to try".
+// ErrImageTooLarge는 소스 PNG의 선언된 크기가 MaxPixels를 초과할 때 반환된다.
+// 호출자는 이를 안정된 wire 코드로 매핑해 클라이언트가 "디코딩 실패"와
+// "시도 자체를 거부"를 구분할 수 있게 한다.
 var ErrImageTooLarge = errors.New("imageconv: image too large")
 
-// ConvertPNGToJPG decodes srcPath as a PNG, composites alpha pixels onto a
-// white background, and writes a JPEG to destPath. The write is atomic — a
-// temp file in destPath's directory is created, encoded, then renamed; on
-// any failure the temp file is removed. quality must be in [0, 100]; 90 is
-// the project standard.
+// ConvertPNGToJPG는 srcPath를 PNG로 디코딩하고 알파 픽셀을 흰 배경에
+// 합성한 뒤 destPath에 JPEG로 쓴다. 쓰기는 원자적이다 — destPath와 같은
+// 디렉터리에 temp 파일을 만들어 인코딩한 뒤 rename 한다. 어떤 실패라도
+// temp 파일은 제거된다. quality는 [0, 100] 범위여야 하며, 프로젝트 표준은
+// 90이다.
 func ConvertPNGToJPG(srcPath, destPath string, quality int) error {
 	if quality < 0 || quality > 100 {
 		return fmt.Errorf("imageconv: quality out of range: %d", quality)
 	}
 
-	// Header-only inspection first — image.DecodeConfig reads just the IHDR
-	// chunk so the pixel cap fires before any width*height*4 allocation.
-	// This blocks both legitimately huge images and crafted decompression
-	// bombs whose IDAT decompresses to many GiB.
+	// 먼저 헤더만 읽는다 — image.DecodeConfig는 IHDR chunk만 파싱하므로
+	// width*height*4 할당이 일어나기 전에 픽셀 상한 검사를 통과시킨다.
+	// 정상적으로 거대한 이미지뿐 아니라 IDAT가 수 GiB로 풀리는 압축 폭탄
+	// 입력도 함께 차단한다.
 	cfgFile, err := os.Open(srcPath)
 	if err != nil {
 		return fmt.Errorf("imageconv: decode: %w", err)

@@ -71,8 +71,8 @@ func TestNew_MissingFileUsesDefaults(t *testing.T) {
 	if s.Snapshot() != Default() {
 		t.Errorf("snapshot = %+v, want Default", s.Snapshot())
 	}
-	// File must not have been written on a pure read — a readable snapshot
-	// should not mutate disk state.
+	// 단순 읽기에서는 파일이 쓰여서는 안 된다 — 읽기 가능한 스냅샷이
+	// 디스크 상태를 변경하지 않아야 한다.
 	if _, err := os.Stat(filepath.Join(dir, configSubdir, settingsFile)); !os.IsNotExist(err) {
 		t.Errorf("settings.json should not exist yet, stat err=%v", err)
 	}
@@ -95,7 +95,7 @@ func TestNew_CorruptJSONFallsBack(t *testing.T) {
 	if s.Snapshot() != Default() {
 		t.Errorf("corrupt JSON should fall back to defaults, got %+v", s.Snapshot())
 	}
-	// File should remain untouched so the user can inspect or PATCH it.
+	// 파일은 그대로 남아 있어야 사용자가 확인하거나 PATCH로 덮을 수 있다.
 	data, _ := os.ReadFile(path)
 	if string(data) != "{ this is not json" {
 		t.Errorf("corrupt file was modified, now=%q", data)
@@ -138,7 +138,7 @@ func TestUpdate_RoundTrip(t *testing.T) {
 		t.Errorf("snapshot after Update = %+v, want %+v", s.Snapshot(), next)
 	}
 
-	// Reload from disk — value must persist.
+	// 디스크에서 다시 로드 — 값이 영속화돼 있어야 한다.
 	s2, err := New(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -158,7 +158,7 @@ func TestUpdate_RejectsOutOfRange(t *testing.T) {
 	if err := s.Update(bad); err == nil {
 		t.Fatal("Update: want error, got nil")
 	}
-	// Rejected Update must NOT mutate cache or write anything to disk.
+	// 거절된 Update는 캐시를 변형하거나 디스크에 무엇이든 기록해서는 안 된다.
 	if s.Snapshot() != Default() {
 		t.Errorf("rejected update leaked into cache: %+v", s.Snapshot())
 	}
@@ -169,9 +169,9 @@ func TestUpdate_RejectsOutOfRange(t *testing.T) {
 }
 
 func TestNew_LegacyMissingAutoConvertKey(t *testing.T) {
-	// Pre-Phase-25 settings.json files only contain the two URL fields.
-	// New() must treat the missing auto_convert_png_to_jpg key as the default
-	// (true) so existing users get the documented behavior on first run.
+	// Phase-25 이전 settings.json은 URL 필드 두 개만 들어 있다.
+	// 누락된 auto_convert_png_to_jpg 키를 New()가 기본값(true)으로 취급해야
+	// 기존 사용자도 첫 실행에 문서화된 동작을 얻는다.
 	dir := t.TempDir()
 	configDir := filepath.Join(dir, configSubdir)
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
@@ -191,7 +191,7 @@ func TestNew_LegacyMissingAutoConvertKey(t *testing.T) {
 }
 
 func TestUpdate_AutoConvertToggle(t *testing.T) {
-	// Verify true→false→true round-trip including disk persistence.
+	// 디스크 영속화까지 포함한 true→false→true 라운드트립을 확인한다.
 	dir := t.TempDir()
 	s, err := New(dir)
 	if err != nil {
@@ -210,7 +210,7 @@ func TestUpdate_AutoConvertToggle(t *testing.T) {
 		t.Fatal("after Update(false), Snapshot still true")
 	}
 
-	// Reload from disk — false must persist.
+	// 디스크에서 다시 로드 — false 값이 영속화돼 있어야 한다.
 	s2, err := New(dir)
 	if err != nil {
 		t.Fatal(err)

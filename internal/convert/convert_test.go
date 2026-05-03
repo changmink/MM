@@ -18,10 +18,10 @@ func requireFFmpeg(t *testing.T) {
 	}
 }
 
-// makeTestTS synthesizes a 1-second H.264 + AAC transport stream. Codec
-// pair is chosen to match production TS captures — the `-bsf:a aac_adtstoasc`
-// filter required by the MP4 muxer only accepts AAC, so mp2 audio would
-// cause `aac_adtstoasc` to abort with "Codec not supported".
+// makeTestTS는 1초짜리 H.264 + AAC transport stream을 합성한다. 코덱 조합은
+// 프로덕션 TS 캡처와 맞춘 것이다 — MP4 muxer가 요구하는 `-bsf:a
+// aac_adtstoasc` 필터는 AAC만 받기 때문에, mp2 오디오면 `aac_adtstoasc`가
+// "Codec not supported"로 중단된다.
 func makeTestTS(t *testing.T, dir string) string {
 	t.Helper()
 	requireFFmpeg(t)
@@ -55,12 +55,12 @@ func assertNoTempLeft(t *testing.T, dir string) {
 }
 
 func TestRemux_FFmpegMissing(t *testing.T) {
-	// Force PATH to something with no ffmpeg. t.Setenv restores at cleanup.
+	// PATH를 ffmpeg가 없는 값으로 강제 설정한다. t.Setenv가 cleanup에서 복원해준다.
 	t.Setenv("PATH", "")
 
 	dir := t.TempDir()
 	src := filepath.Join(dir, "nonexistent.ts")
-	// Intentionally do not create src — we must short-circuit before touching it.
+	// src는 일부러 만들지 않는다 — 파일에 닿기 전에 short-circuit 되어야 한다.
 
 	_, err := RemuxTSToMP4(context.Background(), src, dir, "out", Callbacks{})
 	if !errors.Is(err, ErrFFmpegMissing) {
@@ -154,8 +154,7 @@ func TestRemux_CtxCancel(t *testing.T) {
 	src := makeTestTS(t, dir)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	// Cancel almost immediately so ffmpeg has no time to finish even the
-	// tiny fixture.
+	// ffmpeg가 작은 픽스처조차 끝낼 시간이 없도록 거의 즉시 취소한다.
 	go func() {
 		time.Sleep(5 * time.Millisecond)
 		cancel()
@@ -165,7 +164,7 @@ func TestRemux_CtxCancel(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from cancel, got nil")
 	}
-	// The final .mp4 must not exist (cancel happened mid-flight).
+	// 진행 중에 취소됐으므로 최종 .mp4는 존재해선 안 된다.
 	if _, serr := os.Stat(filepath.Join(dir, "clip.mp4")); serr == nil {
 		t.Errorf("clip.mp4 should not exist after cancel")
 	}
@@ -175,7 +174,7 @@ func TestRemux_CtxCancel(t *testing.T) {
 func TestRemux_NonZeroExit(t *testing.T) {
 	requireFFmpeg(t)
 	dir := t.TempDir()
-	// Empty file — ffmpeg will fail to demux.
+	// 빈 파일 — ffmpeg가 demux에 실패한다.
 	bogus := filepath.Join(dir, "empty.ts")
 	if err := os.WriteFile(bogus, []byte{}, 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)

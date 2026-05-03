@@ -11,9 +11,9 @@ import (
 	"testing"
 )
 
-// makePNG writes a PNG fixture. If withAlpha is true the top-left quadrant
-// is fully transparent and the bottom-right is 50% opaque red — those
-// positions are sampled in the alpha-composite test.
+// makePNG는 PNG 픽스처를 만든다. withAlpha가 true면 좌상 사분면은 완전
+// 투명, 우하 사분면은 50% 불투명 빨강이 된다 — 두 위치는 알파 합성
+// 테스트에서 샘플링된다.
 func makePNG(t *testing.T, path string, w, h int, withAlpha bool) {
 	t.Helper()
 	img := image.NewNRGBA(image.Rect(0, 0, w, h))
@@ -21,11 +21,11 @@ func makePNG(t *testing.T, path string, w, h int, withAlpha bool) {
 		for x := 0; x < w; x++ {
 			switch {
 			case withAlpha && x < w/2 && y < h/2:
-				img.Set(x, y, color.NRGBA{R: 255, G: 0, B: 0, A: 0}) // transparent
+				img.Set(x, y, color.NRGBA{R: 255, G: 0, B: 0, A: 0}) // 완전 투명
 			case withAlpha && x >= w/2 && y >= h/2:
-				img.Set(x, y, color.NRGBA{R: 255, G: 0, B: 0, A: 128}) // semi-transparent
+				img.Set(x, y, color.NRGBA{R: 255, G: 0, B: 0, A: 128}) // 반투명
 			default:
-				img.Set(x, y, color.NRGBA{R: 255, G: 0, B: 0, A: 255}) // opaque red
+				img.Set(x, y, color.NRGBA{R: 255, G: 0, B: 0, A: 255}) // 불투명 빨강
 			}
 		}
 	}
@@ -78,13 +78,13 @@ func TestConvertPNGToJPG_AlphaCompositedToWhite(t *testing.T) {
 		t.Fatalf("convert: %v", err)
 	}
 	out := decodeJPEG(t, dst)
-	// Top-left was fully transparent — should composite to ~white.
+	// 좌상 사분면은 완전 투명이었으므로 거의 흰색에 합성되어야 한다.
 	r, g, b, _ := out.At(5, 5).RGBA()
 	r8, g8, b8 := r>>8, g>>8, b>>8
 	if r8 < 240 || g8 < 240 || b8 < 240 {
 		t.Errorf("alpha=0 px sample = (%d,%d,%d), want ~white (≥240 each)", r8, g8, b8)
 	}
-	// Opaque red corner stays red.
+	// 불투명 빨강 모서리는 빨강을 유지해야 한다.
 	r, g, b, _ = out.At(5, 35).RGBA()
 	r8, g8, b8 = r>>8, g>>8, b>>8
 	if r8 < 200 || g8 > 60 || b8 > 60 {
@@ -131,7 +131,7 @@ func TestConvertPNGToJPG_QualityOutOfRange(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "in.png")
 	dst := filepath.Join(dir, "out.jpg")
-	// File doesn't exist — quality check must fire before any I/O.
+	// 파일이 없는 상태 — quality 검사가 어떤 I/O보다 먼저 트리거되어야 한다.
 	for _, q := range []int{-1, 101, 999, -100} {
 		err := ConvertPNGToJPG(src, dst, q)
 		if err == nil {
@@ -155,8 +155,8 @@ func TestConvertPNGToJPG_NoTempFilesAfterSuccess(t *testing.T) {
 }
 
 func TestConvertPNGToJPG_RejectsOversizedImage(t *testing.T) {
-	// Override the pixel cap for the duration of the test so we can verify
-	// the gate without allocating a real 8K×8K fixture (~256 MiB).
+	// 테스트 동안만 픽셀 상한을 오버라이드해 실제 8K×8K 픽스처(~256 MiB)
+	// 없이도 게이트 동작을 검증한다.
 	orig := MaxPixels
 	MaxPixels = 100
 	defer func() { MaxPixels = orig }()
@@ -164,7 +164,7 @@ func TestConvertPNGToJPG_RejectsOversizedImage(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "big.png")
 	dst := filepath.Join(dir, "big.jpg")
-	makePNG(t, src, 20, 20, false) // 400 pixels > 100 cap
+	makePNG(t, src, 20, 20, false) // 400 픽셀 > 100 상한
 
 	err := ConvertPNGToJPG(src, dst, 90)
 	if err == nil {
@@ -173,7 +173,7 @@ func TestConvertPNGToJPG_RejectsOversizedImage(t *testing.T) {
 	if !errors.Is(err, ErrImageTooLarge) {
 		t.Errorf("err = %v, want errors.Is(err, ErrImageTooLarge)", err)
 	}
-	// Cap firing must not write anything to dest dir — no temp files, no jpg.
+	// 상한이 트리거되면 dest 디렉터리에 어떤 파일도 쓰여서는 안 된다 — temp나 jpg 모두.
 	if _, statErr := os.Stat(dst); !os.IsNotExist(statErr) {
 		t.Error("dst jpg should not exist after cap rejection")
 	}
@@ -184,7 +184,7 @@ func TestConvertPNGToJPG_RejectsOversizedImage(t *testing.T) {
 }
 
 func TestConvertPNGToJPG_AllowsAtCapBoundary(t *testing.T) {
-	// Boundary check: width*height == MaxPixels must pass.
+	// 경계 검사: width*height == MaxPixels는 통과해야 한다.
 	orig := MaxPixels
 	MaxPixels = 100
 	defer func() { MaxPixels = orig }()
@@ -192,7 +192,7 @@ func TestConvertPNGToJPG_AllowsAtCapBoundary(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "exact.png")
 	dst := filepath.Join(dir, "exact.jpg")
-	makePNG(t, src, 10, 10, false) // exactly 100 pixels
+	makePNG(t, src, 10, 10, false) // 정확히 100 픽셀
 
 	if err := ConvertPNGToJPG(src, dst, 90); err != nil {
 		t.Fatalf("at-cap boundary should succeed: %v", err)
@@ -203,12 +203,12 @@ func TestConvertPNGToJPG_RespectsDestExt(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "in.png")
 	makePNG(t, src, 8, 8, false)
-	// Caller decides extension; package writes wherever destPath points.
+	// 확장자는 호출자가 정한다 — 패키지는 destPath가 가리키는 곳에 쓸 뿐이다.
 	for _, ext := range []string{".jpg", ".jpeg"} {
 		dst := filepath.Join(dir, "out"+ext)
 		if err := ConvertPNGToJPG(src, dst, 90); err != nil {
 			t.Fatalf("ext=%s: %v", ext, err)
 		}
-		_ = decodeJPEG(t, dst) // confirm it's a real JPEG regardless of ext
+		_ = decodeJPEG(t, dst) // 확장자와 무관하게 실제 JPEG인지 확인
 	}
 }

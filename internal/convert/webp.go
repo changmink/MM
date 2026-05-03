@@ -14,25 +14,27 @@ import (
 const (
 	webpProbeTimeout = 5 * time.Second
 	webpTmpPattern   = ".webpconvert-*.webp"
-	// webpEncoder is the ffmpeg encoder name. We use plain "libwebp" rather
-	// than the registered "libwebp_anim" alias because alpine apk's ffmpeg
-	// 6.1 build emits single-frame output for libwebp_anim (verified
-	// empirically against the encoder's registration), whereas libwebp
-	// auto-promotes multi-frame input to animated WebP — same on-disk
-	// container (RIFF + VP8X with animation flag) plus a working file size.
+	// webpEncoder는 ffmpeg 인코더 이름이다. 등록된 "libwebp_anim" 별칭
+	// 대신 일반 "libwebp"를 쓰는 이유: alpine apk의 ffmpeg 6.1 빌드에서
+	// libwebp_anim은 단일 프레임만 출력하는 반면(인코더 등록을 직접
+	// 검증함), libwebp는 다중 프레임 입력을 자동으로 애니메이션 WebP로
+	// 승격해 같은 온디스크 컨테이너(RIFF + animation flag가 켜진 VP8X)와
+	// 정상 파일 크기를 만든다.
 	webpEncoder          = "libwebp"
 	webpQuality          = "80"
 	webpCompressionLevel = "4"
 )
 
-// EncodeWebP encodes srcPath as an animated WebP into <dstDir>/<baseName>.webp.
-// The caller must ensure the final path does not already exist — this function
-// does not check. The temporary output file is always cleaned up on failure.
+// EncodeWebP는 srcPath를 애니메이션 WebP로 인코딩해
+// <dstDir>/<baseName>.webp로 저장한다. 최종 경로가 이미 존재하지 않는지는
+// 호출자가 보장해야 하며, 이 함수는 검사하지 않는다. 실패 시 임시 출력
+// 파일은 항상 정리된다.
 //
-// Encoder args: -c:v libwebp -loop 0 -lossless 0 -q:v 80 -compression_level 4
-// -an. ffmpeg auto-promotes multi-frame input to animated WebP. fps and
-// resolution preserve the input. Audio is always dropped; callers emit the
-// audio_dropped warning based on ProbeStreamInfo when applicable.
+// 인코더 인자: -c:v libwebp -loop 0 -lossless 0 -q:v 80
+// -compression_level 4 -an. ffmpeg가 다중 프레임 입력을 자동으로 애니메이션
+// WebP로 승격한다. fps와 해상도는 입력을 유지하고, 오디오는 항상 제거된다.
+// 호출자는 ProbeStreamInfo를 바탕으로 필요할 때 audio_dropped 경고를
+// 발행한다.
 func EncodeWebP(ctx context.Context, srcPath, dstDir, baseName string, cb Callbacks) (*Result, error) {
 	if err := ffmpeg.Require("ffmpeg"); err != nil {
 		return nil, err
@@ -51,9 +53,9 @@ func EncodeWebP(ctx context.Context, srcPath, dstDir, baseName string, cb Callba
 		return nil, err
 	}
 	tmpPath := tmpFile.Name()
-	// Close the handle before ffmpeg reopens the path with -y. On Windows a
-	// lingering handle makes ffmpeg's open or the subsequent os.Rename fail
-	// with sharing-violation errors. Mirrors RemuxTSToMP4.
+	// ffmpeg가 -y로 경로를 다시 열기 전에 핸들을 닫는다. Windows에서는
+	// 남아 있는 핸들이 ffmpeg의 open이나 그 후의 os.Rename에서 sharing
+	// violation 에러를 일으킨다. RemuxTSToMP4와 동일한 처리.
 	if closeErr := tmpFile.Close(); closeErr != nil {
 		_ = os.Remove(tmpPath)
 		return nil, closeErr
@@ -78,8 +80,8 @@ func EncodeWebP(ctx context.Context, srcPath, dstDir, baseName string, cb Callba
 		tmpPath,
 	}
 
-	// Decoupled watch ctx so the final progress sample can land after Wait
-	// returns, mirroring RemuxTSToMP4 / urlfetch/hls.go's contract.
+	// watch ctx를 분리해 Wait 반환 후에도 마지막 progress 샘플을 받게 한다.
+	// RemuxTSToMP4 / urlfetch/hls.go의 계약과 동일하다.
 	watchCtx, cancelWatch := context.WithCancel(context.Background())
 	watchDone := make(chan struct{})
 	go func() {
@@ -111,15 +113,16 @@ func EncodeWebP(ctx context.Context, srcPath, dstDir, baseName string, cb Callba
 	return &Result{Path: finalPath, Size: fi.Size()}, nil
 }
 
-// ProbeStreamInfo runs ffprobe once and returns (durationSec, hasAudio, err).
-// Used by the convert-webp handler to gate clip eligibility (duration) and
-// to decide whether to emit the audio_dropped warning. Duration is read from
-// format.duration; hasAudio is true if any stream has codec_type "audio".
+// ProbeStreamInfo는 ffprobe를 한 번 실행해 (durationSec, hasAudio, err)를
+// 반환한다. convert-webp 핸들러가 클립 자격(duration)을 검증하고
+// audio_dropped 경고를 발행할지 결정하는 데 사용한다. duration은
+// format.duration에서 읽고, hasAudio는 codec_type이 "audio"인 스트림이
+// 하나라도 있으면 true다.
 //
-// GIF inputs may return durationSec=0 (ffprobe build-dependent) — caller
-// treats that as "duration unknown" but does not fail GIF eligibility, since
-// SPEC §2.9 admits GIFs unconditionally. ffprobe missing or non-zero exit
-// returns a non-nil error.
+// GIF 입력은 durationSec=0을 반환할 수 있다(ffprobe 빌드에 따라 다름) —
+// 호출자는 이 경우를 "duration 미상"으로 처리하되 GIF는 SPEC §2.9에 따라
+// 무조건 허용되므로 자격을 떨어뜨리지 않는다. ffprobe가 없거나 non-zero
+// 종료면 non-nil 에러를 반환한다.
 func ProbeStreamInfo(srcPath string) (durationSec float64, hasAudio bool, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), webpProbeTimeout)
 	defer cancel()

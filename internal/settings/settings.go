@@ -1,10 +1,9 @@
-// Package settings stores user-adjustable knobs that affect URL import and
-// HLS import: the maximum per-download byte cap and per-URL timeout (SPEC
-// §2.7). Values live in <dataDir>/.config/settings.json and are cached in
-// memory so request-path reads are lock-bounded but cheap. Both the getter
-// (Snapshot) and the setter (Update) return by value, so in-flight requests
-// that captured the snapshot at entry keep their original values even if a
-// concurrent PATCH lands mid-download.
+// Package settings는 URL import와 HLS import에 영향을 주는 사용자 조정
+// 가능 값을 저장한다. 다운로드당 바이트 상한과 URL당 타임아웃이 그것이다
+// (SPEC §2.7). 값은 <dataDir>/.config/settings.json에 영속화되며 메모리에
+// 캐시되므로 요청 경로의 읽기는 잠금에 묶여 있어도 저렴하다. 게터(Snapshot)
+// 와 세터(Update) 모두 값을 복사로 넘겨주므로, 진행 중인 요청이 진입
+// 시점에 잡아둔 스냅샷은 도중에 PATCH가 들어와도 원래 값을 그대로 유지한다.
 package settings
 
 import (
@@ -18,34 +17,34 @@ import (
 )
 
 const (
-	// DefaultMaxBytes is the fresh-install URL import cap (10 GiB).
+	// DefaultMaxBytes는 fresh-install 시점의 URL import 상한이다 (10 GiB).
 	DefaultMaxBytes = int64(10) * 1024 * 1024 * 1024
-	// DefaultTimeoutSeconds is the fresh-install per-URL timeout (30 min).
+	// DefaultTimeoutSeconds는 fresh-install 시점의 URL당 타임아웃이다 (30분).
 	DefaultTimeoutSeconds = 1800
 
-	// MinMaxBytes is the smallest cap a user may set (1 MiB).
+	// MinMaxBytes는 사용자가 설정 가능한 최소 상한이다 (1 MiB).
 	MinMaxBytes = int64(1) << 20
-	// MaxMaxBytes is the largest cap a user may set (1 TiB).
+	// MaxMaxBytes는 사용자가 설정 가능한 최대 상한이다 (1 TiB).
 	MaxMaxBytes = int64(1) << 40
 
-	// MinTimeoutSeconds / MaxTimeoutSeconds bound the timeout input.
+	// MinTimeoutSeconds / MaxTimeoutSeconds는 타임아웃 입력 범위를 제한한다.
 	MinTimeoutSeconds = 60
 	MaxTimeoutSeconds = 14400
 
-	// configSubdir and settingsFile anchor the on-disk location under dataDir.
+	// configSubdir와 settingsFile은 dataDir 아래의 디스크 경로를 정의한다.
 	configSubdir = ".config"
 	settingsFile = "settings.json"
 )
 
-// Settings is the wire and in-memory value object. JSON tags match SPEC §2.7.
+// Settings는 wire(JSON) 및 메모리상의 값 객체다. JSON 태그는 SPEC §2.7과 일치한다.
 type Settings struct {
 	URLImportMaxBytes       int64 `json:"url_import_max_bytes"`
 	URLImportTimeoutSeconds int   `json:"url_import_timeout_seconds"`
 	AutoConvertPNGToJPG     bool  `json:"auto_convert_png_to_jpg"`
 }
 
-// Default returns fresh-install values. Callers should never mutate the
-// returned value — Settings is a value type so callers get their own copy.
+// Default은 fresh-install 시점의 값을 반환한다. 호출자는 반환된 값을 변형해선
+// 안 된다 — Settings는 값 타입이라 호출자에게 별도 사본이 전달된다.
 func Default() Settings {
 	return Settings{
 		URLImportMaxBytes:       DefaultMaxBytes,
@@ -54,9 +53,9 @@ func Default() Settings {
 	}
 }
 
-// Validate rejects values outside the documented bounds. The field name in
-// RangeError matches the JSON key so the handler can surface it to the client
-// without a second mapping step.
+// Validate는 문서화된 범위를 벗어난 값을 거부한다. RangeError의 필드명은
+// JSON 키와 동일해서, 핸들러가 별도 매핑 없이 그대로 클라이언트에 노출할
+// 수 있다.
 func Validate(s Settings) error {
 	if s.URLImportMaxBytes < MinMaxBytes || s.URLImportMaxBytes > MaxMaxBytes {
 		return &RangeError{Field: "url_import_max_bytes"}
@@ -67,28 +66,28 @@ func Validate(s Settings) error {
 	return nil
 }
 
-// RangeError is returned by Validate (and by Store.Update) when a field is
-// outside its allowed range. The handler inspects Field to build the
-// out_of_range error response per SPEC §5 PATCH /api/settings.
+// RangeError는 필드가 허용 범위를 벗어났을 때 Validate(및 Store.Update)가
+// 반환한다. SPEC §5 PATCH /api/settings에 따라 핸들러는 Field를 보고
+// out_of_range 에러 응답을 구성한다.
 type RangeError struct {
 	Field string
 }
 
 func (e *RangeError) Error() string { return "out_of_range: " + e.Field }
 
-// Store holds the current settings value plus the disk path it was loaded
-// from. All access goes through Snapshot / Update, which take the mutex.
+// Store는 현재 settings 값과 그 값을 로드한 디스크 경로를 함께 보관한다.
+// 모든 접근은 뮤텍스를 사용하는 Snapshot / Update를 통해 이뤄진다.
 type Store struct {
 	mu      sync.RWMutex
 	current Settings
 	path    string
 }
 
-// New loads settings from dataDir/.config/settings.json. Any failure (missing
-// file, parse error, out-of-bounds value) is logged and the returned Store
-// holds Default() values. The bad file on disk is left untouched so a user's
-// later PATCH overwrites it atomically. Returns an error only for problems
-// that would prevent future writes (e.g. could not create the config dir).
+// New는 dataDir/.config/settings.json에서 settings를 로드한다. 어떤
+// 실패(파일 없음, 파싱 에러, 범위 벗어남)이든 로그만 남기고 반환된 Store는
+// Default() 값을 보유한다. 디스크의 잘못된 파일은 그대로 두어 이후 PATCH가
+// 원자적으로 덮어쓰게 한다. 이후 쓰기를 막을 수준의 문제(예: 설정 디렉터리
+// 생성 실패)가 아니면 에러를 반환하지 않는다.
 func New(dataDir string) (*Store, error) {
 	configDir := filepath.Join(dataDir, configSubdir)
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
@@ -114,17 +113,17 @@ func New(dataDir string) (*Store, error) {
 	return s, nil
 }
 
-// Snapshot returns the current settings by value. Safe to call concurrently
-// with Update.
+// Snapshot은 현재 settings를 값으로 반환한다. Update와 동시에 호출해도
+// 안전하다.
 func (s *Store) Snapshot() Settings {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.current
 }
 
-// Update validates the new settings, atomically writes them to disk, and
-// swaps the in-memory cache. On disk-write failure the cache is NOT updated
-// — callers can assume (cache == disk) after a successful Update.
+// Update는 새 settings를 검증하고 디스크에 원자적으로 쓴 다음 메모리 캐시를
+// 교체한다. 디스크 쓰기에 실패하면 캐시는 갱신되지 않으므로, Update가
+// 성공한 뒤에는 (캐시 == 디스크) 가정을 유지할 수 있다.
 func (s *Store) Update(next Settings) error {
 	if err := Validate(next); err != nil {
 		return err
@@ -148,12 +147,12 @@ func loadFile(path string) (Settings, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return zero, err
 	}
-	// Legacy migration: pre-Phase-25 settings.json predates the
-	// auto_convert_png_to_jpg key. JSON decode silently fills it with the
-	// boolean zero (false), but SPEC §2.7 documents the default as true.
-	// Inspect the raw map for key presence and apply the documented default
-	// on absence so legacy users get the new behavior on first run; the next
-	// PATCH persists it explicitly.
+	// 레거시 마이그레이션: Phase-25 이전 settings.json에는
+	// auto_convert_png_to_jpg 키가 없다. JSON 디코드는 조용히 boolean zero
+	// (false)로 채우지만, SPEC §2.7에는 기본값이 true로 명시되어 있다. 원시
+	// 맵에서 키 존재 여부를 검사해 키가 없을 때 문서상 기본값을 적용하면,
+	// 레거시 사용자도 첫 실행 시 새 동작을 얻고 이후 PATCH가 그 값을
+	// 명시적으로 영속화한다.
 	var raw map[string]json.RawMessage
 	if json.Unmarshal(data, &raw) == nil {
 		if _, ok := raw["auto_convert_png_to_jpg"]; !ok {
@@ -163,10 +162,10 @@ func loadFile(path string) (Settings, error) {
 	return s, nil
 }
 
-// writeFile performs an atomic JSON write: marshal → temp file in the same
-// directory → fsync → rename. Renaming within a single directory is atomic on
-// POSIX and on NTFS, so a reader (or a next New call) never sees a partial
-// JSON object.
+// writeFile은 원자적 JSON 쓰기를 수행한다: marshal → 같은 디렉터리의
+// temp 파일 → fsync → rename. 같은 디렉터리 내 rename은 POSIX와 NTFS 모두
+// 원자적이므로, reader(또는 다음 New 호출)가 부분적으로 쓰인 JSON 객체를
+// 보는 일이 없다.
 func writeFile(path string, s Settings) error {
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {

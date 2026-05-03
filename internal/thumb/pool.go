@@ -9,8 +9,8 @@ import (
 	"file_server/internal/media"
 )
 
-// Pool serializes thumbnail generation through a bounded set of workers so
-// bulk image uploads cannot fan out into one CPU-bound goroutine per file.
+// Pool은 제한된 수의 워커를 통해 썸네일 생성을 직렬화한다. 대량 업로드가
+// 파일당 CPU bound 고루틴 하나씩 펼쳐지는 상황을 막기 위함이다.
 type Pool struct {
 	jobs chan job
 	wg   sync.WaitGroup
@@ -20,9 +20,9 @@ type job struct {
 	src, dst string
 }
 
-// NewPool starts workers goroutines that consume jobs until Shutdown is called.
-// The job channel is buffered at workers*4; Submit drops jobs rather than
-// blocking the caller when the queue is full.
+// NewPool은 Shutdown이 호출될 때까지 잡을 소비하는 워커 고루틴을 띄운다.
+// jobs 채널은 workers*4 크기로 버퍼링되어 있고, 큐가 가득 차면 Submit이
+// 호출자를 막지 않고 잡을 떨어뜨린다.
 func NewPool(workers int) *Pool {
 	if workers < 1 {
 		workers = 1
@@ -39,10 +39,10 @@ func (p *Pool) worker() {
 	defer p.wg.Done()
 	for j := range p.jobs {
 		_ = os.MkdirAll(filepath.Dir(j.dst), 0755)
-		// Dispatch by source type so videos take the ffmpeg path instead of
-		// the image decoder. Errors are best-effort logged (handleThumb still
-		// regenerates lazily on first view) so 만성 ffmpeg/libwebp 실패 원인을
-		// 운영자가 파악할 수 있다.
+		// 영상은 ffmpeg 경로, 이미지는 이미지 디코더 경로로 분기한다. 에러는
+		// best-effort로 로그만 남긴다(handleThumb가 첫 조회 시 lazy 재생성
+		// 한다). 이렇게 해야 만성 ffmpeg/libwebp 실패 원인을 운영자가 파악할
+		// 수 있다.
 		var err error
 		switch {
 		case media.IsVideo(j.src):
@@ -56,8 +56,8 @@ func (p *Pool) worker() {
 	}
 }
 
-// Submit enqueues a job. Returns false if the queue is full so the caller can
-// decide between dropping silently and falling back to inline generation.
+// Submit은 잡을 큐에 넣는다. 큐가 가득 차면 false를 반환하므로 호출자가
+// 조용히 떨어뜨릴지, 인라인 생성으로 폴백할지 선택할 수 있다.
 func (p *Pool) Submit(src, dst string) bool {
 	select {
 	case p.jobs <- job{src: src, dst: dst}:
@@ -67,8 +67,9 @@ func (p *Pool) Submit(src, dst string) bool {
 	}
 }
 
-// Shutdown stops accepting jobs and waits for in-flight work to finish.
-// Idempotent: calling Shutdown twice panics — guard externally.
+// Shutdown은 잡 수신을 멈추고 진행 중인 작업이 끝나기를 기다린다.
+// 멱등하지 않다: Shutdown을 두 번 호출하면 panic이 발생하므로 외부에서
+// 호출 횟수를 보장해야 한다.
 func (p *Pool) Shutdown() {
 	close(p.jobs)
 	p.wg.Wait()
