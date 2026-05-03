@@ -37,6 +37,12 @@ var segmentExtWhitelist = map[string]struct{}{
 	".vtt": {},
 }
 
+// hlsMaterializeParallelism은 한 HLS 배치 안에서 동시에 받을 segment·key·
+// init 자원의 상한. CDN edge가 다중 hit에 친화적이라 4까지 안전하지만,
+// origin이 실제로는 단일 호스트인 경우 rate-limit을 유발할 수 있어 8 이상은
+// 회피한다. 단일 사용자 LAN 환경 가정이라 settings 노출은 over-engineering.
+// 변경 시 TestMaterializeHLS_DownloadsEntriesInParallel의 상한 검증도 함께
+// 갱신할 것.
 const hlsMaterializeParallelism = 4
 
 // downloadOne fetches urlStr through client and writes the body to destPath

@@ -32,7 +32,11 @@ const (
 	// blocking when broadcast falls behind. A slow subscriber must never
 	// stall the download.
 	progressChanBuffer = 16
-	importURLWorkers   = 2
+	// importURLWorkers는 한 URL import 배치 안에서 동시에 받을 URL의 상한.
+	// HLS와 달리 origin이 동일하다는 보장이 없어 보수적으로 2. process-wide
+	// importSem(=1)이 배치 간 직렬화를 처리하므로 여기는 batch 내부만 책임진다.
+	// 변경 시 TestImportURL_BatchFetchesInParallel의 상한 검증도 함께 갱신할 것.
+	importURLWorkers = 2
 )
 
 type importRequest struct {
@@ -273,6 +277,12 @@ func (h *Handler) runImportURLWorkers(job *importjob.Job, urls []importjob.URLSt
 		go func() {
 			defer wg.Done()
 			for task := range tasks {
+				// Two pre-fetch guards: batch cancel (job.Ctx) and per-URL
+				// cancel (URLStatus). fetchOneJob's RegisterURLCancel re-checks
+				// status under j.mu, so these are the cheap fast-path before
+				// the lock-protected re-check — they can be racy without
+				// causing a double-emit because the lock-protected check is
+				// authoritative.
 				if job.Ctx().Err() != nil {
 					continue
 				}
