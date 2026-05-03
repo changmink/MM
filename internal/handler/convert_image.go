@@ -155,15 +155,22 @@ func (h *Handler) convertImageOne(parentCtx context.Context, index int, relPath 
 			return res
 		}
 	case <-fctx.Done():
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-		}
 		if errors.Is(fctx.Err(), context.DeadlineExceeded) {
 			res.Error = "convert_timeout"
 		} else {
 			res.Error = "canceled"
 		}
+		// Best-effort cleanup: imageconv는 ctx를 받지 않으므로 timeout 후에도
+		// 워커가 dstAbs를 atomic rename으로 commit할 수 있다. 사용자가 취소한
+		// 결과물을 디스크에 남기면 (a) 다음 요청이 already_exists로 거부되고
+		// (b) browse가 갑자기 .jpg를 보여 UX가 망가지므로, 워커가 끝난 뒤
+		// 성공 케이스에 한해 출력 파일을 제거. done은 버퍼=1이라 워커가
+		// 결국 write하면 goroutine이 종료된다 (누수 없음).
+		go func() {
+			if werr := <-done; werr == nil {
+				_ = os.Remove(dstAbs)
+			}
+		}()
 		return res
 	}
 
