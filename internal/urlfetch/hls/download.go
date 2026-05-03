@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -35,6 +36,8 @@ var segmentExtWhitelist = map[string]struct{}{
 	".m4a": {},
 	".vtt": {},
 }
+
+const hlsMaterializeParallelism = 4
 
 // downloadOne fetches urlStr through client and writes the body to destPath
 // (created with O_CREATE|O_EXCL ??caller must guarantee destPath is unique
@@ -131,13 +134,17 @@ func materializeHLS(
 		return "", 0, fmt.Errorf("nil playlist")
 	}
 
+	type materializeJob struct {
+		entry          playlistEntry
+		destPath       string
+		perResourceMax int64
+	}
+
 	segIdx, keyIdx, initIdx := 0, 0, 0
 	// nameByLineIdx records the local relative file name for each rewritable
 	// line so the second pass can emit a faithful local-only playlist.
 	nameByLineIdx := make(map[int]string, len(pl.entries))
-
-	var lastReportedBytes int64
-	lastEmit := time.Now()
+	jobs := make([]materializeJob, 0, len(pl.entries))
 
 	for _, e := range pl.entries {
 		var (
@@ -162,14 +169,90 @@ func materializeHLS(
 		}
 
 		destPath := filepath.Join(hlsTempDir, destName)
-		n, err := downloadOne(ctx, client, e.uri.String(), destPath, perResourceMax, remainingBytes)
-		if err != nil {
-			return "", totalDownloaded, err
-		}
-		totalDownloaded += n
 		nameByLineIdx[e.lineIdx] = destName
+		jobs = append(jobs, materializeJob{
+			entry:          e,
+			destPath:       destPath,
+			perResourceMax: perResourceMax,
+		})
+	}
 
-		if cb != nil && cb.Progress != nil {
+	downloadCtx, cancelDownloads := context.WithCancel(ctx)
+	defer cancelDownloads()
+
+	jobsCh := make(chan materializeJob)
+	var (
+		wg                sync.WaitGroup
+		errOnce           sync.Once
+		firstErr          error
+		total             atomic.Int64
+		progressMu        sync.Mutex
+		lastReportedBytes int64
+		lastEmit          = time.Now()
+	)
+
+	reportProgress := func(currentTotal int64) {
+		if cb == nil || cb.Progress == nil {
+			return
+		}
+		progressMu.Lock()
+		defer progressMu.Unlock()
+		now := time.Now()
+		delta := currentTotal - lastReportedBytes
+		if delta >= progressByteThreshold || now.Sub(lastEmit) >= progressTimeThreshold {
+			cb.Progress(currentTotal)
+			lastReportedBytes = currentTotal
+			lastEmit = now
+		}
+	}
+
+	workerCount := hlsMaterializeParallelism
+	if len(jobs) < workerCount {
+		workerCount = len(jobs)
+	}
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobsCh {
+				n, err := downloadOne(downloadCtx, client, job.entry.uri.String(), job.destPath, job.perResourceMax, remainingBytes)
+				if err != nil {
+					errOnce.Do(func() {
+						firstErr = err
+						cancelDownloads()
+					})
+					continue
+				}
+				currentTotal := total.Add(n)
+				reportProgress(currentTotal)
+			}
+		}()
+	}
+
+	for _, job := range jobs {
+		select {
+		case <-downloadCtx.Done():
+			break
+		case jobsCh <- job:
+		}
+		if downloadCtx.Err() != nil {
+			break
+		}
+	}
+	close(jobsCh)
+	wg.Wait()
+
+	totalDownloaded = total.Load()
+	if firstErr != nil {
+		return "", totalDownloaded, firstErr
+	}
+	if err := ctx.Err(); err != nil {
+		return "", totalDownloaded, err
+	}
+
+	if cb != nil && cb.Progress != nil {
+		progressMu.Lock()
+		if totalDownloaded > lastReportedBytes {
 			now := time.Now()
 			delta := totalDownloaded - lastReportedBytes
 			if delta >= progressByteThreshold || now.Sub(lastEmit) >= progressTimeThreshold {
@@ -178,6 +261,7 @@ func materializeHLS(
 				lastEmit = now
 			}
 		}
+		progressMu.Unlock()
 	}
 
 	// Second pass: rewrite rawLines.
@@ -260,20 +344,9 @@ func rewritePlaylistLine(line, newName string) string {
 
 // copyWithCaps streams src into dst while enforcing a per-resource cap and a
 // shared cumulative counter. On cap breach returns errHLSTooLarge after
-// writing the bytes that fit; the caller removes the partial file.
-//
-// Concurrency contract: this function is meant to be called by a single
-// goroutine at a time on a given remaining counter ??its Load + Add pattern
-// is non-atomic across the two operations and so does NOT prevent races if
-// multiple goroutines decrement the same counter concurrently. atomic.Int64
-// is used for two reasons that don't require strict sequential consistency:
-//   1. visibility ??runHLSRemux's watcher goroutine can call remaining.Load()
-//      from a different goroutine to compute its remaining output budget,
-//      and atomic guarantees the value is observed without tearing.
-//   2. forward compatibility ??if/when materializeHLS is parallelized, the
-//      check-then-add window must be replaced with a CAS loop. Using
-//      atomic.Int64 today makes that a local change rather than a type
-//      migration.
+// writing the bytes that fit; the caller removes the partial file. The
+// cumulative debit uses a CAS loop so concurrent HLS segment downloads cannot
+// overdraw the shared remaining budget.
 func copyWithCaps(dst io.Writer, src io.Reader, perResourceMax int64, remaining *atomic.Int64) (int64, error) {
 	var written int64
 	buf := make([]byte, 32*1024)
@@ -283,12 +356,16 @@ func copyWithCaps(dst io.Writer, src io.Reader, perResourceMax int64, remaining 
 			if perResourceMax > 0 && written+int64(n) > perResourceMax {
 				return written, errHLSTooLarge
 			}
-			// Check before debit so the counter cannot go negative ??keeps
-			// other in-flight reads' view of the counter accurate.
-			if remaining.Load() < int64(n) {
-				return written, errHLSTooLarge
+			need := int64(n)
+			for {
+				cur := remaining.Load()
+				if cur < need {
+					return written, errHLSTooLarge
+				}
+				if remaining.CompareAndSwap(cur, cur-need) {
+					break
+				}
 			}
-			remaining.Add(-int64(n))
 
 			if _, werr := dst.Write(buf[:n]); werr != nil {
 				return written, werr

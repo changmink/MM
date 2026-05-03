@@ -11,7 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // servePaths spins up an httptest server that returns canned bodies for the
@@ -341,8 +343,9 @@ func TestMaterializeHLS_UnknownExtensionFallsToBin(t *testing.T) {
 }
 
 func TestMaterializeHLS_DownloadFailureReturnsEarly(t *testing.T) {
-	// Second segment 404s ??first should still land on disk, function returns
-	// early with the error, total reflects what was downloaded so far.
+	// One segment 404s, so materializeHLS returns the error without writing
+	// the rewritten playlist. With parallel downloads, already-started
+	// successful segments may or may not finish before cancellation wins.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/seg0.ts", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
@@ -372,11 +375,11 @@ func TestMaterializeHLS_DownloadFailureReturnsEarly(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from second segment 404")
 	}
-	if total < 2 || total > 100 {
-		t.Errorf("total = %d, want roughly len(\"ok\")=2 (only seg0 succeeded)", total)
+	if total != 0 && total != 2 {
+		t.Errorf("total = %d, want only bytes from completed successful downloads", total)
 	}
-	if _, statErr := os.Stat(filepath.Join(tempDir, "seg_0000.ts")); statErr != nil {
-		t.Errorf("seg_0000.ts should have landed before seg1 failed: %v", statErr)
+	if _, statErr := os.Stat(filepath.Join(tempDir, "playlist.m3u8")); !os.IsNotExist(statErr) {
+		t.Errorf("playlist should not be written after download failure: %v", statErr)
 	}
 }
 
@@ -512,5 +515,57 @@ func TestMaterializeHLS_ProgressCallbackFires(t *testing.T) {
 			t.Errorf("progress not monotonic: %v", emitted)
 			break
 		}
+	}
+}
+
+func TestMaterializeHLS_DownloadsEntriesInParallel(t *testing.T) {
+	var active atomic.Int64
+	var maxActive atomic.Int64
+
+	mux := http.NewServeMux()
+	for i := 0; i < 8; i++ {
+		p := fmt.Sprintf("/seg%d.ts", i)
+		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
+			cur := active.Add(1)
+			for {
+				max := maxActive.Load()
+				if cur <= max || maxActive.CompareAndSwap(max, cur) {
+					break
+				}
+			}
+			defer active.Add(-1)
+
+			time.Sleep(50 * time.Millisecond)
+			_, _ = w.Write([]byte("segment"))
+		})
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	var b strings.Builder
+	b.WriteString("#EXTM3U\n")
+	for i := 0; i < 8; i++ {
+		fmt.Fprintf(&b, "#EXTINF:4.0,\n%s/seg%d.ts\n", srv.URL, i)
+	}
+	b.WriteString("#EXT-X-ENDLIST\n")
+
+	base, _ := url.Parse(srv.URL + "/p.m3u8")
+	pl, err := parseMediaPlaylist([]byte(b.String()), base)
+	if err != nil {
+		t.Fatalf("parseMediaPlaylist: %v", err)
+	}
+
+	_, _, err = materializeHLS(context.Background(),
+		NewClient(AllowPrivateNetworks()),
+		pl, t.TempDir(), newCounter(testMaxBytes), nil)
+	if err != nil {
+		t.Fatalf("materializeHLS: %v", err)
+	}
+
+	if got := maxActive.Load(); got <= 1 {
+		t.Fatalf("max concurrent downloads = %d, want > 1", got)
+	}
+	if got := maxActive.Load(); got > hlsMaterializeParallelism {
+		t.Fatalf("max concurrent downloads = %d, want <= %d", got, hlsMaterializeParallelism)
 	}
 }
