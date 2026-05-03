@@ -3,6 +3,7 @@ package handler
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -319,4 +320,209 @@ func mapKeys(m map[string][]byte) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestDownloadFolder_POST_RejectsDotPrefixItems는 items가 dot-prefix 디렉터리
+// (.thumb 같은 사이드카) 또는 그 자손을 가리킬 때 거부되는지 회귀 검증한다.
+// 코드 리뷰에서 발견된 우회 경로 — walkAndAddDir의 `path == root` 가드가
+// dot-prefix 필터를 건너뛰어 사이드카를 ZIP에 통째로 동봉할 수 있었다.
+func TestDownloadFolder_POST_RejectsDotPrefixItems(t *testing.T) {
+	root := seedTree(t)
+	mux := http.NewServeMux()
+	h := Register(mux, root, root, nil)
+	defer h.Close()
+
+	cases := []struct {
+		name  string
+		items []string
+	}{
+		{"dot-prefix directory item", []string{"/movies/.thumb"}},
+		{"file inside dot-prefix directory", []string{"/movies/.thumb/film.mp4.jpg"}},
+		{"deeply nested dot segment", []string{"/movies/sub/../.thumb/x"}},
+		{"dotfile item", []string{"/movies/.config"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, _ := json.Marshal(map[string]any{"items": tc.items})
+			req := httptest.NewRequest(http.MethodPost, "/api/download-folder?path=/movies", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rw := httptest.NewRecorder()
+			mux.ServeHTTP(rw, req)
+			if rw.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400; body=%q", rw.Code, rw.Body.String())
+			}
+		})
+	}
+}
+
+// TestDownloadFolder_POST_EmptySelection은 items=[] 가 200 + 빈 ZIP을 돌려주는지
+// 검증한다. SPEC §2.10은 클라이언트가 분기 없이 받아 풀 수 있어야 한다고
+// 명시 — 0건이라도 빈 ZIP 헤더만 흐른다.
+func TestDownloadFolder_POST_EmptySelection(t *testing.T) {
+	root := seedTree(t)
+	mux := http.NewServeMux()
+	h := Register(mux, root, root, nil)
+	defer h.Close()
+
+	body, _ := json.Marshal(map[string]any{"items": []string{}})
+	req := httptest.NewRequest(http.MethodPost, "/api/download-folder?path=/movies", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rw := httptest.NewRecorder()
+	mux.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rw.Code)
+	}
+	files := readZipFromBody(t, rw.Body.Bytes())
+	if len(files) != 0 {
+		t.Errorf("empty selection must produce empty ZIP, got %v", mapKeys(files))
+	}
+	if !strings.Contains(rw.Header().Get("Content-Disposition"), "movies-selected-0.zip") {
+		t.Errorf("Content-Disposition selected count missing: %q", rw.Header().Get("Content-Disposition"))
+	}
+}
+
+// TestDownloadFolder_GET_EmptyFolder는 빈 폴더도 200 + 빈 ZIP으로 응답하는지
+// 검증한다. dot-prefix 사이드카·hidden은 walk에서 제외되므로 사용자에게 보일
+// 항목이 0개일 때도 동일 동작이어야 한다.
+func TestDownloadFolder_GET_EmptyFolder(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "empty"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	mux := http.NewServeMux()
+	h := Register(mux, root, root, nil)
+	defer h.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/download-folder?path=/empty", nil)
+	rw := httptest.NewRecorder()
+	mux.ServeHTTP(rw, req)
+	if rw.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rw.Code)
+	}
+	files := readZipFromBody(t, rw.Body.Bytes())
+	if len(files) != 0 {
+		t.Errorf("empty folder must produce empty ZIP, got %v", mapKeys(files))
+	}
+}
+
+// TestDownloadFolder_GET_HiddenOnlyFolder는 dot-prefix 자식만 있는 폴더가
+// (사용자 가시 항목 0개) 빈 ZIP을 만들어 사이드카가 절대 새지 않음을
+// 회귀 검증한다.
+func TestDownloadFolder_GET_HiddenOnlyFolder(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "hidden-only")
+	if err := os.MkdirAll(filepath.Join(dir, ".thumb"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".thumb", "x.jpg"), []byte("X"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mux := http.NewServeMux()
+	h := Register(mux, root, root, nil)
+	defer h.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/download-folder?path=/hidden-only", nil)
+	rw := httptest.NewRecorder()
+	mux.ServeHTTP(rw, req)
+	if rw.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rw.Code)
+	}
+	files := readZipFromBody(t, rw.Body.Bytes())
+	if len(files) != 0 {
+		t.Errorf("hidden-only folder must produce empty ZIP (sidecar must not leak): %v", mapKeys(files))
+	}
+}
+
+// TestWalkAndAddDir_ContextCancel은 walkAndAddDir이 ctx 취소를 즉시 존중해
+// walk를 중단하는지 검증한다. GET 다운로드의 graceful shutdown 보장에 필수.
+func TestWalkAndAddDir_ContextCancel(t *testing.T) {
+	root := seedTree(t)
+	abs := filepath.Join(root, "movies")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // walk 시작 전에 취소
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	defer zw.Close()
+
+	err := walkAndAddDir(ctx, zw, abs, "movies")
+	if err != context.Canceled {
+		t.Errorf("walkAndAddDir error = %v, want context.Canceled", err)
+	}
+}
+
+// TestWalkAndAddDir_SkipsSymlinks는 symlink가 ZIP에 포함되지 않음을 검증한다.
+// Windows에서는 SeCreateSymbolicLinkPrivilege/Developer Mode가 없으면
+// os.Symlink가 실패하므로 그 경우 skip — 회귀 가시성을 잃지만 OS 정책이 우선.
+func TestWalkAndAddDir_SkipsSymlinks(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "src")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	target := filepath.Join(dir, "real.txt")
+	if err := os.WriteFile(target, []byte("REAL"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	link := filepath.Join(dir, "link.txt")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	if err := walkAndAddDir(context.Background(), zw, dir, "src"); err != nil {
+		t.Fatalf("walkAndAddDir: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zw.Close: %v", err)
+	}
+	files := readZipFromBody(t, buf.Bytes())
+	if _, ok := files["src/real.txt"]; !ok {
+		t.Errorf("real file missing: %v", mapKeys(files))
+	}
+	if _, ok := files["src/link.txt"]; ok {
+		t.Errorf("symlink must not be included in ZIP, got: %v", mapKeys(files))
+	}
+}
+
+// TestAddFileToZip_OpenFailureLeavesNoEntry는 파일을 열 수 없는 경우 ZIP에
+// 빈 entry가 남지 않음을 검증한다. CreateHeader → Open 순서의 회귀 방지 —
+// 이전에는 header가 먼저 박혀 ZIP 무결성을 깼다.
+func TestAddFileToZip_OpenFailureLeavesNoEntry(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+
+	// 일단 정상 entry 한 개를 만든다.
+	tmp := filepath.Join(t.TempDir(), "ok.txt")
+	if err := os.WriteFile(tmp, []byte("OK"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	okInfo, err := os.Stat(tmp)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if err := addFileToZip(zw, tmp, "ok.txt", okInfo); err != nil {
+		t.Fatalf("addFileToZip ok: %v", err)
+	}
+
+	// 이어서 존재하지 않는 파일을 넣으려 시도. 에러여야 하고 ZIP은 깨지면 안 된다.
+	missing := filepath.Join(t.TempDir(), "missing.txt")
+	missInfo := okInfo // 임의 FileInfo — 어차피 Open 단계에서 실패한다.
+	if err := addFileToZip(zw, missing, "missing.txt", missInfo); err == nil {
+		t.Errorf("addFileToZip missing should error, got nil")
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zw.Close: %v", err)
+	}
+
+	files := readZipFromBody(t, buf.Bytes())
+	if _, ok := files["ok.txt"]; !ok {
+		t.Errorf("ok.txt missing: %v", mapKeys(files))
+	}
+	if _, ok := files["missing.txt"]; ok {
+		t.Errorf("missing.txt must not appear as a (corrupt) entry: %v", mapKeys(files))
+	}
 }

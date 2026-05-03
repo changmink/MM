@@ -2,6 +2,7 @@ package handler
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,7 +42,7 @@ func (h *Handler) downloadFolderAll(w http.ResponseWriter, r *http.Request) {
 	setZipDownloadHeaders(w, rootName+".zip")
 
 	zw := zip.NewWriter(w)
-	if err := walkAndAddDir(zw, abs, rootName); err != nil {
+	if err := walkAndAddDir(r.Context(), zw, abs, rootName); err != nil {
 		// 헤더를 이미 보냈으므로 5xx로 응답을 바꿀 수 없다. 로그만 남긴다.
 		slog.Warn("download-folder walk failed",
 			"method", r.Method, "path", r.URL.Path, "err", err,
@@ -92,6 +93,24 @@ func (h *Handler) downloadFolderItems(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusBadRequest, "invalid items", nil)
 			return
 		}
+		// SPEC §2.10 "dot-prefix 일체 제외" 정책을 items 우회 경로에도 강제한다.
+		// items=["/dir/.thumb"]이나 items=["/dir/.thumb/foo.jpg"]는 walkAndAddDir의
+		// `path == root` 가드를 통해 사이드카를 ZIP에 통째로 동봉시킬 수 있어,
+		// 진입 시점에서 모든 세그먼트를 검사해 차단한다. path 자신(rel == ".")은
+		// 전체 다운로드와 의미가 같으므로 통과시킨다.
+		if itemAbs != pathAbs {
+			relInside, err := filepath.Rel(pathAbs, itemAbs)
+			if err != nil {
+				writeError(w, r, http.StatusBadRequest, "invalid items", nil)
+				return
+			}
+			for _, seg := range strings.Split(filepath.ToSlash(relInside), "/") {
+				if strings.HasPrefix(seg, ".") {
+					writeError(w, r, http.StatusBadRequest, "invalid items", nil)
+					return
+				}
+			}
+		}
 		// symlink는 root 외부로 새는 것을 막기 위해 Lstat로 검사 후 skip.
 		ifi, err := os.Lstat(itemAbs)
 		if err != nil {
@@ -123,7 +142,7 @@ func (h *Handler) downloadFolderItems(w http.ResponseWriter, r *http.Request) {
 		}
 		zipName := filepath.ToSlash(filepath.Join(rootName, relInside))
 		if item.fi.IsDir() {
-			if err := walkAndAddDir(zw, item.abs, zipName); err != nil {
+			if err := walkAndAddDir(r.Context(), zw, item.abs, zipName); err != nil {
 				slog.Warn("download-folder item walk failed", "err", err)
 			}
 			continue
@@ -212,8 +231,13 @@ func encodeRFC5987(s string) string {
 // 디렉토리 엔트리를 별도로 추가하지 않는 이유: Store 모드 ZIP 추출기는
 // 파일 경로의 부모 디렉토리를 자동으로 만들어주므로, 빈 디렉토리만 손실되며
 // 그건 의도한 단순화(빈 폴더는 다운로드 시 보존되지 않아도 무방).
-func walkAndAddDir(zw *zip.Writer, root, zipPrefix string) error {
+// ctx는 클라이언트 abort/서버 shutdown 전파용 — 콜백 진입부에서 검사해 walk를
+// 즉시 중단한다 (POST 루프의 동등 패턴과 일관).
+func walkAndAddDir(ctx context.Context, zw *zip.Writer, root, zipPrefix string) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			// 권한 거부 등 walk 도중 에러는 해당 항목만 skip — 전체 다운로드를
 			// 끊지 않는다.
@@ -253,6 +277,15 @@ func walkAndAddDir(zw *zip.Writer, root, zipPrefix string) error {
 }
 
 func addFileToZip(zw *zip.Writer, abs, zipName string, info os.FileInfo) error {
+	// Open이 CreateHeader보다 먼저: 권한 거부·삭제된 파일 등 open 실패가
+	// ZIP에 빈 entry를 남기지 않게 한다 — header를 먼저 만들면 ZIP central
+	// directory에 오프셋만 적힌 채로 본문이 비어 추출기가 엉뚱한 데이터로
+	// 풀거나 corrupt 경고를 낸다.
+	f, err := os.Open(abs)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
 	header, err := zip.FileInfoHeader(info)
 	if err != nil {
 		return err
@@ -263,11 +296,6 @@ func addFileToZip(zw *zip.Writer, abs, zipName string, info os.FileInfo) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.Open(abs)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
 	_, err = io.Copy(writer, f)
 	return err
 }
