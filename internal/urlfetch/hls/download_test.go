@@ -15,7 +15,7 @@ import (
 	"testing"
 )
 
-// --- helpers ---------------------------------------------------------------
+// --- 헬퍼 -----------------------------------------------------------------
 
 func newCounter(initial int64) *atomic.Int64 {
 	c := &atomic.Int64{}
@@ -23,7 +23,7 @@ func newCounter(initial int64) *atomic.Int64 {
 	return c
 }
 
-// --- tests -----------------------------------------------------------------
+// --- 테스트 ---------------------------------------------------------------
 
 func TestDownloadOne_Success(t *testing.T) {
 	body := []byte("hello segment payload")
@@ -70,12 +70,12 @@ func TestDownloadOne_HTTPError404(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for HTTP 404")
 	}
-	// classifyHTTPError should map this to http_error ??we just verify the
-	// error string contains the status code so callers get useful diagnostics.
+	// classifyHTTPError가 이를 http_error로 매핑해야 한다 — 호출자가 유용한
+	// 진단 정보를 얻도록 에러 문자열에 상태 코드가 포함되는지만 확인한다.
 	if !strings.Contains(err.Error(), "404") {
 		t.Errorf("err = %v, want to contain status 404", err)
 	}
-	// dest file must not exist (we never opened it on HTTP failure).
+	// HTTP 실패 시에는 파일을 열지 않으므로 dest 파일이 존재해선 안 된다.
 	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
 		t.Errorf("dest file leaked on HTTP error: %v", statErr)
 	}
@@ -97,8 +97,8 @@ func TestDownloadOne_HTTPError500(t *testing.T) {
 }
 
 func TestDownloadOne_PreflightContentLengthCap(t *testing.T) {
-	// Server advertises a body bigger than perResourceMax ??downloadOne must
-	// reject before reading any bytes.
+	// 서버가 perResourceMax보다 큰 body를 광고한다 — downloadOne은 바이트를
+	// 읽기 전에 거부해야 한다.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", "1000000")
 		_, _ = w.Write(make([]byte, 1000000))
@@ -108,7 +108,7 @@ func TestDownloadOne_PreflightContentLengthCap(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "seg.ts")
 	_, err := downloadOne(context.Background(),
 		NewClient(AllowPrivateNetworks()),
-		srv.URL+"/big.ts", dest, 1024 /* per-resource max */, newCounter(testMaxBytes))
+		srv.URL+"/big.ts", dest, 1024 /* per-resource 상한 */, newCounter(testMaxBytes))
 	if !errors.Is(err, errHLSTooLarge) {
 		t.Errorf("err = %v, want errHLSTooLarge", err)
 	}
@@ -118,10 +118,10 @@ func TestDownloadOne_PreflightContentLengthCap(t *testing.T) {
 }
 
 func TestDownloadOne_RuntimeCapPerResource(t *testing.T) {
-	// Server omits Content-Length so preflight cannot reject; the runtime cap
-	// must catch the body once it grows past perResourceMax.
+	// 서버가 Content-Length를 생략하므로 preflight가 거부할 수 없다. body가
+	// perResourceMax를 넘으면 런타임 상한이 잡아내야 한다.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Stream out without setting Content-Length ??chunked encoding.
+		// Content-Length 없이 스트리밍 — chunked encoding이 된다.
 		flusher, _ := w.(http.Flusher)
 		_, _ = w.Write(make([]byte, 2048))
 		if flusher != nil {
@@ -134,11 +134,11 @@ func TestDownloadOne_RuntimeCapPerResource(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "seg.ts")
 	_, err := downloadOne(context.Background(),
 		NewClient(AllowPrivateNetworks()),
-		srv.URL+"/x.ts", dest, 1024 /* per-resource max */, newCounter(testMaxBytes))
+		srv.URL+"/x.ts", dest, 1024 /* per-resource 상한 */, newCounter(testMaxBytes))
 	if !errors.Is(err, errHLSTooLarge) {
 		t.Errorf("err = %v, want errHLSTooLarge", err)
 	}
-	// Partial file from first write must be cleaned up.
+	// 첫 쓰기로 생긴 부분 파일은 정리되어야 한다.
 	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
 		t.Errorf("partial file leaked: %v", statErr)
 	}
@@ -153,7 +153,7 @@ func TestDownloadOne_RuntimeCapCumulative(t *testing.T) {
 	defer srv.Close()
 
 	dest := filepath.Join(t.TempDir(), "seg.ts")
-	// Cumulative remaining is 1 KiB, body is 4 KiB.
+	// 누적 remaining은 1 KiB, body는 4 KiB.
 	_, err := downloadOne(context.Background(),
 		NewClient(AllowPrivateNetworks()),
 		srv.URL+"/x.ts", dest, 0, newCounter(1024))
@@ -163,7 +163,7 @@ func TestDownloadOne_RuntimeCapCumulative(t *testing.T) {
 }
 
 func TestDownloadOne_NoPerResourceCap(t *testing.T) {
-	// perResourceMax=0 means "no per-resource cap" ??only cumulative applies.
+	// perResourceMax=0은 "per-resource 상한 없음"을 의미한다 — 누적 상한만 적용된다.
 	body := make([]byte, 2048)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(body)
@@ -183,9 +183,9 @@ func TestDownloadOne_NoPerResourceCap(t *testing.T) {
 }
 
 func TestDownloadOne_PrivateIPBlocked(t *testing.T) {
-	// Production client (no AllowPrivateNetworks) + sequenceResolver pointing
-	// "blocked.example" at 127.0.0.1 ??publicOnlyDialContext must reject the
-	// dial with errPrivateNetwork before any HTTP attempt.
+	// 프로덕션 클라이언트(AllowPrivateNetworks 없음) + "blocked.example"을
+	// 127.0.0.1로 가리키는 sequenceResolver — publicOnlyDialContext는 어떠한
+	// HTTP 시도보다 먼저 dial을 errPrivateNetwork로 거부해야 한다.
 	resolver := newSequenceResolver(map[string][]net.IPAddr{
 		"blocked.example": {{IP: net.ParseIP("127.0.0.1")}},
 	})
@@ -201,13 +201,13 @@ func TestDownloadOne_PrivateIPBlocked(t *testing.T) {
 
 func TestDownloadOne_ContextCancelBeforeRequest(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Slow handler ??but ctx cancel should bail before this runs.
+		// 느린 핸들러 — 하지만 ctx 취소가 이 핸들러가 돌기 전에 종료시켜야 한다.
 		<-r.Context().Done()
 	}))
 	defer srv.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // pre-cancelled
+	cancel() // 미리 취소
 
 	dest := filepath.Join(t.TempDir(), "seg.ts")
 	_, err := downloadOne(ctx,
@@ -222,10 +222,9 @@ func TestDownloadOne_ContextCancelBeforeRequest(t *testing.T) {
 }
 
 func TestDownloadOne_DestExists_OEXCL(t *testing.T) {
-	// downloadOne uses O_CREATE|O_EXCL so a duplicate destPath is a write
-	// error ??guards against materializeHLS bugs that would name two
-	// resources to the same file. Use a closed httptest server because the
-	// failure happens before any HTTP exchange.
+	// downloadOne은 O_CREATE|O_EXCL을 사용해 destPath 중복을 쓰기 에러로
+	// 만든다 — 두 리소스가 같은 파일을 가리키는 materializeHLS 버그를
+	// 방지한다. HTTP 교환 이전에 실패하므로 실제 통신을 만들지 않아도 된다.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("data"))
 	}))
@@ -242,11 +241,11 @@ func TestDownloadOne_DestExists_OEXCL(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for existing dest path")
 	}
-	// Should be an os.PathError or wraps fs.ErrExist; we just check it's not
-	// nil and the existing file is untouched.
+	// os.PathError이거나 fs.ErrExist를 wrap한 형태일 것 — 여기서는 nil이
+	// 아니고 기존 파일이 그대로인지만 확인한다.
 	got, _ := os.ReadFile(dest)
 	if string(got) != "preexisting" {
 		t.Errorf("dest overwritten to %q; downloadOne must not clobber", got)
 	}
-	_ = io.Discard // keep io import for future if needed
+	_ = io.Discard // 나중을 위해 io import 유지
 }

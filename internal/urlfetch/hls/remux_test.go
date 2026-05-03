@@ -18,15 +18,14 @@ import (
 	"time"
 )
 
-// captureFfmpeg replaces runFfmpeg with a stub that records every invocation's
-// argv and writes a stub MP4 (ftyp box) at the output path so the caller's
-// subsequent os.Stat / atomic rename succeed. Returns a pointer to the slice
-// that accumulates argv across calls. Cleanup restores the original
-// runFfmpeg via t.Cleanup.
+// captureFfmpeg는 runFfmpeg를 호출마다 argv를 기록하고 출력 경로에 stub
+// MP4(ftyp box)를 써주는 stub으로 교체한다. 그래야 호출자의 후속 os.Stat /
+// atomic rename이 성공한다. 호출별 argv가 누적되는 슬라이스의 포인터를
+// 반환한다. cleanup은 t.Cleanup으로 원래 runFfmpeg를 복원한다.
 //
-// IMPORTANT: tests using captureFfmpeg MUST NOT call t.Parallel() ??
-// runFfmpeg is a package-level var and concurrent swaps would race. Code
-// review enforces this.
+// 중요: captureFfmpeg를 쓰는 테스트는 t.Parallel()을 호출해서는 안 된다 —
+// runFfmpeg는 패키지 수준 var이라 동시 swap이 race를 일으킨다. 코드
+// 리뷰가 이 규칙을 강제한다.
 func captureFfmpeg(t *testing.T) *[][]string {
 	t.Helper()
 	var captured [][]string
@@ -35,12 +34,12 @@ func captureFfmpeg(t *testing.T) *[][]string {
 	orig := runFfmpeg
 	runFfmpeg = func(ctx context.Context, args []string, stderr io.Writer) error {
 		mu.Lock()
-		// Copy so future arg mutations cannot retroactively corrupt the record.
+		// 사후 arg 변형이 기록을 거꾸로 오염시키지 않도록 복사한다.
 		captured = append(captured, append([]string(nil), args...))
 		mu.Unlock()
 
-		// Write a stub MP4 at the output path so callers' Stat/rename succeed.
-		// argv pattern: ... -y <outPath> at the end.
+		// 호출자의 Stat/rename이 성공하도록 출력 경로에 stub MP4를 쓴다.
+		// argv 패턴: 끝에 ... -y <outPath>.
 		for i := 0; i < len(args)-1; i++ {
 			if args[i] == "-y" {
 				outPath := args[i+1]
@@ -59,8 +58,9 @@ func captureFfmpeg(t *testing.T) *[][]string {
 	return &captured
 }
 
-// requireFFmpeg skips the test if ffmpeg is unavailable. Matches the pattern in
-// handler/stream_test.go so CI machines without ffmpeg can still run unit tests.
+// requireFFmpeg는 ffmpeg가 없을 때 테스트를 skip한다.
+// handler/stream_test.go와 같은 패턴이라 ffmpeg가 없는 CI 머신에서도 단위
+// 테스트가 돌아간다.
 func requireFFmpeg(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
@@ -68,11 +68,11 @@ func requireFFmpeg(t *testing.T) {
 	}
 }
 
-// makeHLSFixture produces a VOD HLS playlist + .ts segments of durationSec
-// seconds inside dir and returns the playlist's basename. 1-second segments
-// mean durationSec segments are written, which matters for tests that need
-// the remuxer to spend enough wall time writing output to exercise the
-// background watcher (progress/size cap).
+// makeHLSFixture는 dir 안에 durationSec 초 길이의 VOD HLS 플레이리스트와
+// .ts segment를 만들고 플레이리스트의 basename을 반환한다. 1초 segment를
+// 사용하므로 durationSec개의 segment가 쓰인다. 백그라운드 watcher
+// (progress/size cap)를 검증하려면 remuxer가 출력을 쓰는 시간이 충분히
+// 길어야 하므로 이 점이 중요하다.
 func makeHLSFixture(t *testing.T, dir string, durationSec int) string {
 	t.Helper()
 	requireFFmpeg(t)
@@ -97,10 +97,10 @@ func makeHLSFixture(t *testing.T, dir string, durationSec int) string {
 	return "playlist.m3u8"
 }
 
-// slowHLSServer wraps a directory FileServer so each .ts fetch waits at least
-// perSegment before responding. Extends remux wall time enough that the 500 ms
-// watcher ticks observe output growth (progress test) and can catch a cap
-// breach before ffmpeg finishes (size cap test).
+// slowHLSServer는 디렉터리 FileServer를 감싸서 모든 .ts fetch가 응답 전에
+// 최소 perSegment만큼 대기하게 만든다. 500 ms 주기의 watcher가 출력 증가를
+// 관측하고(progress 테스트), ffmpeg가 끝나기 전에 cap 위반을 잡아낼 수
+// 있도록(size cap 테스트) remux 시간을 늘리기 위함이다.
 func slowHLSServer(t *testing.T, dir string, perSegment time.Duration) *httptest.Server {
 	t.Helper()
 	fs := http.FileServer(http.Dir(dir))
@@ -113,9 +113,9 @@ func slowHLSServer(t *testing.T, dir string, perSegment time.Duration) *httptest
 }
 
 func TestRunHLSRemux_Success(t *testing.T) {
-	// makeHLSFixture writes playlist.m3u8 + .ts segments into fixtureDir.
-	// Post-D2 ffmpeg invocation only accepts local file paths, so we feed
-	// the playlist path directly ??no httptest server in the loop.
+	// makeHLSFixture가 fixtureDir에 playlist.m3u8 + .ts segment를 쓴다.
+	// D2 이후 ffmpeg 호출은 로컬 파일 경로만 받으므로, 플레이리스트 경로를
+	// 직접 넘긴다 — httptest 서버가 끼어들지 않는다.
 	fixtureDir := t.TempDir()
 	playlistName := makeHLSFixture(t, fixtureDir, 1)
 	localPlaylist := filepath.Join(fixtureDir, playlistName)
@@ -135,18 +135,18 @@ func TestRunHLSRemux_Success(t *testing.T) {
 	if len(data) < 8 {
 		t.Fatalf("output too short: %d bytes", len(data))
 	}
-	// MP4 container signature: bytes [4:8] must spell "ftyp".
+	// MP4 컨테이너 시그니처: bytes [4:8]은 "ftyp"여야 한다.
 	if string(data[4:8]) != "ftyp" {
 		t.Errorf("output is not MP4 (no ftyp box): % x", data[:16])
 	}
 }
 
-// TestRunHLSRemux_CtxCancelPropagates: previously TestRunHLSRemux_ContextCancel
-// stalled ffmpeg by serving a slow segment over HTTP. Post-D2 ffmpeg only reads
-// local files (no network), so we cannot stall it on I/O the same way. Test
-// the wiring directly instead: a stub runFfmpeg that blocks until ctx fires
-// confirms the same property ??that an external ctx cancel propagates to the
-// process. ffmpeg is not required (this runs without the binary).
+// TestRunHLSRemux_CtxCancelPropagates: 예전 TestRunHLSRemux_ContextCancel은
+// HTTP 위의 느린 segment로 ffmpeg를 지연시켰다. D2 이후 ffmpeg는 로컬 파일만
+// 읽으므로(네트워크 없음) 같은 방식으로 I/O에서 지연시킬 수 없다. 대신
+// 배선 자체를 검증한다 — ctx가 트리거될 때까지 블록하는 stub runFfmpeg가
+// 동일한 속성을 확인한다(외부 ctx 취소가 프로세스에 전파됨). ffmpeg가
+// 필요 없다(바이너리 없이도 돈다).
 func TestRunHLSRemux_CtxCancelPropagates(t *testing.T) {
 	orig := runFfmpeg
 	runFfmpeg = func(ctx context.Context, args []string, stderr io.Writer) error {
@@ -167,7 +167,7 @@ func TestRunHLSRemux_CtxCancelPropagates(t *testing.T) {
 		err = runHLSRemux(ctx, "/local/playlist.m3u8", outPath, nil, testMaxBytes)
 	}()
 
-	// Give the goroutine a moment to invoke runFfmpeg before we cancel.
+	// 취소하기 전에 goroutine이 runFfmpeg를 호출할 시간을 잠깐 준다.
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 
@@ -184,10 +184,10 @@ func TestRunHLSRemux_CtxCancelPropagates(t *testing.T) {
 	}
 }
 
-// TestWatchOutputFile_DetectsOversize verifies the size-cap enforcement path
-// of the progress watcher independent of ffmpeg's buffered output: a manual
-// writer grows the file past the cap and the watcher must invoke onOversize
-// exactly once and return.
+// TestWatchOutputFile_DetectsOversize는 ffmpeg의 버퍼링된 출력과 독립적으로
+// progress watcher의 size-cap 강제 경로를 검증한다 — 수동 writer가 파일을
+// cap 너머까지 키우면 watcher는 onOversize를 정확히 한 번 호출하고 반환해야
+// 한다.
 func TestWatchOutputFile_DetectsOversize(t *testing.T) {
 	dir := t.TempDir()
 	tmpPath := filepath.Join(dir, "growing.bin")
@@ -195,8 +195,8 @@ func TestWatchOutputFile_DetectsOversize(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Writer goroutine appends 100 B every 20 ms; after ~10 rounds the file
-	// exceeds the 512 B cap.
+	// Writer goroutine이 20 ms마다 100 B를 추가한다 — 약 10 라운드 후 파일이
+	// 512 B 상한을 넘는다.
 	stopWrite := make(chan struct{})
 	writerDone := make(chan struct{})
 	go func() {
@@ -232,8 +232,8 @@ func TestWatchOutputFile_DetectsOversize(t *testing.T) {
 	}
 }
 
-// TestWatchOutputFile_EmitsProgress verifies the progress path: as the file
-// grows, cb.Progress must be invoked with monotonically non-decreasing sizes.
+// TestWatchOutputFile_EmitsProgress는 progress 경로를 검증한다 — 파일이
+// 커질 때 cb.Progress가 단조 비감소 크기로 호출되어야 한다.
 func TestWatchOutputFile_EmitsProgress(t *testing.T) {
 	dir := t.TempDir()
 	tmpPath := filepath.Join(dir, "growing.bin")
@@ -295,8 +295,8 @@ func TestWatchOutputFile_EmitsProgress(t *testing.T) {
 
 func TestRunHLSRemux_ExitError(t *testing.T) {
 	requireFFmpeg(t)
-	// Post-D2 runHLSRemux only reads local files. Force ffmpeg to fail by
-	// pointing the playlist at a segment that doesn't exist on disk.
+	// D2 이후 runHLSRemux는 로컬 파일만 읽는다. 디스크에 존재하지 않는
+	// segment를 가리키는 플레이리스트로 ffmpeg를 강제 실패시킨다.
 	fixtureDir := t.TempDir()
 	badPlaylist := filepath.Join(fixtureDir, "bad.m3u8")
 	err := os.WriteFile(badPlaylist, []byte("#EXTM3U\n"+
@@ -320,17 +320,17 @@ func TestRunHLSRemux_ExitError(t *testing.T) {
 	if !errors.As(err, &exitErr) {
 		t.Fatalf("got %T (%v), want *ffmpegExitError", err, err)
 	}
-	// Assert the exit code, not stderr contents: ffmpeg's stderr wording
-	// changes across versions and loglevel settings.
+	// stderr 내용이 아닌 exit 코드를 단언한다 — ffmpeg의 stderr 문구는
+	// 버전과 loglevel 설정에 따라 달라진다.
 	if exitErr.exitCode == 0 {
 		t.Errorf("exitCode = 0, want non-zero")
 	}
 }
 
-// TestClassifyHLSRemuxError pins the sentinel ??FetchError.Code mapping so a
-// future refactor cannot silently collapse ffmpeg_missing back into
-// ffmpeg_error (which hides the operator-misconfig case) or swap
-// download_timeout and network_error on context failures.
+// TestClassifyHLSRemuxError는 sentinel → FetchError.Code 매핑을 고정한다.
+// 향후 리팩터링이 ffmpeg_missing을 조용히 ffmpeg_error로 합쳐 운영자 오설정
+// 케이스를 가리거나, ctx 실패에서 download_timeout과 network_error를 바꿔
+// 끼는 일이 없도록 한다.
 func TestClassifyHLSRemuxError(t *testing.T) {
 	cases := []struct {
 		name string
@@ -357,12 +357,12 @@ func TestClassifyHLSRemuxError(t *testing.T) {
 	}
 }
 
-// TestRunHLSRemux_ArgvLocalOnly: argv invariant for the runHLSRemux level
-// (spec AC-10 / AC-11 partial). Captures the ffmpeg argv and asserts:
-//   - -protocol_whitelist is exactly file,crypto (no http/https/tcp/tls/etc)
-//   - -i input has no http://, https:// prefix
-// E3 adds the fetchHLS-level integration test that exercises the full
-// materialize ??runHLSRemux flow.
+// TestRunHLSRemux_ArgvLocalOnly: runHLSRemux 수준의 argv 불변식
+// (spec AC-10 / AC-11 일부). ffmpeg argv를 캡처해 다음을 단언한다:
+//   - -protocol_whitelist는 정확히 file,crypto (http/https/tcp/tls 등 금지)
+//   - -i 입력은 http:// 또는 https:// prefix를 갖지 않는다.
+// E3가 fetchHLS 수준에서 materialize → runHLSRemux 전체 흐름을 다루는
+// 통합 테스트를 추가한다.
 func TestRunHLSRemux_ArgvLocalOnly(t *testing.T) {
 	captured := captureFfmpeg(t)
 
@@ -376,7 +376,7 @@ func TestRunHLSRemux_ArgvLocalOnly(t *testing.T) {
 	}
 	args := (*captured)[0]
 
-	// Find and validate -protocol_whitelist value.
+	// -protocol_whitelist 값을 찾아 검증한다.
 	whitelistIdx := -1
 	for i := 0; i < len(args)-1; i++ {
 		if args[i] == "-protocol_whitelist" {
@@ -397,7 +397,7 @@ func TestRunHLSRemux_ArgvLocalOnly(t *testing.T) {
 		}
 	}
 
-	// Verify -i input is local (no remote URL).
+	// -i 입력이 로컬임을 확인한다(원격 URL이 아님).
 	for i := 0; i < len(args)-1; i++ {
 		if args[i] == "-i" {
 			input := args[i+1]
@@ -408,12 +408,12 @@ func TestRunHLSRemux_ArgvLocalOnly(t *testing.T) {
 	}
 }
 
-// TestRunFfmpegSwap_StubBypassesBinary locks the captureFfmpeg contract used
-// by AC-10 / AC-11 argv invariant tests: with the stub installed, runHLSRemux
-// fully replaces the production path ??no real ffmpeg executes, argv is
-// captured, and the stub MP4 is created at the output path so subsequent
-// rename / Stat in fetchHLS succeed. This is the prerequisite that lets
-// argv-checking tests run on machines without ffmpeg.
+// TestRunFfmpegSwap_StubBypassesBinary는 AC-10 / AC-11 argv 불변식
+// 테스트가 사용하는 captureFfmpeg 계약을 고정한다 — stub이 설치되면
+// runHLSRemux가 프로덕션 경로를 완전히 대체해 실제 ffmpeg는 실행되지 않고,
+// argv가 캡처되고, 출력 경로에 stub MP4가 만들어져 fetchHLS의 후속 rename
+// / Stat이 성공한다. argv 검증 테스트가 ffmpeg가 없는 머신에서도 돌아가게
+// 하는 전제 조건이다.
 func TestRunFfmpegSwap_StubBypassesBinary(t *testing.T) {
 	captured := captureFfmpeg(t)
 
@@ -433,11 +433,11 @@ func TestRunFfmpegSwap_StubBypassesBinary(t *testing.T) {
 	if stat.Size() < 8 {
 		t.Errorf("stub MP4 too small: %d bytes", stat.Size())
 	}
-	// Sanity: runHLSRemux forwards its first argument verbatim as the -i
-	// input. Post-D2 production callers must already have a local playlist
-	// path here ??TestRunHLSRemux_ArgvLocalOnly enforces that no remote URL
-	// reaches ffmpeg in real usage. This test only verifies the swap
-	// mechanism, hence the dummy URL.
+	// sanity: runHLSRemux는 첫 번째 인자를 그대로 -i 입력으로 전달한다.
+	// D2 이후 프로덕션 호출자는 여기 로컬 플레이리스트 경로를 이미
+	// 갖고 있어야 한다 — TestRunHLSRemux_ArgvLocalOnly가 실제 사용에서
+	// 원격 URL이 ffmpeg에 닿지 못함을 강제한다. 이 테스트는 swap
+	// 메커니즘만 검증하므로 dummy URL을 쓴다.
 	args := (*captured)[0]
 	for i, a := range args {
 		if a == "-i" && i+1 < len(args) {

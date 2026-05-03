@@ -16,9 +16,9 @@ import (
 	"time"
 )
 
-// servePaths spins up an httptest server that returns canned bodies for the
-// given path ??bytes mapping, and 404 for anything else. Used by
-// materializeHLS tests to mock CDN responses.
+// servePaths는 path → bytes 매핑에 대해 정해진 응답을 돌려주고, 그 외
+// 경로는 404로 응답하는 httptest 서버를 띄운다. materializeHLS 테스트가
+// CDN 응답을 모의하는 데 쓴다.
 func servePaths(t *testing.T, paths map[string][]byte) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
@@ -76,7 +76,7 @@ func TestMaterializeHLS_SimpleMediaPlaylist(t *testing.T) {
 		t.Errorf("localPath %q not under tempDir %q", localPath, tempDir)
 	}
 
-	// Verify each segment file present with correct contents.
+	// 각 segment 파일이 올바른 내용으로 존재하는지 확인한다.
 	for i, want := range [][]byte{seg0, seg1, seg2} {
 		got, err := os.ReadFile(filepath.Join(tempDir, fmt.Sprintf("seg_%04d.ts", i)))
 		if err != nil {
@@ -87,7 +87,7 @@ func TestMaterializeHLS_SimpleMediaPlaylist(t *testing.T) {
 		}
 	}
 
-	// Verify the rewritten playlist points at local names and not origin URLs.
+	// 재작성된 플레이리스트가 origin URL이 아닌 로컬 이름을 가리키는지 확인한다.
 	pgot, err := os.ReadFile(localPath)
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +104,7 @@ func TestMaterializeHLS_SimpleMediaPlaylist(t *testing.T) {
 }
 
 func TestMaterializeHLS_WithKeyAndSegments(t *testing.T) {
-	keyBody := []byte("0123456789abcdef") // 16 bytes ??AES-128 raw key
+	keyBody := []byte("0123456789abcdef") // 16바이트 — AES-128 raw key
 	seg := []byte("encrypted-segment-data")
 	srv := servePaths(t, map[string][]byte{
 		"/k.bin": keyBody, "/seg.ts": seg,
@@ -141,8 +141,8 @@ func TestMaterializeHLS_WithKeyAndSegments(t *testing.T) {
 	}
 
 	pstr, _ := os.ReadFile(localPath)
-	// Key URI must be rewritten to local name; IV must be preserved (a future
-	// regression that drops the IV would corrupt decryption).
+	// Key URI는 로컬 이름으로 재작성되어야 하고 IV는 보존되어야 한다(IV가
+	// 누락되면 복호화가 깨지는 회귀가 발생한다).
 	if !strings.Contains(string(pstr), `URI="key_0.bin"`) {
 		t.Errorf("playlist key URI not rewritten; got:\n%s", pstr)
 	}
@@ -200,7 +200,7 @@ func TestMaterializeHLS_WithInitSegment(t *testing.T) {
 
 func TestMaterializeHLS_KeyRotation(t *testing.T) {
 	srv := servePaths(t, map[string][]byte{
-		"/k0.bin": []byte("aaaaaaaaaaaaaaaa"), // 16-byte key
+		"/k0.bin": []byte("aaaaaaaaaaaaaaaa"), // 16바이트 키
 		"/k1.bin": []byte("bbbbbbbbbbbbbbbb"),
 		"/s0.ts":  []byte("seg0"),
 		"/s1.ts":  []byte("seg1"),
@@ -250,8 +250,8 @@ func TestMaterializeHLS_RelativePathsResolved(t *testing.T) {
 	seg := []byte("seg-content")
 	srv := servePaths(t, map[string][]byte{"/streams/a/sub/seg.ts": seg})
 
-	// Playlist references a relative URL ??parseMediaPlaylist resolves it
-	// against the base, materializeHLS then downloads from the resolved URL.
+	// 플레이리스트가 상대 URL을 참조한다 — parseMediaPlaylist가 base 기준으로
+	// 해석하고, materializeHLS가 해석된 URL에서 다운로드한다.
 	body := []byte(`#EXTM3U
 #EXTINF:4.0,
 sub/seg.ts
@@ -277,8 +277,8 @@ sub/seg.ts
 }
 
 func TestMaterializeHLS_ExtensionPreserved(t *testing.T) {
-	// One playlist with mixed segment extensions ??local file names must
-	// preserve the original ext from the URL path.
+	// segment 확장자가 섞인 플레이리스트 하나 — 로컬 파일명은 URL path의
+	// 원본 확장자를 보존해야 한다.
 	srv := servePaths(t, map[string][]byte{
 		"/a.ts":  []byte("ts-data"),
 		"/b.m4s": []byte("m4s-data"),
@@ -320,7 +320,7 @@ func TestMaterializeHLS_ExtensionPreserved(t *testing.T) {
 }
 
 func TestMaterializeHLS_UnknownExtensionFallsToBin(t *testing.T) {
-	// .xyz is not in the whitelist ??local name must end in .bin.
+	// .xyz는 whitelist에 없으므로 로컬 이름이 .bin으로 끝나야 한다.
 	srv := servePaths(t, map[string][]byte{"/seg.xyz": []byte("data")})
 	body := []byte(fmt.Sprintf(`#EXTM3U
 #EXTINF:4.0,
@@ -343,9 +343,9 @@ func TestMaterializeHLS_UnknownExtensionFallsToBin(t *testing.T) {
 }
 
 func TestMaterializeHLS_DownloadFailureReturnsEarly(t *testing.T) {
-	// One segment 404s, so materializeHLS returns the error without writing
-	// the rewritten playlist. With parallel downloads, already-started
-	// successful segments may or may not finish before cancellation wins.
+	// segment 하나가 404라서 materializeHLS는 재작성된 플레이리스트를 쓰지
+	// 않고 에러를 반환한다. 병렬 다운로드를 쓰므로, 이미 시작된 성공
+	// segment가 취소보다 먼저 끝날 수도, 끝나지 못할 수도 있다.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/seg0.ts", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
@@ -384,9 +384,9 @@ func TestMaterializeHLS_DownloadFailureReturnsEarly(t *testing.T) {
 }
 
 func TestMaterializeHLS_RawLinesPreserved(t *testing.T) {
-	// Non-URI lines must be passed through verbatim ??only segment/key/init
-	// URI substrings are rewritten. Especially #EXT-X-VERSION,
-	// #EXT-X-TARGETDURATION, #EXT-X-BYTERANGE, #EXT-X-ENDLIST.
+	// URI가 아닌 라인은 그대로 통과해야 한다 — segment/key/init URI
+	// 부분만 재작성된다. 특히 #EXT-X-VERSION, #EXT-X-TARGETDURATION,
+	// #EXT-X-BYTERANGE, #EXT-X-ENDLIST.
 	srv := servePaths(t, map[string][]byte{"/seg.ts": []byte("d")})
 	body := []byte(fmt.Sprintf(`#EXTM3U
 #EXT-X-VERSION:4
@@ -416,12 +416,11 @@ func TestMaterializeHLS_RawLinesPreserved(t *testing.T) {
 }
 
 func TestMaterializeHLS_UnrecognizedTagURINeutered(t *testing.T) {
-	// A media playlist that includes an LL-HLS / unknown tag with a remote
-	// URI attribute ??parseMediaPlaylist does not recognize the tag, so it
-	// produces no entry, and the URI passes through rawLines verbatim. The
-	// rewrite pass must normalize URI="..." ??URI="" so that even if a
-	// future ffmpeg whitelist relaxation occurred, no remote URL could
-	// reach the binary via an unrecognized tag.
+	// 원격 URI 속성이 있는 LL-HLS / 알 수 없는 태그를 포함한 미디어
+	// 플레이리스트 — parseMediaPlaylist가 이 태그를 인식하지 못해 entry를
+	// 만들지 않고 URI는 rawLines에 그대로 통과한다. 재작성 패스는
+	// URI="..."를 URI=""로 정규화해야 — 향후 ffmpeg whitelist 완화가
+	// 일어나도 인식되지 않은 태그를 통해 원격 URL이 바이너리에 닿지 못한다.
 	srv := servePaths(t, map[string][]byte{"/seg.ts": []byte("d")})
 	body := []byte(fmt.Sprintf(`#EXTM3U
 #EXT-X-VERSION:6
@@ -457,7 +456,7 @@ func TestMaterializeHLS_UnrecognizedTagURINeutered(t *testing.T) {
 }
 
 func TestMaterializeHLS_CumulativeCapEnforced(t *testing.T) {
-	// First segment fits, second exceeds remaining ??error surfaces.
+	// 첫 segment는 들어가지만 두 번째가 remaining을 초과 — 에러가 표면화 되어야 한다.
 	srv := servePaths(t, map[string][]byte{
 		"/a.ts": make([]byte, 800),
 		"/b.ts": make([]byte, 800),
@@ -482,7 +481,7 @@ func TestMaterializeHLS_CumulativeCapEnforced(t *testing.T) {
 }
 
 func TestMaterializeHLS_ProgressCallbackFires(t *testing.T) {
-	// Make a payload large enough to clear the byte threshold (1 MiB).
+	// byte threshold(1 MiB)를 넘길 만큼 큰 페이로드를 만든다.
 	bigSeg := make([]byte, progressByteThreshold+1024)
 	srv := servePaths(t, map[string][]byte{"/big.ts": bigSeg})
 	body := []byte(fmt.Sprintf(`#EXTM3U

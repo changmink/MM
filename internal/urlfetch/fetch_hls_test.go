@@ -14,16 +14,16 @@ import (
 	hlsfetch "file_server/internal/urlfetch/hls"
 )
 
-// TestFetch_HLS_MediaPlaylist_Success covers the end-to-end happy path for a
-// media playlist (no variants): HLS detection fires, ffmpeg remuxes the
-// segments, the output is atomically renamed into destDir with the forced
-// .mp4 extension and an "extension_replaced" warning.
+// TestFetch_HLS_MediaPlaylist_Success는 variant 없는 미디어 플레이리스트의
+// end-to-end happy path를 검증한다 — HLS 감지 발동, ffmpeg가 segment를
+// remux, 강제된 .mp4 확장자와 "extension_replaced" 경고와 함께 출력이
+// destDir로 원자적 rename 된다.
 func TestFetch_HLS_MediaPlaylist_Success(t *testing.T) {
 	fixtureDir := t.TempDir()
 	playlistName := makeHLSFixture(t, fixtureDir, 1)
 
-	// Serve .m3u8 with the canonical HLS Content-Type, .ts segments with the
-	// default mime (application/octet-stream via FileServer).
+	// .m3u8은 정규 HLS Content-Type으로, .ts segment는 기본 mime
+	// (FileServer 기본인 application/octet-stream)으로 서빙한다.
 	fs := http.FileServer(http.Dir(fixtureDir))
 	mux := http.NewServeMux()
 	mux.HandleFunc("/"+playlistName, func(w http.ResponseWriter, r *http.Request) {
@@ -61,11 +61,11 @@ func TestFetch_HLS_MediaPlaylist_Success(t *testing.T) {
 	}
 }
 
-// TestFetch_HLS_MasterPlaylist_PicksHighestBandwidth serves a master playlist
-// with two variants and verifies Fetch downloads the higher-bandwidth one.
-// The low variant is a made-up media playlist that does not exist on disk, so
-// hitting it would fail the remux — if the higher one is picked ffmpeg
-// succeeds.
+// TestFetch_HLS_MasterPlaylist_PicksHighestBandwidth는 두 variant를 가진
+// 마스터 플레이리스트를 서빙하고 Fetch가 더 높은 bandwidth 쪽을 다운로드
+// 하는지 검증한다. low variant는 디스크에 존재하지 않는 가짜 미디어
+// 플레이리스트라, 거기에 닿으면 remux가 실패한다 — 더 높은 쪽이 선택되면
+// ffmpeg가 성공한다.
 func TestFetch_HLS_MasterPlaylist_PicksHighestBandwidth(t *testing.T) {
 	fixtureDir := t.TempDir()
 	playlistName := makeHLSFixture(t, fixtureDir, 1)
@@ -99,16 +99,16 @@ func TestFetch_HLS_MasterPlaylist_PicksHighestBandwidth(t *testing.T) {
 	if res.Name != "master.mp4" {
 		t.Errorf("name = %q, want master.mp4", res.Name)
 	}
-	// extension_replaced must be present on the master-playlist branch too
-	// (not only on the media-playlist branch).
+	// extension_replaced는 미디어 플레이리스트 분기뿐 아니라 마스터
+	// 플레이리스트 분기에도 있어야 한다.
 	if !slices.Contains(res.Warnings, "extension_replaced") {
 		t.Errorf("master branch warnings = %v, want to contain extension_replaced", res.Warnings)
 	}
 }
 
-// TestFetch_HLS_MislabeledContentType_Fallback covers CDNs that return
-// text/plain for .m3u8 — our fallback detection must still route into the
-// HLS branch instead of rejecting as unsupported_content_type.
+// TestFetch_HLS_MislabeledContentType_Fallback은 .m3u8에 대해 text/plain을
+// 반환하는 CDN을 다룬다 — 우리의 폴백 감지가 unsupported_content_type으로
+// 거부하지 않고 HLS 분기로 라우팅해야 한다.
 func TestFetch_HLS_MislabeledContentType_Fallback(t *testing.T) {
 	fixtureDir := t.TempDir()
 	playlistName := makeHLSFixture(t, fixtureDir, 1)
@@ -134,15 +134,15 @@ func TestFetch_HLS_MislabeledContentType_Fallback(t *testing.T) {
 	}
 }
 
-// TestFetch_HLS_UppercaseExtension confirms the detection is case-insensitive
-// on the URL path suffix so .M3U8 still routes to HLS.
+// TestFetch_HLS_UppercaseExtension은 URL path suffix 검사가
+// case-insensitive 임을 확인한다 — .M3U8도 HLS로 라우팅되어야 한다.
 func TestFetch_HLS_UppercaseExtension(t *testing.T) {
 	fixtureDir := t.TempDir()
 	makeHLSFixture(t, fixtureDir, 1)
 
-	// Move to uppercase filename so the URL ends with .M3U8. The backing file
-	// on disk is case-preserving; we copy to avoid fighting case-insensitive
-	// filesystems.
+	// URL이 .M3U8로 끝나도록 대문자 파일명으로 옮긴다. 디스크상의 실제
+	// 파일은 대소문자를 보존하지만, case-insensitive 파일시스템과 다투지
+	// 않기 위해 복사한다.
 	srcPath := filepath.Join(fixtureDir, "playlist.m3u8")
 	body, err := os.ReadFile(srcPath)
 	if err != nil {
@@ -152,8 +152,8 @@ func TestFetch_HLS_UppercaseExtension(t *testing.T) {
 	fs := http.FileServer(http.Dir(fixtureDir))
 	mux := http.NewServeMux()
 	mux.HandleFunc("/STREAM.M3U8", func(w http.ResponseWriter, r *http.Request) {
-		// text/plain triggers the fallback branch AND the URL path ends .M3U8 →
-		// should still detect as HLS.
+		// text/plain은 폴백 분기를 트리거하고 URL path가 .M3U8로 끝나므로
+		// HLS로 감지되어야 한다.
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write(body)
 	})
@@ -172,9 +172,9 @@ func TestFetch_HLS_UppercaseExtension(t *testing.T) {
 	}
 }
 
-// TestFetch_HLS_PlaylistTooLarge verifies the 1 MiB playlist body cap. A body
-// just over the limit must be rejected before any ffmpeg spawn, so this test
-// does NOT require ffmpeg to run.
+// TestFetch_HLS_PlaylistTooLarge는 1 MiB 플레이리스트 본문 상한을 검증한다.
+// 한도를 약간 넘는 본문은 ffmpeg를 spawn하기 전에 거부되어야 하므로, 이
+// 테스트는 ffmpeg가 필요 없다.
 func TestFetch_HLS_PlaylistTooLarge(t *testing.T) {
 	oversize := make([]byte, hlsfetch.MaxPlaylistBytes+1)
 	for i := range oversize {
@@ -197,13 +197,13 @@ func TestFetch_HLS_PlaylistTooLarge(t *testing.T) {
 	}
 }
 
-// TestFetch_HLS_PlaylistExactlyAtCap pins the boundary condition: a body of
-// exactly hlsMaxPlaylistBytes must NOT be rejected as too large. Regression
-// guard against someone flipping the `>` to `>=` in the size check.
+// TestFetch_HLS_PlaylistExactlyAtCap은 경계 조건을 고정한다 — 정확히
+// hlsMaxPlaylistBytes 크기의 본문은 too large로 거부되어선 안 된다. 누군가
+// 크기 검사에서 `>`를 `>=`로 바꾸는 회귀를 막는 가드다.
 func TestFetch_HLS_PlaylistExactlyAtCap(t *testing.T) {
-	// Valid-but-trivial playlist padded with comment lines to hit the cap
-	// exactly. ffmpeg will still fail to remux (no usable segments) so we
-	// only assert the size check doesn't trip.
+	// 유효하지만 사소한 플레이리스트에 주석 줄을 padding 해 정확히 상한에
+	// 맞춘다. 사용 가능한 segment가 없으니 ffmpeg는 어차피 remux에 실패하므로,
+	// 여기서는 크기 검사가 트리거되지 않는다는 점만 단언한다.
 	head := []byte("#EXTM3U\n#EXT-X-VERSION:3\n")
 	body := make([]byte, hlsfetch.MaxPlaylistBytes)
 	copy(body, head)
@@ -220,9 +220,9 @@ func TestFetch_HLS_PlaylistExactlyAtCap(t *testing.T) {
 	_, ferr := Fetch(context.Background(), NewClient(AllowPrivateNetworks()),
 		srv.URL+"/atcap.m3u8", dest, "/movies", testMaxBytes, nil)
 	if ferr == nil {
-		// Unexpected success means ffmpeg happily consumed an empty media
-		// playlist. Either way the important assertion is that the size
-		// check did not trip.
+		// 예기치 않게 성공했다면 ffmpeg가 비어 있는 미디어 플레이리스트를
+		// 소비한 것. 어느 쪽이든 핵심 단언은 크기 검사가 트리거되지
+		// 않는다는 것이다.
 		return
 	}
 	if ferr.Code == "hls_playlist_too_large" {
@@ -230,9 +230,9 @@ func TestFetch_HLS_PlaylistExactlyAtCap(t *testing.T) {
 	}
 }
 
-// TestFetch_HLS_AudioMpegurl_Fallthrough guards the legacy MIME shortcut
-// discovered during E2E against Mux (commit 37c3024): audio/mpegurl must
-// route through the HLS branch rather than unsupported_content_type.
+// TestFetch_HLS_AudioMpegurl_Fallthrough는 Mux 대상 E2E에서 발견된 레거시
+// MIME 단축 경로(commit 37c3024)를 보호한다 — audio/mpegurl은
+// unsupported_content_type이 아닌 HLS 분기로 라우팅되어야 한다.
 func TestFetch_HLS_AudioMpegurl_Fallthrough(t *testing.T) {
 	fixtureDir := t.TempDir()
 	playlistName := makeHLSFixture(t, fixtureDir, 1)
@@ -256,8 +256,8 @@ func TestFetch_HLS_AudioMpegurl_Fallthrough(t *testing.T) {
 	}
 }
 
-// TestDeriveHLSFilename_Fallbacks covers the three degenerate stem cases that
-// must resolve to "video.mp4" rather than ".mp4" or "..mp4".
+// TestDeriveHLSFilename_Fallbacks는 ".mp4"나 "..mp4"가 아니라
+// "video.mp4"로 해석되어야 하는 세 종류의 퇴화된 stem 케이스를 검증한다.
 func TestDeriveHLSFilename_Fallbacks(t *testing.T) {
 	cases := []struct {
 		raw  string
@@ -283,9 +283,9 @@ func TestDeriveHLSFilename_Fallbacks(t *testing.T) {
 	}
 }
 
-// TestFetch_HLS_VariantFileScheme checks the defense-in-depth scheme guard:
-// a master playlist whose winning variant points at file:// must be rejected
-// at parse time as invalid_scheme before ffmpeg runs.
+// TestFetch_HLS_VariantFileScheme은 defense-in-depth scheme 가드를 검증한다
+// — 선택된 variant가 file://을 가리키는 마스터 플레이리스트는 ffmpeg가
+// 돌기 전에 파싱 시점에 invalid_scheme으로 거부되어야 한다.
 func TestFetch_HLS_VariantFileScheme(t *testing.T) {
 	masterBody := "#EXTM3U\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=1000000\n" +
@@ -313,10 +313,9 @@ func TestFetch_HLS_VariantFileScheme(t *testing.T) {
 	}
 }
 
-// TestFetch_HLS_EmptyPlaylist_FFmpegError exercises the ffmpeg_error mapping:
-// an empty-but-HLS-typed response is not a master playlist (no STREAM-INF) so
-// it's treated as a media playlist, but ffmpeg will fail because it has no
-// segments to pull.
+// TestFetch_HLS_EmptyPlaylist_FFmpegError는 ffmpeg_error 매핑을 검증한다 —
+// 비어 있지만 HLS 타입인 응답은 STREAM-INF가 없으므로 미디어 플레이리스트로
+// 취급되지만, 가져올 segment가 없어 ffmpeg가 실패해야 한다.
 func TestFetch_HLS_EmptyPlaylist_FFmpegError(t *testing.T) {
 	requireFFmpeg(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -336,8 +335,8 @@ func TestFetch_HLS_EmptyPlaylist_FFmpegError(t *testing.T) {
 	}
 }
 
-// TestFetch_HLS_Start_Callback_TotalZero verifies the Start callback receives
-// total=0 for HLS (H4 will translate that to JSON omitempty on the wire).
+// TestFetch_HLS_Start_Callback_TotalZero는 HLS에서 Start 콜백이 total=0을
+// 받는지 검증한다(H4가 wire에서 이를 JSON omitempty로 번역한다).
 func TestFetch_HLS_Start_Callback_TotalZero(t *testing.T) {
 	fixtureDir := t.TempDir()
 	playlistName := makeHLSFixture(t, fixtureDir, 1)

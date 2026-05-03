@@ -87,7 +87,7 @@ tiny.m3u8
 	if err != nil {
 		t.Fatalf("parseMasterPlaylist: %v", err)
 	}
-	// tiny.m3u8 (BANDWIDTH=100) should beat nobandwidth.m3u8 (treated as 0)
+	// tiny.m3u8(BANDWIDTH=100)이 nobandwidth.m3u8(0으로 처리)보다 우선해야 한다.
 	if got.String() != "https://cdn.example.com/tiny.m3u8" {
 		t.Errorf("missing-bandwidth should lose: got %q", got.String())
 	}
@@ -125,7 +125,7 @@ https://other.cdn.net/abs/variant.m3u8
 }
 
 func TestParseMasterPlaylist_MediaPlaylistReturnsBase(t *testing.T) {
-	// No #EXT-X-STREAM-INF = this is already a media playlist.
+	// #EXT-X-STREAM-INF가 없으면 이미 미디어 플레이리스트다.
 	body := []byte(`#EXTM3U
 #EXT-X-VERSION:3
 #EXT-X-TARGETDURATION:6
@@ -168,9 +168,9 @@ func TestParseMasterPlaylist_EmptyBodyReturnsBase(t *testing.T) {
 	}
 }
 
-// TestParseMasterPlaylist_VariantSelfLoopReturnsBase covers the guard that
-// prevents ffmpeg from looping on a master playlist whose chosen variant URL
-// resolves back to the master itself (hostile input or misconfigured CDN).
+// TestParseMasterPlaylist_VariantSelfLoopReturnsBase는 선택된 variant URL이
+// 마스터 자신으로 다시 해석되는 마스터 플레이리스트(악의적 입력이나 잘못된
+// CDN 설정)에서 ffmpeg가 루프에 빠지지 않게 막는 가드를 검증한다.
 func TestParseMasterPlaylist_VariantSelfLoopReturnsBase(t *testing.T) {
 	body := []byte(`#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=1000000
@@ -181,16 +181,16 @@ master.m3u8
 	if err != nil {
 		t.Fatalf("parseMasterPlaylist: %v", err)
 	}
-	// Must fall back to base so ffmpeg treats it as a media playlist instead
-	// of chasing the same URL again.
+	// 같은 URL을 다시 쫓아가지 않도록 base로 폴백해야 ffmpeg가 미디어
+	// 플레이리스트로 취급한다.
 	if got.String() != base.String() {
 		t.Errorf("self-loop variant: got %q, want base %q", got.String(), base.String())
 	}
 }
 
-// TestParseMasterPlaylist_PreservesVariantQuery ensures CDN tokens attached to
-// the variant URL (common for signed HLS manifests) survive through the
-// parser into the ffmpeg input argument.
+// TestParseMasterPlaylist_PreservesVariantQuery는 variant URL에 붙은 CDN
+// 토큰(서명된 HLS 매니페스트에서 흔하다)이 파서를 거쳐 ffmpeg 입력 인자까지
+// 유지되는지 보장한다.
 func TestParseMasterPlaylist_PreservesVariantQuery(t *testing.T) {
 	body := []byte(`#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=1000000
@@ -227,8 +227,8 @@ low.m3u8
 // parseMediaPlaylist ??Phase B / Task B1
 // ----------------------------------------------------------------------------
 
-// segmentURIs is a small assertion helper for parseMediaPlaylist tests:
-// returns just the resolved URI strings of segment-kind entries in order.
+// segmentURIs는 parseMediaPlaylist 테스트용 작은 단언 헬퍼다 — segment
+// 종류 엔트리의 해석된 URI 문자열만 순서대로 반환한다.
 func segmentURIs(pl *mediaPlaylist) []string {
 	out := []string{}
 	for _, e := range pl.entries {
@@ -290,8 +290,8 @@ seg2.ts
 			t.Errorf("seg[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
-	// rawLines must preserve the full input verbatim ??materializeHLS will
-	// rewrite individual lines by index.
+	// rawLines는 입력 전체를 그대로 보존해야 한다 — materializeHLS가 인덱스로
+	// 개별 라인을 재작성한다.
 	if len(pl.rawLines) < 10 {
 		t.Errorf("rawLines len = %d, want >= 10 (full input preserved)", len(pl.rawLines))
 	}
@@ -445,9 +445,9 @@ seg.ts
 	if err != nil {
 		t.Fatalf("parseMediaPlaylist: %v", err)
 	}
-	// Both #EXTINF entries point to the same seg.ts URL but with different
-	// byte ranges. Parser must produce two segment entries (one per #EXTINF)
-	// and rawLines must still contain the #EXT-X-BYTERANGE lines verbatim.
+	// 두 #EXTINF 엔트리가 같은 seg.ts URL을 가리키지만 byte range가 다르다.
+	// 파서는 #EXTINF당 하나씩 두 segment 엔트리를 만들어야 하고, rawLines는
+	// #EXT-X-BYTERANGE 라인을 그대로 유지해야 한다.
 	if got := segmentURIs(pl); len(got) != 2 {
 		t.Errorf("segments len = %d, want 2 (one per #EXTINF, BYTERANGE shares URL)", len(got))
 	}
@@ -486,7 +486,7 @@ func TestParseMediaPlaylist_EmptyBody(t *testing.T) {
 }
 
 func TestParseMediaPlaylist_TooManyKeys(t *testing.T) {
-	// hlsMaxKeyEntries + 1 keys ??errHLSTooManyKeys.
+	// hlsMaxKeyEntries + 1개의 키 — errHLSTooManyKeys가 나야 한다.
 	var buf strings.Builder
 	buf.WriteString("#EXTM3U\n")
 	for i := 0; i <= hlsMaxKeyEntries; i++ {
@@ -501,7 +501,7 @@ func TestParseMediaPlaylist_TooManyKeys(t *testing.T) {
 }
 
 func TestParseMediaPlaylist_TooManyInits(t *testing.T) {
-	// hlsMaxInitEntries + 1 init segments ??errHLSTooManyInits.
+	// hlsMaxInitEntries + 1개의 init segment — errHLSTooManyInits가 나야 한다.
 	var buf strings.Builder
 	buf.WriteString("#EXTM3U\n")
 	for i := 0; i <= hlsMaxInitEntries; i++ {
@@ -516,9 +516,9 @@ func TestParseMediaPlaylist_TooManyInits(t *testing.T) {
 }
 
 func TestParseMediaPlaylist_DuplicateURIAttribute(t *testing.T) {
-	// Hostile playlist with two URI attributes on a single tag ??parser
-	// extracts the first, but rewriter would replace all. Refuse the
-	// playlist to keep the two stages in lockstep.
+	// 하나의 태그에 URI 속성이 두 개 있는 적대적 플레이리스트 — 파서는
+	// 첫 번째를 뽑지만 rewriter는 전부를 교체한다. 두 단계가 어긋나지
+	// 않도록 플레이리스트 자체를 거부한다.
 	body := []byte(`#EXTM3U
 #EXT-X-KEY:METHOD=AES-128,URI="https://A/k.bin",URI="https://B/secret"
 #EXTINF:4.0,
@@ -533,8 +533,9 @@ seg.ts
 }
 
 func TestParseMediaPlaylist_TooManySegments(t *testing.T) {
-	// hlsMaxSegments + 1 segments ??errHLSTooManySegments. Build the body
-	// programmatically because writing 10001 #EXTINF blocks by hand is silly.
+	// hlsMaxSegments + 1개의 segment — errHLSTooManySegments가 나야 한다.
+	// 10001개의 #EXTINF 블록을 손으로 쓰는 건 비현실적이라 본문을 코드로
+	// 생성한다.
 	var buf strings.Builder
 	buf.WriteString("#EXTM3U\n#EXT-X-TARGETDURATION:1\n")
 	for i := 0; i <= hlsMaxSegments; i++ {
@@ -562,27 +563,27 @@ seg1.ts
 	if err != nil {
 		t.Fatalf("parseMediaPlaylist: %v", err)
 	}
-	// lineIdx points at the line that holds the URI to be rewritten:
-	// for KEY entries, the EXT-X-KEY line itself (URI="..." is on that line).
-	// for SEGMENT entries, the line that holds the URI (e.g. "seg0.ts").
+	// lineIdx는 재작성될 URI를 담고 있는 라인을 가리킨다:
+	// KEY 엔트리의 경우 EXT-X-KEY 라인 자체(URI="..."가 거기 있다).
+	// SEGMENT 엔트리의 경우 URI를 담은 라인(예: "seg0.ts").
 	if len(pl.entries) != 3 {
 		t.Fatalf("entries len = %d, want 3 (1 key + 2 segs); entries = %+v", len(pl.entries), pl.entries)
 	}
-	// Order: entries appear in line order ??key first, then seg0, then seg1.
+	// 순서: 엔트리는 라인 순서대로 나타난다 — key 먼저, 그다음 seg0, seg1.
 	if pl.entries[0].kind != entryKey {
 		t.Errorf("entries[0].kind = %v, want entryKey", pl.entries[0].kind)
 	}
 	if pl.entries[1].kind != entrySegment || pl.entries[2].kind != entrySegment {
 		t.Errorf("seg kinds wrong: %+v", pl.entries[1:])
 	}
-	// Validate lineIdx points to a line that actually contains the URI literal.
+	// lineIdx가 실제로 URI 리터럴을 담은 라인을 가리키는지 확인한다.
 	cases := []struct {
 		entry int
 		want  string
 	}{
-		{0, "k.bin"},   // key URI line
-		{1, "seg0.ts"}, // segment URI line
-		{2, "seg1.ts"}, // segment URI line
+		{0, "k.bin"},   // key URI 라인
+		{1, "seg0.ts"}, // segment URI 라인
+		{2, "seg1.ts"}, // segment URI 라인
 	}
 	for _, tc := range cases {
 		idx := pl.entries[tc.entry].lineIdx
