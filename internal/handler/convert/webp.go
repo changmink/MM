@@ -8,10 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"file_server/internal/convert"
+	"file_server/internal/handlerutil"
 	"file_server/internal/media"
 	"file_server/internal/thumb"
 )
@@ -151,7 +151,7 @@ func (h *Handler) convertWebPOneSSE(parentCtx context.Context, emit func(any),
 		return emitErr("write_error")
 	}
 
-	unlock := h.lockWebPKey(abs)
+	unlock := handlerutil.LockPath(h.webpLocks, abs)
 	defer unlock()
 
 	// Re-check after lock: another concurrent request might have produced
@@ -268,12 +268,3 @@ func deleteOriginalAndSidecars(abs, inputType string) string {
 	return ""
 }
 
-// lockWebPKey serializes producers for the same source path. Mirrors
-// convert.go's lockConvertKey ??leaves the map entry in place after unlock,
-// bounded by the set of unique source files on disk.
-func (h *Handler) lockWebPKey(key string) func() {
-	v, _ := h.webpLocks.LoadOrStore(key, &sync.Mutex{})
-	mu := v.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
-}

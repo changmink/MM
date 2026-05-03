@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sync"
 
 	"file_server/internal/ffmpeg"
+	"file_server/internal/handlerutil"
 	"file_server/internal/media"
 )
 
@@ -79,7 +79,7 @@ func (h *Handler) streamTS(w http.ResponseWriter, r *http.Request, absPath strin
 		// fd 재할당이 일어난 환경에서 다른 파일을 닫는 패턴이라 제거.
 	}
 
-	unlock := h.lockStreamKey(cachePath)
+	unlock := handlerutil.LockPath(&h.streamLocks, cachePath)
 	defer unlock()
 
 	// Re-check after acquiring the lock — another goroutine may have produced it.
@@ -157,12 +157,3 @@ func (h *Handler) streamCachePath(absPath string, fi os.FileInfo) string {
 	return filepath.Join(h.dataDir, streamCacheDir, name)
 }
 
-// lockStreamKey serializes producers for the same cache key. The map entry
-// is left in place after unlock — bounded by the set of unique TS files, so
-// growth is acceptable for this single-tenant server.
-func (h *Handler) lockStreamKey(key string) func() {
-	v, _ := h.streamLocks.LoadOrStore(key, &sync.Mutex{})
-	mu := v.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
-}

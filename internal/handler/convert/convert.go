@@ -9,10 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"file_server/internal/convert"
+	"file_server/internal/handlerutil"
 	"file_server/internal/media"
 )
 
@@ -148,7 +148,7 @@ func (h *Handler) convertOneSSE(parentCtx context.Context, emit func(any),
 		return emitErr("write_error")
 	}
 
-	unlock := h.lockConvertKey(abs)
+	unlock := handlerutil.LockPath(h.convertLocks, abs)
 	defer unlock()
 
 	// Re-check after lock: another request might have produced the .mp4 while
@@ -265,12 +265,3 @@ func logConvertError(relPath string, err error, code string) {
 	slog.Warn("convert failed", attrs...)
 }
 
-// lockConvertKey serializes producers for the same source TS path. Matches
-// stream.go:lockStreamKey ??leaves the map entry in place after unlock,
-// bounded by the set of unique TS files on disk.
-func (h *Handler) lockConvertKey(key string) func() {
-	v, _ := h.convertLocks.LoadOrStore(key, &sync.Mutex{})
-	mu := v.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
-}
