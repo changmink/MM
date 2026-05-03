@@ -160,6 +160,58 @@ export async function deleteFile(path, opts = {}) {
   return false;
 }
 
+// deleteSelectedFiles는 selectedPaths 전체를 병렬로 DELETE한다. selection은
+// 항상 파일만 담고 있다(bindEntrySelection이 폴더 체크박스를 숨김). 부분 실패는
+// allSettled로 끝까지 시도한 뒤 실패 path 목록을 alert에 모아 보여준다 — 성공한
+// 항목은 그대로 삭제된 상태로 둔다. browse refresh가 syncSelectionWithVisible을
+// 통해 잔존 selection을 정리한다.
+export async function deleteSelectedFiles() {
+  const paths = Array.from(selectedPaths);
+  if (paths.length === 0) return;
+  const previewLines = paths.slice(0, 3).join('\n')
+    + (paths.length > 3 ? `\n…외 ${paths.length - 3}개` : '');
+  if (!confirm(`선택한 ${paths.length}개 항목을 삭제하시겠습니까?\n\n${previewLines}`)) return;
+
+  const btn = $.deleteSelectionBtn;
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '삭제 중...';
+  try {
+    const results = await Promise.allSettled(
+      paths.map(p => fetch('/api/file?path=' + encodeURIComponent(p), { method: 'DELETE' }))
+    );
+    const failed = [];
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled' && r.value.ok) {
+        selectedPaths.delete(paths[i]);
+      } else {
+        failed.push(paths[i]);
+      }
+    });
+    if (failed.length > 0) {
+      const head = failed.slice(0, 5).join('\n');
+      const tail = failed.length > 5 ? `\n…외 ${failed.length - 5}개` : '';
+      alert(`${failed.length}개 삭제 실패:\n${head}${tail}`);
+    }
+    _browse(currentPath, false);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
+// updateDeleteSelectionBtn은 selection 종속 가시성을 갱신한다. selection.js의
+// refreshSelectionUI가 download 버튼과 함께 호출 — 단일 출처에서 배치 갱신.
+export function updateDeleteSelectionBtn() {
+  const n = selectedPaths.size;
+  if (n === 0) {
+    $.deleteSelectionBtn.hidden = true;
+    return;
+  }
+  $.deleteSelectionBtn.hidden = false;
+  $.deleteSelectionBtn.textContent = `선택 삭제 (${n}개)`;
+}
+
 export async function deleteFolder(path) {
   if (!confirm(`폴더 안의 모든 파일이 삭제됩니다.\n${path}\n\n계속하시겠습니까?`)) return;
   const res = await fetch('/api/folder?path=' + encodeURIComponent(path), { method: 'DELETE' });
@@ -461,6 +513,9 @@ export function wireFileOps(deps) {
   $.folderNameInput.addEventListener('keydown', e => {
     if (e.key === 'Enter') submitCreateFolder();
   });
+
+  // 선택 삭제
+  $.deleteSelectionBtn.addEventListener('click', deleteSelectedFiles);
 
   // 이름 변경
   $.renameCancelBtn.addEventListener('click', closeRenameModal);

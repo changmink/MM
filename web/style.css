@@ -968,6 +968,13 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .download-folder-btn {
   margin-left: auto;
 }
+/* 선택 삭제 버튼 — 위험 톤(영구 삭제, 단일 사용자 운용에서 휴지통 없음).
+   카드의 .thumb-card .delete-btn(어두운 원형 ✕)과 클래스명을 분리해 specificity
+   충돌을 피한다. */
+.delete-selection-btn {
+  background: var(--danger);
+}
+.delete-selection-btn:hover { background: #c04040; }
 
 .convert-file-list {
   max-height: 140px;

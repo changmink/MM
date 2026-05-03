@@ -74,6 +74,7 @@ export const $ = {
   convertWebpAllBtn:       document.getElementById('convert-webp-all-btn'),
   downloadFolderBtn:       document.getElementById('download-folder-btn'),
   downloadSelectionBtn:    document.getElementById('download-selection-btn'),
+  deleteSelectionBtn:      document.getElementById('delete-selection-btn'),
   convertWebpModal:        document.getElementById('convert-webp-modal'),
   convertWebpFileList:     document.getElementById('convert-webp-file-list'),
   convertWebpDeleteOrig:   document.getElementById('convert-webp-delete-original'),
