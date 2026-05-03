@@ -1,10 +1,8 @@
 package handler
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
-	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -27,44 +25,14 @@ func (h *Handler) handleFolder(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// patchFolder dispatches PATCH /api/folder by inspecting the body shape:
+// patchFolder dispatches PATCH /api/folder:
 //
-//	{"name": "..."}  → rename in place
-//	{"to":   "..."}  → move into a different directory (base name preserved)
+//	{"name": "..."}  → renameFolder
+//	{"to":   "..."}  → moveFolder (base name preserved)
 //
-// Mirrors patchFile so the API surface for files and folders stays symmetric.
+// 본문 분기·검증은 patchFile과 공유 — names.go의 patchDispatch 단일 출처.
 func (h *Handler) patchFolder(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		if isMaxBytesErr(err) {
-			writeError(w, r, http.StatusRequestEntityTooLarge, "too_large", nil)
-			return
-		}
-		writeError(w, r, http.StatusBadRequest, "read body failed", err)
-		return
-	}
-	var probe struct {
-		Name string `json:"name"`
-		To   string `json:"to"`
-	}
-	if err := json.Unmarshal(bodyBytes, &probe); err != nil {
-		writeError(w, r, http.StatusBadRequest, "invalid body", err)
-		return
-	}
-	if probe.Name != "" && probe.To != "" {
-		writeError(w, r, http.StatusBadRequest, "specify either name or to, not both", nil)
-		return
-	}
-	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-	switch {
-	case probe.To != "":
-		h.moveFolder(w, r)
-	case probe.Name != "":
-		h.renameFolder(w, r)
-	default:
-		writeError(w, r, http.StatusBadRequest, "missing name or to", nil)
-	}
+	patchDispatch(w, r, h.renameFolder, h.moveFolder)
 }
 
 func (h *Handler) moveFolder(w http.ResponseWriter, r *http.Request) {

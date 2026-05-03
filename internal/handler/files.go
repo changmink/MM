@@ -1,10 +1,8 @@
 package handler
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -26,46 +24,15 @@ func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// patchFile dispatches PATCH /api/file by inspecting the body shape:
+// patchFile dispatches PATCH /api/file:
 //
-//	{"name": "..."}  → rename in place (extension preserved)
-//	{"to":   "..."}  → move to a different directory
+//	{"name": "..."}  → renameFile (extension preserved)
+//	{"to":   "..."}  → moveFile
 //
-// Both fields are mutually exclusive. The body is read once into memory and
-// re-attached so each downstream handler can decode it normally — neither
-// renameFile nor moveFile knows it was inspected first.
+// 본문 분기·검증 로직은 patchFolder와 공유되므로 names.go의 patchDispatch
+// 단일 출처에 위임한다.
 func (h *Handler) patchFile(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		if isMaxBytesErr(err) {
-			writeError(w, r, http.StatusRequestEntityTooLarge, "too_large", nil)
-			return
-		}
-		writeError(w, r, http.StatusBadRequest, "read body failed", err)
-		return
-	}
-	var probe struct {
-		Name string `json:"name"`
-		To   string `json:"to"`
-	}
-	if err := json.Unmarshal(bodyBytes, &probe); err != nil {
-		writeError(w, r, http.StatusBadRequest, "invalid body", err)
-		return
-	}
-	if probe.Name != "" && probe.To != "" {
-		writeError(w, r, http.StatusBadRequest, "specify either name or to, not both", nil)
-		return
-	}
-	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-	switch {
-	case probe.To != "":
-		h.moveFile(w, r)
-	case probe.Name != "":
-		h.renameFile(w, r)
-	default:
-		writeError(w, r, http.StatusBadRequest, "missing name or to", nil)
-	}
+	patchDispatch(w, r, h.renameFile, h.moveFile)
 }
 
 func (h *Handler) deleteFile(w http.ResponseWriter, r *http.Request) {
