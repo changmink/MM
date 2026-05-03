@@ -1,11 +1,10 @@
 package convertapi
 
 import (
-	"encoding/json"
-	"fmt"
-	"log/slog"
 	"net/http"
 	"sync"
+
+	"file_server/internal/handlerutil"
 )
 
 type Handler struct {
@@ -28,69 +27,33 @@ func New(dataDir string, convertLocks, webpLocks *sync.Map) *Handler {
 	}
 }
 
+// writeJSON / writeError / assertFlusher / writeSSEHeaders / writeSSEEvent /
+// sseEmitter are thin forwards to handlerutil — 패키지 내 호출 사이트가
+// 짧은 이름을 그대로 쓰게 유지하되 로직은 handlerutil 단일 출처로 모은다.
+
 func writeJSON(w http.ResponseWriter, r *http.Request, code int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	if err := json.NewEncoder(w).Encode(body); err != nil {
-		slog.Debug("response encode failed",
-			"method", r.Method, "path", r.URL.Path, "err", err,
-		)
-	}
+	handlerutil.WriteJSON(w, r, code, body)
 }
 
 func writeError(w http.ResponseWriter, r *http.Request, code int, msg string, err error) {
-	switch {
-	case code >= 500:
-		slog.Error("request failed",
-			"method", r.Method, "path", r.URL.Path,
-			"status", code, "msg", msg, "err", err,
-		)
-	case err != nil:
-		slog.Warn("request rejected",
-			"method", r.Method, "path", r.URL.Path,
-			"status", code, "msg", msg, "err", err,
-		)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	if encErr := json.NewEncoder(w).Encode(map[string]string{"error": msg}); encErr != nil {
-		slog.Debug("error response encode failed",
-			"method", r.Method, "path", r.URL.Path, "err", encErr,
-		)
-	}
+	handlerutil.WriteError(w, r, code, msg, err)
 }
 
 func assertFlusher(w http.ResponseWriter, r *http.Request) http.Flusher {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, r, http.StatusInternalServerError, "streaming unsupported", nil)
-		return nil
-	}
-	return flusher
+	return handlerutil.AssertFlusher(w, r)
 }
 
 func writeSSEHeaders(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
+	handlerutil.WriteSSEHeaders(w)
 }
 
+// sseEmitter — convert 경로의 OnStart 콜백은 ffmpeg.Run 안쪽 호출자
+// goroutine에서, progress writer는 별도 goroutine에서 emit을 호출하므로
+// mutex 보호가 필수. 자세한 의도는 handlerutil.NewSSEEmitter 주석 참조.
 func sseEmitter(w http.ResponseWriter, flusher http.Flusher) func(any) {
-	var mu sync.Mutex
-	return func(payload any) {
-		mu.Lock()
-		defer mu.Unlock()
-		writeSSEEvent(w, flusher, payload)
-	}
+	return handlerutil.NewSSEEmitter(w, flusher)
 }
 
 func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, payload any) {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		slog.Error("sse marshal", "err", err)
-		return
-	}
-	fmt.Fprintf(w, "data: %s\n\n", data)
-	flusher.Flush()
+	handlerutil.WriteSSEEvent(w, flusher, payload)
 }

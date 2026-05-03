@@ -2,8 +2,6 @@ package handler
 
 import (
 	"context"
-	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"runtime"
@@ -12,6 +10,7 @@ import (
 
 	handlerconvert "file_server/internal/handler/convert"
 	handlerimport "file_server/internal/handler/import"
+	"file_server/internal/handlerutil"
 	"file_server/internal/importjob"
 	"file_server/internal/settings"
 	"file_server/internal/thumb"
@@ -178,43 +177,13 @@ func (h *Handler) Close() {
 	}
 }
 
-// writeJSON emits a JSON body with the given status code. Encode 실패는
-// 보통 클라이언트 mid-disconnect로 발생하므로 writeError와 같은 패턴으로
-// slog.Debug 한 줄만 남긴다 — 정상 흐름이지만 디버깅 단서가 필요할 때
-// 추적 가능하게.
+// writeJSON / writeError are thin forwards to handlerutil — 패키지 내 호출
+// 사이트(browse.go·files.go·folders.go 등)가 짧은 이름을 그대로 쓸 수 있게
+// 유지하되 로직은 handlerutil 단일 출처로 모은다.
 func writeJSON(w http.ResponseWriter, r *http.Request, code int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	if err := json.NewEncoder(w).Encode(body); err != nil {
-		slog.Debug("response encode failed",
-			"method", r.Method, "path", r.URL.Path, "err", err,
-		)
-	}
+	handlerutil.WriteJSON(w, r, code, body)
 }
 
-// writeError emits a JSON error body. 5xx 응답과 err != nil인 client 실수를
-// 분리해서 로그한다 — 5xx는 server malfunction을 의미하므로 Error, 4xx + err
-// (e.g. JSON parse 실패)은 운영자 진단용 Warn으로. 둘 다 아닌 plain 4xx는
-// 기록하지 않는다 (의도적 client 거부 — 정상 동작).
 func writeError(w http.ResponseWriter, r *http.Request, code int, msg string, err error) {
-	switch {
-	case code >= 500:
-		slog.Error("request failed",
-			"method", r.Method, "path", r.URL.Path,
-			"status", code, "msg", msg, "err", err,
-		)
-	case err != nil:
-		slog.Warn("request rejected",
-			"method", r.Method, "path", r.URL.Path,
-			"status", code, "msg", msg, "err", err,
-		)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	if encErr := json.NewEncoder(w).Encode(map[string]string{"error": msg}); encErr != nil {
-		// 클라이언트가 mid-error로 끊기면 진단을 위해 흔적 정도만 남긴다.
-		slog.Debug("error response encode failed",
-			"method", r.Method, "path", r.URL.Path, "err", encErr,
-		)
-	}
+	handlerutil.WriteError(w, r, code, msg, err)
 }

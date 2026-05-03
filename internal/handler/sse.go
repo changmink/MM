@@ -1,65 +1,32 @@
 package handler
 
 import (
-	"encoding/json"
-	"fmt"
-	"log/slog"
 	"net/http"
-	"sync"
+
+	"file_server/internal/handlerutil"
 )
 
-// assertFlusher returns the writer as Flusher or nil after responding with
-// 500. Callers must early-return on nil. Use BEFORE any header write so a
-// failure path can still send an HTTP error — once writeSSEHeaders runs, the
-// status line is committed and a 4xx/5xx response is no longer possible.
+// assertFlusher / writeSSEHeaders / sseEmitter / writeSSEEvent are thin
+// forwards to handlerutil so SSE 핸들러가 짧은 이름을 그대로 쓰게 두되
+// 정책(헤더·mutex·marshal-fail 처리)은 handlerutil 단일 출처로 모은다.
+
 func assertFlusher(w http.ResponseWriter, r *http.Request) http.Flusher {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, r, http.StatusInternalServerError, "streaming unsupported", nil)
-		return nil
-	}
-	return flusher
+	return handlerutil.AssertFlusher(w, r)
 }
 
-// writeSSEHeaders writes the standard text/event-stream response headers and
-// the 200 status line. Call after every pre-flight check that might still
-// 4xx/5xx — once this returns, the response body is open for SSE frames.
 func writeSSEHeaders(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
+	handlerutil.WriteSSEHeaders(w)
 }
 
-// sseEmitter returns an emit closure that serializes SSE writes via an
-// internal mutex. Required when the writer is shared between the handler
-// goroutine (start/done/error/summary) and per-task progress writers — the
-// raw http.ResponseWriter is not safe for concurrent Write/Flush.
-//
-// When NOT to use: handlers whose events all funnel through a single
-// goroutine (e.g. a Job.Publish channel that the handler drains in one
-// for-range loop — see handleImportURL / handleSubscribeJob) are already
-// serialized; use writeSSEEvent directly to avoid taking a redundant lock
-// on every frame. Reach for sseEmitter only when more than one goroutine
-// in the handler can call emit concurrently.
+// sseEmitter — see handlerutil.NewSSEEmitter for the full contract. Use only
+// when more than one goroutine in a handler can call emit concurrently;
+// single-goroutine event pumps (e.g. Job.Publish drained in one for-range
+// loop — see handleImportURL / handleSubscribeJob) should call
+// writeSSEEvent directly to avoid a redundant lock per frame.
 func sseEmitter(w http.ResponseWriter, flusher http.Flusher) func(any) {
-	var mu sync.Mutex
-	return func(payload any) {
-		mu.Lock()
-		defer mu.Unlock()
-		writeSSEEvent(w, flusher, payload)
-	}
+	return handlerutil.NewSSEEmitter(w, flusher)
 }
 
-// writeSSEEvent marshals payload as JSON and emits a single `data: ...\n\n`
-// SSE frame. Marshal failures are logged and the frame is dropped — past
-// the header boundary the caller has nothing useful to do with the error.
 func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, payload any) {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		slog.Error("sse marshal", "err", err)
-		return
-	}
-	fmt.Fprintf(w, "data: %s\n\n", data)
-	flusher.Flush()
+	handlerutil.WriteSSEEvent(w, flusher, payload)
 }
