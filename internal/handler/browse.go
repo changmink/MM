@@ -55,6 +55,16 @@ func (h *Handler) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	// request so a directory of legacy thumbnails can't stall the handler.
 	backfillBudget := 1
 
+	// 사이드카 stat을 entry마다 부르면 1000개 디렉터리 = 1000 syscall이라
+	// .thumb 디렉터리를 한 번만 ReadDir해 set으로 lookup. 디렉터리가 없으면
+	// 빈 set으로 자연스럽게 모든 thumb_available=false 처리된다.
+	thumbSet := make(map[string]struct{})
+	if entries, err := os.ReadDir(filepath.Join(abs, ".thumb")); err == nil {
+		for _, e := range entries {
+			thumbSet[e.Name()] = struct{}{}
+		}
+	}
+
 	entries := make([]entry, 0, len(infos))
 	for _, info := range infos {
 		name := info.Name()
@@ -83,10 +93,10 @@ func (h *Handler) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		thumbAvail := false
 		var durSec *float64
 		if ft == media.TypeImage || ft == media.TypeVideo {
-			thumbPath := filepath.Join(abs, ".thumb", name+".jpg")
-			if _, err := os.Stat(thumbPath); err == nil {
+			if _, ok := thumbSet[name+".jpg"]; ok {
 				thumbAvail = true
 				if ft == media.TypeVideo {
+					thumbPath := filepath.Join(abs, ".thumb", name+".jpg")
 					durSec = lookupVideoDuration(thumbPath, filepath.Join(abs, name), &backfillBudget)
 				}
 			}
