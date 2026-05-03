@@ -242,8 +242,8 @@ async function submitURLImport() {
     showURLError('URL을 한 줄에 하나씩 입력하세요.');
     return;
   }
-  if (urls.length > 50) {
-    showURLError('한 번에 최대 50개까지 입력할 수 있습니다.');
+  if (urls.length > 500) {
+    showURLError('한 번에 최대 500개까지 입력할 수 있습니다.');
     return;
   }
 
