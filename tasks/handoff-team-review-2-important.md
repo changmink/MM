@@ -1,10 +1,74 @@
 # 팀 리뷰(2회차) Important 후속 핸드오프
 
-> **Status: open** — 2회차 `/team-review` (Critical 0건 / Important 17건) 결과 정리. Critical 없음 — 머지 차단은 아니지만 다음 마일스톤 안에 정리할 가치가 있는 항목.
+> **Status: in-progress** — Phase 1 (Group D) + Phase 2 (Group A) 완료. Phase 3 (Group B) + Phase 4 (Group C) 대기.
 
-## 현재 상태
+## 진행 상황 (2026-05-03 갱신)
 
-- 작업 브랜치: `develop` (clean, `dd7fdbe`)
+### 작업 브랜치
+- 현재: `feature/team-review-2-important` (develop에서 분기)
+- HEAD: `22e082e` (A.7 commit — runImportJob 분해)
+- develop 대비 13개 커밋 누적, 작업 트리 clean
+
+### 완료 — Phase 1 (Group D, 문서 정합화)
+| 커밋 | 작업 |
+|---|---|
+| `1018e56` | docs(tasks): 핸드오프 문서 추가 |
+| `263a44a` | docs(spec): SPEC §5/§9에 limits.go MaxBytesReader 캡 등재 (D.1) |
+| `eeff5a6` | docs(spec): frontend-modularization·hls-ssrf·plan Status 정합화 (D.2-5) |
+| `5069bd1` | docs: imageconv 누락·SPEC §10·requireSameOrigin 단일 출처 정리 (D.6) |
+| `5b3977c` | docs(readme): D.1 follow-up — body-size cap 정책을 API 절에 등재 |
+| `5c25e35` | docs(readme): v0.0.2 릴리즈 노트 + 현재 버전 표기 갱신 (handoff 외 발견) |
+
+### 완료 — Phase 2 (Group A, 코드 안정성)
+| 커밋 | 작업 |
+|---|---|
+| `dd40cd3` | fix(handler): upload 정상 경로 dst.Close 에러 매핑 + 부분 파일 정리 (A.1) |
+| `7552087` | fix(handler): convert_image timeout 시 고아 출력 파일 정리 (A.2) |
+| `e36694b` | fix(handler): streamTS 1차 캐시 hit fd 이중 close 정리 (A.3) |
+| `f822537` | refactor(handler): writeJSON 헬퍼로 정상 응답 Encode 에러 일관 로깅 (A.4) |
+| `1fef0ee` | style(handler): tree.go err == io.EOF → errors.Is (A.5) |
+| `828b586` | fix(handler): validateName Windows 예약 문자/제어문자/예약 basename 차단 (A.6 — 서버+클라+테스트 40개) |
+| `22e082e` | refactor(handler): runImportJob을 cancelRemainingURLs/finalizeBatch로 분해 (A.7) |
+
+### 진행 중 의사결정 (다음 세션이 그대로 따를 것)
+- **A.2**: 핸드오프의 옵션 B 채택 — `imageconv.ConvertPNGToJPG` 시그니처는 그대로 두고 핸들러 측 best-effort cleanup goroutine으로 처리. 옵션 A(ctx 추가)는 PNG decode/JPEG encode 자체가 ctx를 honor하지 않아 실효성 없다고 판단.
+- **A.6**: wire 에러 코드는 `"invalid name"` 단일 유지 (SPEC §5 보존). 더 상세한 진단은 클라이언트 `validateRenameInput`에서 한글 메시지로 노출.
+- **A.4**: `writeJSON` 헬퍼는 `handler.go`의 `writeError` 바로 위에 배치. 이미 err 체크가 있던 `import_url_jobs.go` 2곳은 변경하지 않음 (PR 표면 최소화).
+- **C.1 (streamTS pipe streaming)**: 별도 spec으로 분리. fragmented MP4 호환성·`-c copy` 실패 fallback 등 trade-off가 spec 수준 검토 필요. **본 핸드오프에서는 제외.**
+- **README v0.0.2 릴리즈 노트**: Phase 1 진행 중 발견된 누락. handoff 외 작업이지만 같은 docs 그룹이라 묶어 처리.
+
+### 남은 작업
+
+#### Phase 3 — Group B (아키텍처 정리, 4건)
+**권장 머지 순서: B.3 먼저 → B.2 → B.1 → B.4**
+- **B.3 (단독 PR 권장, 표면 가장 큼)**: `internal/ffmpeg` 신설 — `stream.go`/`thumb/thumb.go`/`convert/convert.go`/`convert/webp.go`/`urlfetch/hls.go` 6곳에 흩어진 `exec.LookPath("ffmpeg")` + `exec.CommandContext(...)` 통합. `ErrMissing` 단일 sentinel. 본 핸드오프 §B.3 참고.
+- **B.2**: `internal/urlfetch/hls/` 서브패키지 분리 (B.3 후 LookPath 중복 동시 정리 가능).
+- **B.1**: `internal/handler/import/` + `internal/handler/convert/` 서브패키지 분리. `requireSameOrigin` 등록은 root에 유지.
+- **B.4**: `internal/media/doc.go` 한 줄 (단기). 장기 `media/types/`·`media/fsop/` 분리는 별도 phase.
+
+#### Phase 4 — Group C (성능 hot path, 2건 — C.1 제외)
+**권장 머지 순서: C.2 → C.3** (회귀 표면 점진 확대)
+- **C.2**: `materializeHLS` segment 병렬화 (errgroup, 4-동시). 동시에 `copyWithCaps`의 `Load → Add` 비원자 패턴을 CAS 루프로 교체 + `phase1Total` 클로저 캡처를 `atomic.Int64`로. 본 핸드오프 §C.2 참고.
+- **C.3**: URL 배치 per-job worker pool (2-4). A.7 분해 완료로 표면 축소 — 안전한 진행 가능.
+- ~~C.1~~: 별도 spec으로 분리 (위 의사결정 참고).
+
+### 다음 세션 작업 시작 절차
+1. `git checkout feature/team-review-2-important` (이미 분기됨)
+2. `git log --oneline develop..HEAD | head -15`로 누적 커밋 확인
+3. `go test ./...` 통과 확인 (clean state)
+4. **B.3부터 시작** — 본 문서 §B.3의 권장 구현 따라 `internal/ffmpeg` 신설.
+5. 매 커밋 전 `go test ./...` 통과 확인 (CLAUDE.md 정책)
+6. 커밋 메시지는 핸드오프 §"커밋 분할 권장" 표 #11~17 참고
+
+### 머지 시점 결정 사항 (다음 세션 또는 그 이후)
+- Phase 3 + Phase 4 모두 완료 후 `develop`로 머지할지, Phase 단위로 머지할지 결정 필요.
+- 본 브랜치는 docs(Phase 1) + fix/refactor(Phase 2) + arch(Phase 3) + perf(Phase 4) 혼재 — 한 번에 머지하면 PR이 커지지만 logical 그룹별 commit 분할이 이미 되어 있어 review 부담은 작다.
+
+---
+
+## 원본 컨텍스트 (작업 시작 시점, 2026-05-03)
+
+- 작업 브랜치 시작점: `develop` (clean, `dd7fdbe`)
 - 코드 변경 없음 — 본 문서가 작업 시작점
 - 이전 1회차 핸드오프(`tasks/handoff-team-review-critical-fixes.md`)는 모두 머지 완료
 
