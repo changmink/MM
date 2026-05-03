@@ -15,6 +15,7 @@ import { wireConvert } from './convert.js';
 import { wireConvertImage } from './convertImage.js';
 import { wireConvertWebP } from './convertWebp.js';
 import { wireDragSelect } from './dragSelect.js';
+import { wireDownload } from './download.js';
 import { setURLImportDeps, wireURLImport } from './urlImport.js';
 import {
   bootstrapURLJobs,
@@ -40,6 +41,7 @@ wireConvertWebP({ browse });
 wireURLImport();
 wireBrowse();
 wireDragSelect();
+wireDownload();
 
 readViewFromURL();
 syncToolbarUI();

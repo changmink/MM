@@ -960,6 +960,14 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   background: #14b8a6;
 }
 .convert-webp-all-btn:hover { background: #0d9488; }
+/* 다운로드 계열 버튼 — 변환과 구분되는 회색 톤 (액션 강도가 낮음) */
+.download-btn {
+  background: #4b5563;
+}
+.download-btn:hover { background: #374151; }
+.download-folder-btn {
+  margin-left: auto;
+}
 
 .convert-file-list {
   max-height: 140px;

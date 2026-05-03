@@ -18,6 +18,7 @@ import {
   updateConvertPNGAllBtn,
   updateConvertWebPAllBtn,
 } from './visiblePaths.js';
+import { updateDownloadSelectionBtn } from './download.js';
 
 // computeVisible: () => Entry[]  — applyView(allEntries) 결과. wireSelection
 // 시점에 browse.js 가 주입. 미주입 시 refreshSelectionUI 는 빈 visible 로
@@ -100,6 +101,7 @@ export function refreshSelectionUI() {
   const visible = _computeVisible ? _computeVisible() : [];
   updateConvertPNGAllBtn(visible);
   updateConvertWebPAllBtn(visible);
+  updateDownloadSelectionBtn();
   renderSelectionControls();
 }
 
