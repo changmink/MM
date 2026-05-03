@@ -372,3 +372,35 @@ func TestMoveFile_ErrorCases(t *testing.T) {
 		}
 	})
 }
+
+func TestNameWithSuffix(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		attempt int
+		want    string
+	}{
+		{"attempt 0 returns name unchanged", "foo.png", 0, "foo.png"},
+		{"attempt 1 inserts _1 before ext", "foo.png", 1, "foo_1.png"},
+		{"attempt 42 inserts _42", "foo.png", 42, "foo_42.png"},
+		{"negative attempt returns name unchanged", "foo.png", -1, "foo.png"},
+		{"no ext", "README", 1, "README_1"},
+		{"compound ext splits only last segment", "foo.tar.gz", 1, "foo.tar_1.gz"},
+		{"full path preserves dir", "/data/photos/foo.png", 3, "/data/photos/foo_3.png"},
+		// Dotfile edge case — filepath.Ext(".gitignore") returns ".gitignore"
+		// so stem is empty. Existing renameToUniqueDest produces the same
+		// shape; the dotfile case shouldn't reach this helper in practice
+		// (validateName carveout filters it earlier) but the behavior is
+		// locked here for regression safety.
+		{"dotfile with no other dot", ".gitignore", 1, "_1.gitignore"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := NameWithSuffix(tc.input, tc.attempt)
+			if got != tc.want {
+				t.Errorf("NameWithSuffix(%q, %d) = %q, want %q",
+					tc.input, tc.attempt, got, tc.want)
+			}
+		})
+	}
+}

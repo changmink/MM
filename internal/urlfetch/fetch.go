@@ -508,17 +508,13 @@ func sanitizeFilename(name string) string {
 // renameUnique moves tmpPath to destDir/name, falling back to name_1, name_2,
 // ... if the target exists. The existence check + rename pair has a benign
 // race window (acceptable for a single-user server); a concurrent rename
-// returning EEXIST simply triggers another iteration.
+// returning EEXIST simply triggers another iteration. Suffix scheme matches
+// media.NameWithSuffix so the user-visible "_N" naming is identical to the
+// upload and folder-move paths.
 func renameUnique(tmpPath, destDir, name string) (string, bool, error) {
 	const maxAttempts = 10000
-	ext := filepath.Ext(name)
-	stem := strings.TrimSuffix(name, ext)
-
 	for i := 0; i < maxAttempts; i++ {
-		candidate := name
-		if i > 0 {
-			candidate = fmt.Sprintf("%s_%d%s", stem, i, ext)
-		}
+		candidate := media.NameWithSuffix(name, i)
 		candidatePath := filepath.Join(destDir, candidate)
 		if _, err := os.Lstat(candidatePath); err == nil {
 			continue

@@ -70,18 +70,28 @@ func MoveFile(srcAbs, destDir string) (string, error) {
 	return destPath, nil
 }
 
+// NameWithSuffix returns name unchanged for attempt ≤ 0, otherwise
+// "<stem>_<attempt><ext>" where stem/ext split on filepath.Ext (so compound
+// extensions like .tar.gz only split off the final segment). Single source
+// for the _N collision-avoidance scheme shared by upload, URL-import, file
+// rename, and folder move — preserves identical naming across all entry
+// points so a user-visible "foo_3.png" means the same thing regardless of
+// which path produced it.
+func NameWithSuffix(name string, attempt int) string {
+	if attempt <= 0 {
+		return name
+	}
+	ext := filepath.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	return fmt.Sprintf("%s_%d%s", stem, attempt, ext)
+}
+
 // uniqueDestPath probes destDir for the first free name in the
 // "name", "name_1", "name_2", ... sequence. The bound matches createUniqueFile.
 func uniqueDestPath(destDir, name string) (string, error) {
 	const maxAttempts = 10000
-	candidate := filepath.Join(destDir, name)
-	if _, err := os.Stat(candidate); os.IsNotExist(err) {
-		return candidate, nil
-	}
-	ext := filepath.Ext(name)
-	base := strings.TrimSuffix(name, ext)
-	for i := 1; i < maxAttempts; i++ {
-		candidate = filepath.Join(destDir, fmt.Sprintf("%s_%d%s", base, i, ext))
+	for i := 0; i < maxAttempts; i++ {
+		candidate := filepath.Join(destDir, NameWithSuffix(name, i))
 		if _, err := os.Stat(candidate); os.IsNotExist(err) {
 			return candidate, nil
 		}

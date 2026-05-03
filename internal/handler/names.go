@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"file_server/internal/media"
 )
 
 // 이 파일은 file/folder/upload 핸들러가 함께 쓰는 이름·경로·라우팅 유틸을
@@ -154,22 +156,14 @@ func atomicRenameFile(srcAbs, dstAbs, oldName, newName string) error {
 // detected race-free (matches atomicRenameFile) — a parallel uploader cannot
 // claim the same free slot between our existence check and our rename. The
 // suffixed return reports whether a suffix was applied so the caller can
-// surface a "renamed" warning.
+// surface a "renamed" warning. Suffix scheme matches media.NameWithSuffix.
 func renameToUniqueDest(srcPath, destPath string) (finalPath string, suffixed bool, err error) {
 	const maxAttempts = 10000
-	if linkErr := os.Link(srcPath, destPath); linkErr == nil {
-		_ = os.Remove(srcPath)
-		return destPath, false, nil
-	} else if !os.IsExist(linkErr) {
-		return "", false, linkErr
-	}
-	ext := filepath.Ext(destPath)
-	base := destPath[:len(destPath)-len(ext)]
-	for i := 1; i < maxAttempts; i++ {
-		candidate := fmt.Sprintf("%s_%d%s", base, i, ext)
+	for i := 0; i < maxAttempts; i++ {
+		candidate := media.NameWithSuffix(destPath, i)
 		if linkErr := os.Link(srcPath, candidate); linkErr == nil {
 			_ = os.Remove(srcPath)
-			return candidate, true, nil
+			return candidate, i > 0, nil
 		} else if !os.IsExist(linkErr) {
 			return "", false, linkErr
 		}
@@ -179,20 +173,12 @@ func renameToUniqueDest(srcPath, destPath string) (finalPath string, suffixed bo
 
 // createUniqueFile atomically creates path (or path with _N suffix if taken)
 // using O_CREATE|O_EXCL so concurrent uploads of the same filename cannot
-// observe the same free slot and clobber each other.
+// observe the same free slot and clobber each other. Suffix scheme matches
+// media.NameWithSuffix.
 func createUniqueFile(path string) (*os.File, error) {
 	const maxAttempts = 10000
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
-	if err == nil {
-		return f, nil
-	}
-	if !os.IsExist(err) {
-		return nil, err
-	}
-	ext := filepath.Ext(path)
-	base := path[:len(path)-len(ext)]
-	for i := 1; i < maxAttempts; i++ {
-		candidate := fmt.Sprintf("%s_%d%s", base, i, ext)
+	for i := 0; i < maxAttempts; i++ {
+		candidate := media.NameWithSuffix(path, i)
 		f, err := os.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
 		if err == nil {
 			return f, nil
