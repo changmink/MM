@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -113,7 +114,9 @@ func (h *Handler) moveFolder(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, media.ErrDestExists):
 			writeError(w, r, http.StatusConflict, "already exists", nil)
 		case errors.Is(err, media.ErrCrossDevice):
-			writeError(w, r, http.StatusInternalServerError, "cross_device", err)
+			// 다른 볼륨 마운트는 운영 precondition 미충족 — 5xx가 아니라 4xx로
+			// 매핑해야 운영 도구가 server malfunction으로 오해하지 않는다.
+			writeError(w, r, http.StatusBadRequest, "cross_device", nil)
 		default:
 			writeError(w, r, http.StatusInternalServerError, "move failed", err)
 		}
@@ -239,12 +242,13 @@ func (h *Handler) createFolder(w http.ResponseWriter, r *http.Request) {
 
 	targetAbs := filepath.Join(parentAbs, body.Name)
 
-	if _, err := os.Stat(targetAbs); err == nil {
-		writeError(w, r, http.StatusConflict, "already exists", nil)
-		return
-	}
-
+	// Stat→Mkdir 사이의 race 제거: Mkdir 자체가 EEXIST를 반환하므로
+	// 별도 Stat은 redundant + 동시 creator 둘 다 통과/실패할 위험이 있다.
 	if err := os.Mkdir(targetAbs, 0755); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			writeError(w, r, http.StatusConflict, "already exists", nil)
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "mkdir failed", err)
 		return
 	}
