@@ -159,8 +159,7 @@ func (h *Handler) moveFile(w http.ResponseWriter, r *http.Request) {
 		finalRel = "/" + finalRel
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
+	writeJSON(w, r, http.StatusOK, map[string]string{
 		"path": finalRel,
 		"name": finalName,
 	})
@@ -238,9 +237,7 @@ func (h *Handler) renameFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	relResult := "/" + filepath.ToSlash(dstRel)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
+	writeJSON(w, r, http.StatusOK, map[string]string{
 		"path": relResult,
 		"name": newName,
 	})

@@ -172,6 +172,20 @@ func (h *Handler) Close() {
 	}
 }
 
+// writeJSON emits a JSON body with the given status code. Encode 실패는
+// 보통 클라이언트 mid-disconnect로 발생하므로 writeError와 같은 패턴으로
+// slog.Debug 한 줄만 남긴다 — 정상 흐름이지만 디버깅 단서가 필요할 때
+// 추적 가능하게.
+func writeJSON(w http.ResponseWriter, r *http.Request, code int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		slog.Debug("response encode failed",
+			"method", r.Method, "path", r.URL.Path, "err", err,
+		)
+	}
+}
+
 // writeError emits a JSON error body. 5xx 응답과 err != nil인 client 실수를
 // 분리해서 로그한다 — 5xx는 server malfunction을 의미하므로 Error, 4xx + err
 // (e.g. JSON parse 실패)은 운영자 진단용 Warn으로. 둘 다 아닌 plain 4xx는

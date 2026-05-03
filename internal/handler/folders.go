@@ -129,9 +129,7 @@ func (h *Handler) moveFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	relResult := "/" + filepath.ToSlash(dstRel)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
+	writeJSON(w, r, http.StatusOK, map[string]string{
 		"path": relResult,
 		"name": filepath.Base(finalAbs),
 	})
@@ -211,9 +209,7 @@ func (h *Handler) renameFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	relResult := "/" + filepath.ToSlash(dstRel)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
+	writeJSON(w, r, http.StatusOK, map[string]string{
 		"path": relResult,
 		"name": body.Name,
 	})
@@ -254,9 +250,7 @@ func (h *Handler) createFolder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	relResult := filepath.ToSlash(filepath.Join(rel, body.Name))
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{"path": relResult})
+	writeJSON(w, r, http.StatusCreated, map[string]string{"path": relResult})
 }
 
 func (h *Handler) deleteFolder(w http.ResponseWriter, r *http.Request) {

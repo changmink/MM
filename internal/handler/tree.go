@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -86,8 +85,7 @@ func (h *Handler) handleTree(w http.ResponseWriter, r *http.Request) {
 		Children:    children,
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(root)
+	writeJSON(w, r, http.StatusOK, root)
 }
 
 // walkTree returns the immediate child folders of dirAbs. When depth > 1 it

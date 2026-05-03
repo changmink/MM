@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -115,8 +114,7 @@ func (h *Handler) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(browseResponse{
+	writeJSON(w, r, http.StatusOK, browseResponse{
 		Path:    rel,
 		Entries: entries,
 	})

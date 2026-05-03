@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -155,9 +154,7 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	relResult := filepath.ToSlash(filepath.Join(rel, filepath.Base(finalPath)))
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, r, http.StatusCreated, map[string]interface{}{
 		"path":      relResult,
 		"name":      filepath.Base(finalPath),
 		"size":      finalSize,

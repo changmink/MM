@@ -27,8 +27,7 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) getSettings(w http.ResponseWriter, r *http.Request) {
 	snap := h.settingsSnapshot()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(snap)
+	writeJSON(w, r, http.StatusOK, snap)
 }
 
 func (h *Handler) patchSettings(w http.ResponseWriter, r *http.Request) {
@@ -53,9 +52,7 @@ func (h *Handler) patchSettings(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &re) {
 			// Exposing the field name lets the client highlight which input
 			// was rejected without a second round-trip to GET.
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
+			writeJSON(w, r, http.StatusBadRequest, map[string]string{
 				"error": "out_of_range",
 				"field": re.Field,
 			})
@@ -65,6 +62,5 @@ func (h *Handler) patchSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(h.settings.Snapshot())
+	writeJSON(w, r, http.StatusOK, h.settings.Snapshot())
 }
