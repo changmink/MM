@@ -60,6 +60,16 @@ func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, payload any) {
 	handlerutil.WriteSSEEvent(w, flusher, payload)
 }
 
+// 아래 다섯 export wrapper는 부모 internal/handler 패키지의 기존 테스트
+// (import_url_test.go·import_url_compat_test.go)가 unprefixed 이름으로
+// 내부 헬퍼를 호출할 수 있게 두기 위한 transitional shim이다. import 서브
+// 패키지 분리(2회차 B.1, 5e1cf7d) 시 테스트 이전을 미루고 wrapper로만
+// 우선 처리한 결과 — production code에서는 호출하지 말 것. 테스트가 본
+// 서브패키지로 이전되면(FU3-I-2-B) 일괄 제거된다.
+//
+// Deprecated: transitional shim — see tasks/handoff-team-review-3-followup.md
+// FU3-I-2.
+
 func RecoverImportJob(rec any, job *importjob.Job) {
 	recoverImportJob(rec, job)
 }
