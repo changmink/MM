@@ -213,21 +213,7 @@ func (h *Handler) handleImportURL(w http.ResponseWriter, r *http.Request) {
 // MaxQueuedJobs forever, and Handler.Close stalls the full WaitAll
 // deadline on shutdown.
 func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destAbs string) {
-	defer func() {
-		if rec := recover(); rec != nil {
-			slog.Error("import worker panic",
-				"jobId", job.ID, "panic", rec, "stack", string(debug.Stack()))
-			// If the worker already published a terminal summary, do not
-			// overwrite it — a panic from a late defer would otherwise flip
-			// a legitimate Completed/Cancelled status to Failed.
-			if !job.Status().IsTerminal() {
-				sum := summarizeURLs(job.Snapshot().URLs)
-				job.SetSummary(sum)
-				job.Publish(summaryEvent(sum))
-				job.SetStatus(importjob.StatusFailed)
-			}
-		}
-	}()
+	defer func() { recoverImportJob(recover(), job) }()
 
 	maxBytes := snap.URLImportMaxBytes
 	perURLTimeout := time.Duration(snap.URLImportTimeoutSeconds) * time.Second
@@ -552,6 +538,32 @@ func redactErr(err error) string {
 		return copy.Error()
 	}
 	return err.Error()
+}
+
+// recoverImportJob is the worker's defer body, extracted so the panic-recovery
+// invariant can be unit-tested directly. Skips publishing when SetStatus
+// already drove the job into a terminal state (late-defer panic must not flip
+// Completed/Cancelled to Failed). Skips re-publishing summary when SetSummary
+// already recorded one — the prior Publish(summary) succeeded and a duplicate
+// would deliver two summary frames to the same client.
+func recoverImportJob(rec any, job *importjob.Job) {
+	if rec == nil {
+		return
+	}
+	slog.Error("import worker panic",
+		"jobId", job.ID, "panic", rec, "stack", string(debug.Stack()))
+	if job.Status().IsTerminal() {
+		return
+	}
+	snap := job.Snapshot()
+	if snap.Summary == nil {
+		sum := summarizeURLs(snap.URLs)
+		job.SetSummary(sum)
+		job.Publish(summaryEvent(sum))
+	}
+	// SetStatus(terminal) closes subscriber channels — clients that missed
+	// the summary still observe ok=false and exit cleanly.
+	job.SetStatus(importjob.StatusFailed)
 }
 
 // summarizeURLs folds URLState entries into a Summary by terminal status.

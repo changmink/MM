@@ -565,6 +565,128 @@ func TestRedactURL(t *testing.T) {
 	}
 }
 
+// TestRecoverImportJob_NoDoublePublishWhenSummaryAlreadyEmitted guards the
+// runImportJob defer: when the worker panics AFTER SetSummary→Publish but
+// BEFORE SetStatus, the recover path must not publish a second summary.
+// Subscribers were observing two summary frames per job — one from the
+// normal path and one from the recover branch.
+func TestRecoverImportJob_NoDoublePublishWhenSummaryAlreadyEmitted(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	h := registerImportTest(mux, root)
+	defer h.Close()
+
+	job, err := h.registry.Create("/", []string{"https://example.com/a"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	events, unsub := job.Subscribe()
+	defer unsub()
+
+	// Simulate a normal completion: worker publishes summary, sets status
+	// later. Use Succeeded counter so the test asserts the right summary
+	// survives.
+	want := importjob.Summary{Succeeded: 1}
+	job.SetSummary(want)
+	job.Publish(summaryEvent(want))
+
+	// Now drive the same defer body the worker uses, with a fake panic value.
+	recoverImportJob("simulated panic", job)
+
+	if got := job.Status(); got != importjob.StatusFailed {
+		t.Errorf("status = %v, want %v (recovery should drive non-terminal jobs to Failed)", got, importjob.StatusFailed)
+	}
+
+	summaryCount := 0
+	timeout := time.After(200 * time.Millisecond)
+loop:
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				break loop
+			}
+			if ev.Phase == "summary" {
+				summaryCount++
+			}
+		case <-timeout:
+			break loop
+		}
+	}
+	if summaryCount != 1 {
+		t.Errorf("summary frames received = %d, want 1 (double-publish regression)", summaryCount)
+	}
+}
+
+// TestRecoverImportJob_SkipsWhenAlreadyTerminal locks the late-defer guard:
+// once SetStatus(terminal) ran, a panic from a deferred callback must not
+// flip the status back to Failed nor emit any further events.
+func TestRecoverImportJob_SkipsWhenAlreadyTerminal(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	h := registerImportTest(mux, root)
+	defer h.Close()
+
+	job, err := h.registry.Create("/", []string{"https://example.com/a"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	job.SetSummary(importjob.Summary{Succeeded: 1})
+	job.SetStatus(importjob.StatusCompleted)
+
+	recoverImportJob("late defer panic", job)
+
+	if got := job.Status(); got != importjob.StatusCompleted {
+		t.Errorf("status = %v, want %v (recovery must not overwrite a terminal status)", got, importjob.StatusCompleted)
+	}
+}
+
+// TestRecoverImportJob_PublishesWhenSummaryMissing guards the panic-before-
+// summary path: if the worker dies before SetSummary, recovery synthesizes
+// one from URLState so subscribers never hang waiting for a terminal frame.
+func TestRecoverImportJob_PublishesWhenSummaryMissing(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	h := registerImportTest(mux, root)
+	defer h.Close()
+
+	job, err := h.registry.Create("/", []string{"https://example.com/a", "https://example.com/b"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	events, unsub := job.Subscribe()
+	defer unsub()
+
+	recoverImportJob("early panic", job)
+
+	if got := job.Status(); got != importjob.StatusFailed {
+		t.Errorf("status = %v, want Failed", got)
+	}
+
+	summaryCount := 0
+	timeout := time.After(200 * time.Millisecond)
+loop:
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				break loop
+			}
+			if ev.Phase == "summary" {
+				summaryCount++
+			}
+		case <-timeout:
+			break loop
+		}
+	}
+	if summaryCount != 1 {
+		t.Errorf("summary frames received = %d, want 1", summaryCount)
+	}
+}
+
 // TestSummarizeURLs locks the panic-recovery tally contract: URLs that
 // already settled as done/cancelled are preserved, and any non-terminal
 // state (pending/running/error/empty) folds into Failed so the recovered
