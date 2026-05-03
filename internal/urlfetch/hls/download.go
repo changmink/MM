@@ -235,14 +235,16 @@ func materializeHLS(
 		}()
 	}
 
+	// dispatch 라벨로 select 빠져나오기 — runImportURLWorkers와 같은 패턴.
+	// 워커가 downloadCtx로 다시 ctx를 확인하므로 race로 한 job을 더 보낸 뒤
+	// cancel을 알아채도 안전하다 (워커가 ctx-aware downloadOne에서 즉시
+	// 종료).
+dispatch:
 	for _, job := range jobs {
 		select {
 		case <-downloadCtx.Done():
-			break
+			break dispatch
 		case jobsCh <- job:
-		}
-		if downloadCtx.Err() != nil {
-			break
 		}
 	}
 	close(jobsCh)

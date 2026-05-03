@@ -189,11 +189,13 @@ func (h *Handler) uploadPNGAutoConvert(destDir, destPath string, part io.Reader)
 
 	size, copyErr := io.Copy(tmpPNG, part)
 	closeErr := tmpPNG.Close()
+	// 비-conversion 경로(handleUpload)와 동일한 wrap 패턴으로 통일 — 운영
+	// 로그의 err 필드 형태가 두 경로 사이에 일관되게 유지된다.
 	if copyErr != nil {
-		return "", 0, false, warnings, copyErr
+		return "", 0, false, warnings, fmt.Errorf("copy png temp: %w", copyErr)
 	}
 	if closeErr != nil {
-		return "", 0, false, warnings, closeErr
+		return "", 0, false, warnings, fmt.Errorf("close png temp: %w", closeErr)
 	}
 
 	// Convert into a sibling temp file rather than the visible jpgPath so we
