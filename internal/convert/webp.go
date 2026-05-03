@@ -1,22 +1,19 @@
 package convert
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
+
+	"file_server/internal/ffmpeg"
 )
 
 const (
-	webpProbeTimeout     = 5 * time.Second
-	webpTmpPattern       = ".webpconvert-*.webp"
+	webpProbeTimeout = 5 * time.Second
+	webpTmpPattern   = ".webpconvert-*.webp"
 	// webpEncoder is the ffmpeg encoder name. We use plain "libwebp" rather
 	// than the registered "libwebp_anim" alias because alpine apk's ffmpeg
 	// 6.1 build emits single-frame output for libwebp_anim (verified
@@ -37,8 +34,8 @@ const (
 // resolution preserve the input. Audio is always dropped; callers emit the
 // audio_dropped warning based on ProbeStreamInfo when applicable.
 func EncodeWebP(ctx context.Context, srcPath, dstDir, baseName string, cb Callbacks) (*Result, error) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		return nil, ErrFFmpegMissing
+	if err := ffmpeg.Require("ffmpeg"); err != nil {
+		return nil, err
 	}
 
 	srcInfo, err := os.Stat(srcPath)
@@ -68,7 +65,7 @@ func EncodeWebP(ctx context.Context, srcPath, dstDir, baseName string, cb Callba
 		}
 	}()
 
-	cmd := exec.CommandContext(ctx, "ffmpeg",
+	args := []string{
 		"-y",
 		"-hide_banner", "-loglevel", "error",
 		"-i", srcPath,
@@ -79,12 +76,6 @@ func EncodeWebP(ctx context.Context, srcPath, dstDir, baseName string, cb Callba
 		"-compression_level", webpCompressionLevel,
 		"-an",
 		tmpPath,
-	)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Start(); err != nil {
-		return nil, err
 	}
 
 	// Decoupled watch ctx so the final progress sample can land after Wait
@@ -96,7 +87,7 @@ func EncodeWebP(ctx context.Context, srcPath, dstDir, baseName string, cb Callba
 		watchTmp(watchCtx, tmpPath, cb.OnProgress)
 	}()
 
-	waitErr := cmd.Wait()
+	waitErr := ffmpeg.Run(ctx, args...)
 	cancelWatch()
 	<-watchDone
 
@@ -104,15 +95,7 @@ func EncodeWebP(ctx context.Context, srcPath, dstDir, baseName string, cb Callba
 		return nil, ctx.Err()
 	}
 	if waitErr != nil {
-		exitCode := -1
-		var ee *exec.ExitError
-		if errors.As(waitErr, &ee) {
-			exitCode = ee.ExitCode()
-		}
-		return nil, &FFmpegExitError{
-			ExitCode: exitCode,
-			Stderr:   strings.TrimSpace(stderr.String()),
-		}
+		return nil, waitErr
 	}
 
 	finalPath := filepath.Join(dstDir, baseName+".webp")
@@ -138,18 +121,15 @@ func EncodeWebP(ctx context.Context, srcPath, dstDir, baseName string, cb Callba
 // SPEC §2.9 admits GIFs unconditionally. ffprobe missing or non-zero exit
 // returns a non-nil error.
 func ProbeStreamInfo(srcPath string) (durationSec float64, hasAudio bool, err error) {
-	if _, lerr := exec.LookPath("ffprobe"); lerr != nil {
-		return 0, false, fmt.Errorf("ffprobe not found in PATH: %w", lerr)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), webpProbeTimeout)
 	defer cancel()
-	out, runErr := exec.CommandContext(ctx, "ffprobe",
+	out, runErr := ffmpeg.Probe(ctx,
 		"-v", "quiet",
 		"-print_format", "json",
 		"-show_format",
 		"-show_streams",
 		srcPath,
-	).Output()
+	)
 	if runErr != nil {
 		return 0, false, runErr
 	}

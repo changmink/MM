@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
 
+	"file_server/internal/ffmpeg"
 	"file_server/internal/media"
 )
 
@@ -110,7 +110,7 @@ func (h *Handler) streamTS(w http.ResponseWriter, r *http.Request, absPath strin
 	tmp.Close()
 
 	var stderr bytes.Buffer
-	cmd := exec.CommandContext(r.Context(), "ffmpeg",
+	args := []string{
 		"-y",
 		"-loglevel", "error",
 		"-i", absPath,
@@ -121,9 +121,8 @@ func (h *Handler) streamTS(w http.ResponseWriter, r *http.Request, absPath strin
 		"-bsf:a", "aac_adtstoasc",
 		"-movflags", "faststart",
 		tmpPath,
-	)
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	}
+	if err := ffmpeg.RunWithStderr(r.Context(), &stderr, args...); err != nil {
 		os.Remove(tmpPath)
 		writeError(w, r, http.StatusInternalServerError, "transcode failed",
 			fmt.Errorf("%w: %s", err, bytes.TrimSpace(stderr.Bytes())))

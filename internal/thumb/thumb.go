@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"file_server/internal/ffmpeg"
 	"github.com/disintegration/imaging"
 )
 
@@ -282,12 +283,12 @@ func IsBlankFrame(img image.Image) bool {
 func videoDuration(src string) (float64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "ffprobe",
+	out, err := ffmpeg.Probe(ctx,
 		"-v", "quiet",
 		"-show_entries", "format=duration",
 		"-of", "csv=p=0",
 		src,
-	).Output()
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -309,7 +310,7 @@ func extractFrame(src string, offsetSec float64) (string, error) {
 	defer cancel()
 
 	var stderr strings.Builder
-	cmd := exec.CommandContext(ctx, "ffmpeg",
+	args := []string{
 		"-y",
 		"-loglevel", "error",
 		"-ss", strconv.FormatFloat(offsetSec, 'f', 3, 64),
@@ -318,9 +319,8 @@ func extractFrame(src string, offsetSec float64) (string, error) {
 		"-vf", fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2",
 			thumbWidth, thumbHeight, thumbWidth, thumbHeight),
 		tmpPath,
-	)
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	}
+	if err := ffmpeg.RunWithStderr(ctx, &stderr, args...); err != nil {
 		os.Remove(tmpPath)
 		if ctx.Err() == context.DeadlineExceeded {
 			return "", fmt.Errorf("ffmpeg extractFrame timeout after %v: %w", probeTimeout, err)

@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -18,6 +17,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"file_server/internal/ffmpeg"
 )
 
 // Sentinel errors for HLS handling. classifyHLSRemuxError maps these plus
@@ -25,7 +26,7 @@ import (
 // documented in SPEC §5.1.
 var (
 	errHLSVariantScheme    = errors.New("invalid_scheme")
-	errFFmpegMissing       = errors.New("ffmpeg_missing")
+	errFFmpegMissing       = ffmpeg.ErrMissing
 	errHLSTooLarge         = errors.New("hls_too_large")
 	errHLSTooManySegments  = errors.New("hls_too_many_segments")
 	errHLSTooManyKeys      = errors.New("hls_too_many_keys")
@@ -379,15 +380,7 @@ var runFfmpeg = defaultRunFfmpeg
 // bypass the LookPath check entirely (no ffmpeg needed for argv invariant
 // tests).
 func defaultRunFfmpeg(ctx context.Context, args []string, stderr io.Writer) error {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		return errFFmpegMissing
-	}
-	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-	cmd.Stderr = stderr
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	return cmd.Wait()
+	return ffmpeg.RunWithStderr(ctx, stderr, args...)
 }
 
 // runHLSRemux spawns ffmpeg to remux a local HLS playlist (with all segment
@@ -482,11 +475,13 @@ func runHLSRemux(ctx context.Context, localPlaylistPath, outputPath string, cb *
 	}
 	if waitErr != nil {
 		exitCode := -1
-		var ee *exec.ExitError
-		if errors.As(waitErr, &ee) {
-			exitCode = ee.ExitCode()
+		stderrText := strings.TrimSpace(stderr.String())
+		var ffErr *ffmpeg.ExitError
+		if errors.As(waitErr, &ffErr) {
+			exitCode = ffErr.ExitCode
+			stderrText = ffErr.Stderr
 		}
-		return &ffmpegExitError{exitCode: exitCode, stderr: strings.TrimSpace(stderr.String())}
+		return &ffmpegExitError{exitCode: exitCode, stderr: stderrText}
 	}
 	return nil
 }

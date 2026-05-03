@@ -5,34 +5,24 @@
 package convert
 
 import (
-	"bytes"
 	"context"
-	"errors"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"time"
+
+	"file_server/internal/ffmpeg"
 )
 
 // ErrFFmpegMissing is returned when the ffmpeg binary cannot be found on PATH.
 // Callers map this to a distinct SSE error code (`ffmpeg_missing`) so operators
 // know this is a server-side setup issue rather than a bad input.
-var ErrFFmpegMissing = errors.New("ffmpeg not found in PATH")
+var ErrFFmpegMissing = ffmpeg.ErrMissing
 
 // FFmpegExitError wraps a non-zero ffmpeg termination with captured stderr.
 // The stderr text is for server logs only; callers should not surface it to
 // end users.
-type FFmpegExitError struct {
-	ExitCode int
-	Stderr   string
-}
-
-func (e *FFmpegExitError) Error() string {
-	return fmt.Sprintf("ffmpeg exited %d: %s", e.ExitCode, e.Stderr)
-}
+type FFmpegExitError = ffmpeg.ExitError
 
 // Callbacks carries optional lifecycle hooks. Any field may be nil. Progress
 // is throttled by the runner (1 MiB or 250 ms, whichever comes first) to
@@ -64,8 +54,8 @@ const (
 // the aac_adtstoasc bitstream filter for audio and +faststart movflags so
 // the output is seekable immediately after rename.
 func RemuxTSToMP4(ctx context.Context, srcPath, dstDir, baseName string, cb Callbacks) (*Result, error) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		return nil, ErrFFmpegMissing
+	if err := ffmpeg.Require("ffmpeg"); err != nil {
+		return nil, err
 	}
 
 	srcInfo, err := os.Stat(srcPath)
@@ -95,7 +85,7 @@ func RemuxTSToMP4(ctx context.Context, srcPath, dstDir, baseName string, cb Call
 		}
 	}()
 
-	cmd := exec.CommandContext(ctx, "ffmpeg",
+	args := []string{
 		"-y",
 		"-hide_banner", "-loglevel", "error",
 		"-i", srcPath,
@@ -106,12 +96,6 @@ func RemuxTSToMP4(ctx context.Context, srcPath, dstDir, baseName string, cb Call
 		"-bsf:a", "aac_adtstoasc",
 		"-movflags", "+faststart",
 		tmpPath,
-	)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Start(); err != nil {
-		return nil, err
 	}
 
 	// watchCtx is decoupled from parent ctx so the final progress sample can
@@ -125,7 +109,7 @@ func RemuxTSToMP4(ctx context.Context, srcPath, dstDir, baseName string, cb Call
 		watchTmp(watchCtx, tmpPath, cb.OnProgress)
 	}()
 
-	waitErr := cmd.Wait()
+	waitErr := ffmpeg.Run(ctx, args...)
 	cancelWatch()
 	<-watchDone
 
@@ -133,15 +117,7 @@ func RemuxTSToMP4(ctx context.Context, srcPath, dstDir, baseName string, cb Call
 		return nil, ctx.Err()
 	}
 	if waitErr != nil {
-		exitCode := -1
-		var ee *exec.ExitError
-		if errors.As(waitErr, &ee) {
-			exitCode = ee.ExitCode()
-		}
-		return nil, &FFmpegExitError{
-			ExitCode: exitCode,
-			Stderr:   strings.TrimSpace(stderr.String()),
-		}
+		return nil, waitErr
 	}
 
 	finalPath := filepath.Join(dstDir, baseName+".mp4")
