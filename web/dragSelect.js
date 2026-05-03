@@ -1,15 +1,16 @@
 // dragSelect.js — Rubber-band 영역 선택 (SPEC §2.5.4).
 //
 // 빈 영역에서 시작한 마우스 드래그로 사각형을 그려 그 안의 visible 카드를
-// 일괄 선택한다. selectedPaths Set과 카드 .selected 클래스 토글은 기존
-// browse.js의 setSelected → renderView 흐름을 재사용한다.
+// 일괄 선택한다. selectedPaths Set 갱신 후 syncCardSelectionStates로 카드
+// .selected/checkbox와 selection UI를 동기화 — renderView를 부르지 않아
+// GIF/WebP 자동재생과 listener 재할당을 보존한다.
 //
 // 빈 영역 시작 vs 카드 시작 분기로 기존 폴더 이동 DnD와 충돌하지 않는다 —
 // HTML5 dragstart는 카드 위 mousedown에서만 발화하므로 우리 핸들러가
 // "카드 위에서 시작"을 closest()로 거른다.
 
 import { selectedPaths } from './state.js';
-import { renderView } from './browse.js';
+import { syncCardSelectionStates } from './browse.js';
 
 const MOVE_THRESHOLD = 5;
 const MOBILE_MAX_WIDTH = 600;
@@ -50,8 +51,7 @@ function onMouseDown(e) {
 }
 
 // mousedown 시점 1회만 호출 — 드래그 중 layout이 변하지 않는다고 가정한다.
-// (selection 변경이 renderView를 호출하지만 카드 DOM은 재생성되지 않고
-// .selected 클래스만 토글된다.)
+// 카드 DOM은 selection 동기화 시에도 재생성되지 않으므로 ref가 안전하게 유효.
 function collectVisibleCards() {
   const list = document.querySelector('#file-list');
   if (!list) return [];
@@ -107,7 +107,7 @@ function applySelection(rect) {
   for (const c of active.cards) {
     if (rectsIntersect(rect, c.rect)) selectedPaths.add(c.path);
   }
-  renderView();
+  syncCardSelectionStates();
 }
 
 function rectsIntersect(a, b) {
@@ -124,7 +124,7 @@ function onKeyDown(e) {
   // 시작 시점 selection 복원.
   selectedPaths.clear();
   active.snapshot.forEach(p => selectedPaths.add(p));
-  renderView();
+  syncCardSelectionStates();
   cleanup();
 }
 

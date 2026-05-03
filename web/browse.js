@@ -352,10 +352,48 @@ function renderSelectionControls() {
   $.clearSelectionBtn.hidden = selected === 0;
 }
 
+// updateCardSelection은 path 한 건의 카드 .selected class + checkbox 상태만
+// 갱신한다. selection 종속 UI(상단 indicator, convert 버튼)는 갱신하지 않는다 —
+// 호출자가 한 번에 묶어 부르도록 분리.
+function updateCardSelection(path, selected) {
+  const card = $.fileList.querySelector(`[data-path="${CSS.escape(path)}"]`);
+  if (!card) return;
+  card.classList.toggle('selected', selected);
+  const cb = card.querySelector('input[type="checkbox"]');
+  if (cb && cb.checked !== selected) cb.checked = selected;
+}
+
+// syncCardSelectionStates는 selectedPaths를 진실값으로 삼아 visible 모든 카드의
+// .selected/checkbox 상태와 selection 종속 UI를 동기화한다. dragSelect의
+// rubber-band 처럼 한 번에 다중 path가 토글되는 경로가 renderView 대신 호출 —
+// 카드 DOM 재구성과 listener 재할당, GIF/WebP 자동재생 리셋을 피한다.
+export function syncCardSelectionStates() {
+  $.fileList.querySelectorAll('[data-path]').forEach(card => {
+    const path = card.dataset.path;
+    const selected = selectedPaths.has(path);
+    card.classList.toggle('selected', selected);
+    const cb = card.querySelector('input[type="checkbox"]');
+    if (cb && cb.checked !== selected) cb.checked = selected;
+  });
+  refreshSelectionUI();
+}
+
+// refreshSelectionUI는 카드 DOM은 건드리지 않고 selection 종속 UI만 다시
+// 그린다. 200+ 카드 디렉터리에서 체크박스 토글 시 renderView 전체 재구축은
+// GIF/WebP 자동재생을 리셋하고 jank를 만들기 때문에, setSelected 같은 hot
+// path가 이걸로 우회한다.
+function refreshSelectionUI() {
+  const visible = applyView(allEntries);
+  updateConvertPNGAllBtn(visible);
+  updateConvertWebPAllBtn(visible);
+  renderSelectionControls();
+}
+
 function setSelected(path, selected) {
   if (selected) selectedPaths.add(path);
   else selectedPaths.delete(path);
-  renderView();
+  updateCardSelection(path, selected);
+  refreshSelectionUI();
 }
 
 function sectionTitle(text) {
@@ -651,18 +689,22 @@ function renderPlaylist() {
 }
 
 export function wireBrowse() {
-  // Selection toolbar
+  // Selection toolbar — 카드 DOM은 건드리지 않고 영향 카드의 class/checkbox만
+  // 갱신해 GIF/WebP 자동재생 리셋과 listener 재할당을 피한다.
   $.selectAllFiles.addEventListener('change', () => {
-    if ($.selectAllFiles.checked) {
-      visibleFilePaths.forEach(path => selectedPaths.add(path));
-    } else {
-      visibleFilePaths.forEach(path => selectedPaths.delete(path));
-    }
-    renderView();
+    const on = $.selectAllFiles.checked;
+    visibleFilePaths.forEach(path => {
+      if (on) selectedPaths.add(path);
+      else selectedPaths.delete(path);
+      updateCardSelection(path, on);
+    });
+    refreshSelectionUI();
   });
   $.clearSelectionBtn.addEventListener('click', () => {
+    const previouslySelected = Array.from(selectedPaths);
     selectedPaths.clear();
-    renderView();
+    previouslySelected.forEach(path => updateCardSelection(path, false));
+    refreshSelectionUI();
   });
 
   // Lightbox controls
