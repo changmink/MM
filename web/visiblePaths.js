@@ -53,8 +53,8 @@ export function updateConvertPNGAllBtn(visible) {
   $.convertPNGAllBtn.textContent = useSelection
     ? `선택 PNG 변환 (${paths.length}개)`
     : `모든 PNG 변환 (${paths.length}개)`;
-  // Stash the current target PNG list on the button so the convertImage
-  // module's click handler can read it without a second filter pass.
+  // 현재 대상 PNG 목록을 버튼에 stash해, convertImage 모듈의 click 핸들러가
+  // 두 번째 필터 패스 없이 읽을 수 있게 한다.
   $.convertPNGAllBtn.dataset.paths = JSON.stringify(paths);
 }
 

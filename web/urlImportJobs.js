@@ -12,10 +12,10 @@ import {
   handleSSEEvent,
 } from './urlImport.js';
 
-// On every page load we ask the server which import jobs are alive, restore
-// rows for them, and (for active jobs) attach an EventSource so live progress
-// keeps flowing into the same UI the POST flow uses. A second tab opening
-// the page sees the same jobs with no extra ceremony.
+// 페이지가 로드될 때마다 서버에 어떤 import Job이 살아 있는지 묻고, 그에
+// 해당하는 행을 복원한다. active Job에는 EventSource를 붙여 라이브 진행이
+// POST 흐름과 동일한 UI로 계속 흘러들게 한다. 두 번째 탭이 페이지를 열면
+// 별도 작업 없이 같은 Job들을 본다.
 export async function bootstrapURLJobs() {
   let body;
   try {
@@ -23,24 +23,24 @@ export async function bootstrapURLJobs() {
     if (!res.ok) return;
     body = await res.json();
   } catch (e) {
-    // Network or parse failure: silently fall through. The user sees no
-    // restored progress, but the rest of the app still works.
+    // 네트워크 또는 파싱 실패: 조용히 흘려보낸다. 사용자는 복원된 진행을
+    // 보지 못하지만 앱의 나머지는 정상 동작한다.
     console.warn('bootstrapURLJobs failed', e);
     return;
   }
   const active = Array.isArray(body.active) ? body.active : [];
-  // Soft cap on restored history. Server keeps every dismissed-but-not-
-  // cleared job until restart (single-user, unbounded growth tolerated by
-  // the spec); the client renders only the most recent N so a long-running
-  // browser session can't bloat the modal DOM. Active jobs are never
-  // capped — they're still in flight and dropping any would lose UI.
+  // 복원된 history의 soft cap. 서버는 dismiss는 됐지만 정리되지 않은 모든
+  // Job을 재시작 전까지 보관한다(단일 사용자, spec이 무한 증가를 허용).
+  // 클라이언트는 가장 최근 N개만 렌더링해, 오래 켜둔 브라우저 세션이 모달
+  // DOM을 부풀리지 않게 한다. active Job은 cap을 두지 않는다 — 진행 중이라
+  // 하나라도 떨어뜨리면 UI를 잃는다.
   const HISTORY_CAP = 50;
   const finished = (Array.isArray(body.finished) ? body.finished : [])
     .slice(-HISTORY_CAP);
   if (active.length === 0 && finished.length === 0) return;
 
-  // Render finished first so they sit at the top of the result area —
-  // active progress rows naturally land below as the user-current focus.
+  // finished를 먼저 렌더해 결과 영역의 위쪽에 두고, active 진행 행이 자연스럽게
+  // 아래에 배치되어 사용자 현재 포커스가 된다.
   for (const job of finished) restoreJobBatch(job, false);
   for (const job of active) restoreJobBatch(job, true);
 
@@ -51,11 +51,11 @@ export async function bootstrapURLJobs() {
   updateURLBadge();
 }
 
-// restoreJobBatch builds a batch from a server JobSnapshot and renders one
-// row per URL with the correct status/progress already applied. Restored
-// batches carry restored=true so they don't fold into the current session's
-// summary aggregation (see maybeFinalize) — they are backdrop history that
-// the user can dismiss when they want.
+// restoreJobBatch는 서버 JobSnapshot으로 batch를 만들고 URL마다 행 하나를
+// — 올바른 상태/진행이 이미 반영된 채로 — 렌더링한다. 복원된 batch는
+// restored=true를 달아, 현재 세션의 summary 집계(maybeFinalize 참조)에
+// 합쳐지지 않게 한다 — 이들은 사용자가 원할 때 dismiss할 수 있는 배경
+// history다.
 function restoreJobBatch(jobSnap, isActive) {
   const batch = {
     id: nextBatchId(),
@@ -72,7 +72,7 @@ function restoreJobBatch(jobSnap, isActive) {
   };
   urlBatches.push(batch);
 
-  // Synthetic tag distinguishes restored rows from freshly submitted ones.
+  // 합성 태그가 복원된 행을 새로 submit된 행과 구분짓는다.
   appendBatchHeader(batch, isActive ? '복원된 배치' : '이전 결과');
 
   jobSnap.urls.forEach((u, i) => {
@@ -86,9 +86,9 @@ function restoreJobBatch(jobSnap, isActive) {
   if (isActive) subscribeToJob(batch);
 }
 
-// cancelURLAt fires a per-URL cancel against the server. The visible row
-// state updates via the SSE error("cancelled") frame the worker emits in
-// response — keeping a single source of truth for state transitions.
+// cancelURLAt은 서버에 URL 단위 cancel을 발사한다. 가시 행 상태는 워커가
+// 응답으로 발행하는 SSE error("cancelled") 프레임을 통해 갱신된다 — 상태
+// 전이의 단일 진실 원천을 유지한다.
 export async function cancelURLAt(batch, index) {
   if (!batch.jobId) return;
   try {
@@ -142,8 +142,8 @@ export async function dismissAllFinishedBatches() {
     console.warn('dismiss-all failed', e);
     return;
   }
-  // Server tore down every terminal job — mirror that locally. Active
-  // batches stay (they were already excluded by the filter).
+  // 서버가 모든 terminal Job을 정리했으니 로컬에서도 그대로 미러링한다.
+  // active batch는 유지된다(서버 필터가 이미 제외했다).
   const remaining = [];
   for (const batch of urlBatches) {
     if (batch.done) {
@@ -161,10 +161,10 @@ export async function dismissAllFinishedBatches() {
   updateURLBadge();
 }
 
-// subscribeToJob opens an EventSource against /api/import-url/jobs/{id}/events
-// and routes every frame through the existing handleSSEEvent path. The
-// EventSource is closed explicitly on summary so the auto-reconnect default
-// does not waste a round-trip on a finished job.
+// subscribeToJob은 /api/import-url/jobs/{id}/events에 EventSource를 열고
+// 모든 프레임을 기존 handleSSEEvent 경로로 보낸다. summary 시 EventSource를
+// 명시적으로 close해, 기본 auto-reconnect가 끝난 Job을 상대로 round-trip을
+// 낭비하지 않도록 한다.
 function subscribeToJob(batch) {
   if (!batch.jobId) return;
   const es = new EventSource('/api/import-url/jobs/' + encodeURIComponent(batch.jobId) + '/events');
@@ -176,9 +176,9 @@ function subscribeToJob(batch) {
     handleSSEEvent(batch, ev);
   };
   es.onerror = () => {
-    // EventSource auto-reconnects on transient failures. We close
-    // explicitly only after summary was processed (in handleSSEEvent),
-    // so an onerror here means a real network drop. Let the browser
-    // retry; if the server is back we resync via the snapshot frame.
+    // EventSource는 일시적 실패에 자동 재연결한다. summary가 처리된
+    // 뒤(handleSSEEvent에서)에만 명시적으로 close하므로, 여기 onerror는
+    // 진짜 네트워크 단절을 의미한다. 브라우저가 재시도하도록 두고, 서버가
+    // 돌아오면 snapshot 프레임으로 재동기화한다.
   };
 }

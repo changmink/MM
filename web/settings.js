@@ -2,8 +2,8 @@
 
 import { $ } from './dom.js';
 
-// Client-side bounds mirror the server's — they keep a typo from ever hitting
-// the backend, but the server revalidates regardless (defense in depth).
+// 클라이언트 경계는 서버 경계를 미러링한다 — 오타가 백엔드에 닿지 않게
+// 막아주지만, 서버는 어쨌든 다시 검증한다(defense in depth).
 const SETTINGS_MAX_MIB_MIN = 1;
 const SETTINGS_MAX_MIB_MAX = 1024 * 1024; // 1 TiB
 const SETTINGS_TIMEOUT_MIN = 1;
@@ -18,7 +18,7 @@ async function openSettingsModal() {
   $.settingsError.classList.add('hidden');
   $.settingsMaxInput.value = '';
   $.settingsTimeInput.value = '';
-  $.settingsAutoPNG.checked = true; // optimistic — overwritten by GET
+  $.settingsAutoPNG.checked = true; // 낙관적 — GET이 덮어쓴다
   $.settingsMaxHint.textContent = '';
   $.settingsModal.classList.remove('hidden');
   $.settingsMaxInput.focus();
@@ -47,7 +47,7 @@ function updateSettingsMaxHint() {
     return;
   }
   const gib = mib / 1024;
-  // Show MiB as-is for sub-GiB values, GiB with one decimal otherwise.
+  // GiB 미만은 MiB로 그대로 보여주고, 그 외는 GiB로 소수 한 자리까지 보여준다.
   $.settingsMaxHint.textContent = gib < 1
     ? `≈ ${mib} MiB`
     : `≈ ${gib.toFixed(gib >= 10 ? 0 : 1)} GiB`;
@@ -91,7 +91,7 @@ async function submitSettings() {
         } else if (body.error) {
           msg = body.error;
         }
-      } catch { /* not JSON */ }
+      } catch { /* JSON이 아님 */ }
       showSettingsError(msg);
       return;
     }

@@ -46,12 +46,12 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   white-space: nowrap;
 }
 
-/* Upload zone */
+/* 업로드 zone */
 .upload-zone {
-  /* Vertical margin removed so sticky pins the box at exactly --header-h —
-     a top margin would leave it visually offset from the header bottom and
-     create a visible jump when sticky engages. The original gap below the
-     upload zone is preserved via #browse-toolbar's margin-top. */
+  /* sticky가 박스를 정확히 --header-h에 고정하도록 vertical margin을 제거했다
+     — top margin이 있으면 header 하단과 시각적으로 어긋난 채로 시작하다가
+     sticky가 발동할 때 점프가 보인다. 업로드 zone 아래의 원래 간격은
+     #browse-toolbar의 margin-top으로 보존한다. */
   margin: 0 24px;
   border: 2px dashed var(--border);
   border-radius: 8px;
@@ -79,7 +79,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .progress-note-ok { color: var(--accent); }
 .progress-note-warn { color: var(--danger); }
 
-/* App body grid: sidebar + main content */
+/* 앱 본문 그리드: 사이드바 + 메인 콘텐츠 */
 .app-body {
   display: grid;
   grid-template-columns: var(--sidebar-w) 1fr;
@@ -91,9 +91,9 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   border-right: 1px solid var(--border);
   padding: 12px 8px;
   position: sticky;
-  /* top is set dynamically by syncSidebarSticky() so a tree taller than the
-     viewport pins flush with the viewport bottom. The CSS fallback keeps the
-     sidebar usable when JS is disabled. */
+  /* top은 syncSidebarSticky()가 동적으로 설정한다 — 그래야 viewport보다
+     큰 트리가 viewport 하단에 맞춰 핀 고정된다. CSS 폴백은 JS가 꺼져
+     있어도 사이드바를 사용 가능하게 유지한다. */
   top: var(--header-h);
   align-self: start;
   font-size: 0.95rem;
@@ -141,7 +141,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   border-radius: 3px;
 }
 
-/* Tree nodes */
+/* 트리 노드 */
 .tree-node-row {
   display: flex;
   align-items: center;
@@ -188,7 +188,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 }
 .tree-children.collapsed { display: none; }
 
-/* Per-node rename button — hover/focus only to avoid visual noise. */
+/* 노드별 rename 버튼 — 시각적 잡음을 피하기 위해 hover/focus에서만 표시. */
 .tree-rename {
   background: none;
   border: none;
@@ -211,7 +211,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   outline-offset: 1px;
 }
 
-/* Per-node delete button — sibling of tree-rename, same hover/focus reveal. */
+/* 노드별 delete 버튼 — tree-rename의 형제, 동일한 hover/focus 노출. */
 .tree-delete {
   background: none;
   border: none;
@@ -234,7 +234,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   outline-offset: 1px;
 }
 
-/* Drag and drop visuals */
+/* 드래그 앤 드롭 비주얼 */
 .dragging { opacity: 0.4; }
 
 .drop-target {
@@ -250,7 +250,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   padding: 1px 4px;
 }
 
-/* Hamburger toggle (mobile only) */
+/* 햄버거 토글 (모바일 전용) */
 .sidebar-toggle {
   display: none;
   background: none;
@@ -266,7 +266,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 }
 .sidebar-toggle:hover { border-color: var(--accent); }
 
-/* Mobile-only backdrop behind the sidebar drawer */
+/* 사이드바 drawer 뒤에 깔리는 모바일 전용 backdrop */
 .sidebar-backdrop {
   position: fixed;
   inset: 0;
@@ -275,12 +275,12 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 }
 .sidebar-backdrop.hidden { display: none; }
 
-/* Browse toolbar (sort/filter) */
+/* Browse 툴바 (정렬/필터) */
 .browse-toolbar {
   display: flex;
   gap: 8px;
   padding: 8px 24px;
-  /* Compensates for the upload-zone vertical margin removed for sticky alignment. */
+  /* sticky 정렬을 위해 제거된 upload-zone vertical margin을 보정한다. */
   margin-top: 16px;
   align-items: center;
   flex-wrap: wrap;
@@ -347,7 +347,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 }
 .clear-selection-btn[hidden] { display: none; }
 
-/* File list */
+/* 파일 목록 */
 #file-list { padding: 0 24px; }
 
 .section-title {
@@ -358,7 +358,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   margin: 16px 0 8px;
 }
 
-/* Image grid */
+/* 이미지 그리드 */
 .image-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
@@ -476,7 +476,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   pointer-events: none;
 }
 
-/* File table */
+/* 파일 테이블 */
 .file-table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
 .file-table th {
   text-align: left;
@@ -512,7 +512,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 }
 .file-table .action-cell button:hover { color: var(--danger); background: rgba(224,85,85,0.1); }
 
-/* Lightbox */
+/* 라이트박스 */
 .lightbox {
   position: fixed;
   inset: 0;
@@ -550,7 +550,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .lb-prev { left: 16px; top: 50%; transform: translateY(-50%); }
 .lb-next { right: 16px; top: 50%; transform: translateY(-50%); }
 
-/* Audio player */
+/* 오디오 플레이어 */
 .audio-player {
   position: fixed;
   bottom: 0;
@@ -584,7 +584,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .playlist-item.active { background: var(--accent); color: white; }
 .playlist-item:hover:not(.active) { background: #3a3a3a; }
 
-/* New folder button */
+/* 새 폴더 버튼 */
 .new-folder-btn {
   background: none;
   border: 1px solid var(--border);
@@ -598,7 +598,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 }
 .new-folder-btn:hover { border-color: var(--accent); color: var(--accent); }
 
-/* Settings gear button — matches new-folder-btn framing but square and iconic */
+/* 설정 톱니 버튼 — new-folder-btn 프레임과 일치하되 정사각형의 아이콘 형태 */
 .settings-btn {
   background: none;
   border: 1px solid var(--border);
@@ -612,9 +612,9 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 }
 .settings-btn:hover { border-color: var(--accent); color: var(--accent); }
 
-/* URL import progress badge — shown in the header while the modal is closed
-   but batches are still downloading in the background. Clicking reopens the
-   modal so the user can inspect per-URL progress. */
+/* URL import progress badge — 모달이 닫혀 있어도 batch가 백그라운드에서
+   다운로드 중일 때 헤더에 표시된다. 클릭하면 모달이 다시 열려 URL 단위
+   진행을 검사할 수 있다. */
 .url-badge {
   background: none;
   border: 1px solid var(--accent);
@@ -632,7 +632,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .url-badge.has-error { border-color: var(--danger); color: var(--danger); }
 .url-badge.has-error:hover { background: color-mix(in srgb, var(--danger) 15%, transparent); }
 
-/* Settings modal — one input per row plus a helper line under the byte input */
+/* 설정 모달 — 행당 입력 하나, 바이트 입력 아래 helper 한 줄 */
 .settings-field { display: block; margin: 12px 0; }
 .settings-label {
   display: block;
@@ -649,7 +649,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   font-size: 0.75rem;
   color: var(--text-dim);
   margin-top: 4px;
-  min-height: 1em; /* prevent layout shift when the hint appears */
+  min-height: 1em; /* hint가 나타날 때 레이아웃 시프트 방지 */
 }
 .settings-field-checkbox {
   display: grid;
@@ -670,7 +670,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   margin-top: 2px;
 }
 
-/* Modal */
+/* 모달 */
 .modal-overlay {
   position: fixed;
   inset: 0;
@@ -730,7 +730,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .modal-hint { font-size: 0.8rem; color: var(--text-dim); margin-bottom: 2px; }
 .modal-hint.hidden { display: none; }
 
-/* URL import modal extras */
+/* URL import 모달 추가 스타일 */
 .link-btn {
   background: none;
   border: none;
@@ -772,10 +772,9 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .url-result.hidden { display: none; }
 
 .url-rows { display: flex; flex-direction: column; gap: 8px; }
-/* Per-batch header containing the optional position label ("배치 N") and
-   the cancel/dismiss control buttons. Always present so every batch — POST
-   or restored, single or stacked — has a consistent place to issue
-   batch-level actions. */
+/* batch별 헤더 — 선택적 위치 라벨("배치 N")과 cancel/dismiss 컨트롤 버튼.
+   POST든 복원이든, 단일이든 누적이든 모든 batch가 batch 단위 동작을 발사할
+   일관된 위치를 갖도록 항상 존재한다. */
 .url-batch-header {
   display: flex;
   align-items: center;
@@ -873,17 +872,17 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .url-row.status-error .url-progress-fill { background: var(--danger); width: 100%; }
 .url-row.status-error .url-row-status { color: var(--danger); }
 .url-row.status-done .url-row-status { color: #16a34a; }
-/* Cancelled is a deliberate user action (per-URL or batch cancel), not a
-   failure — render with the muted text-dim tone instead of the alarming
-   danger red used by status-error. */
+/* Cancelled는 사용자가 의도한 행동(URL 단위 또는 batch cancel)이지
+   실패가 아니다 — status-error의 경고적인 danger red가 아니라 차분한
+   text-dim 톤으로 렌더한다. */
 .url-row.status-cancelled .url-progress-fill { background: var(--text-dim); width: 100%; opacity: 0.5; }
 .url-row.status-cancelled .url-row-status { color: var(--text-dim); font-style: italic; }
 .url-row.status-cancelled .url-row-cancel { display: none; }
 
-/* Indeterminate mode: HLS imports have no known total, so the fill
-   shuttles left-to-right instead of pinning to 0%. The fixed 40% width
-   + translateX animation is the standard "material"-style indeterminate
-   bar — cheap to run on the GPU and obvious to the user. */
+/* indeterminate 모드: HLS import는 total을 모르므로 fill을 0%에 고정하는
+   대신 좌→우로 셔틀시킨다. 고정 40% width + translateX 애니메이션은
+   표준 "material" 스타일 indeterminate bar — GPU에서 저렴하게 돌고 사용자
+   에게 의도가 분명히 전달된다. */
 .url-row-indeterminate .url-progress-fill {
   width: 40%;
   animation: url-indeterminate 1.2s ease-in-out infinite;
@@ -905,11 +904,11 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
 .url-summary.status-done { background: #dcfce7; color: #166534; }
 .url-summary.status-error { background: #fee2e2; color: #991b1b; }
 .url-summary.status-mixed { background: #fef3c7; color: #92400e; }
-/* All-cancelled round: neutral gray, no warning tone. Cancellation is
-   user-initiated and shouldn't read as a failure. */
+/* 전부 cancelled인 라운드: 중립 회색, 경고 톤 없음. 취소는 사용자가
+   시작한 것이므로 실패로 읽혀서는 안 된다. */
 .url-summary.status-cancelled { background: #f1f5f9; color: var(--text-dim); }
 
-/* Responsive */
+/* 반응형 */
 @media (max-width: 600px) {
   header { padding: 12px 16px; }
   #file-list { padding: 0 16px; }
@@ -917,7 +916,7 @@ header h1 { font-size: 1.2rem; color: var(--accent); }
   .image-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
   .file-table .size-cell, .file-table th:nth-child(3) { display: none; }
 
-  /* Sidebar collapses into a left drawer; toggle is the only entry. */
+  /* 사이드바는 좌측 drawer로 접힌다 — 토글이 유일한 진입점이다. */
   .sidebar-toggle { display: inline-flex; }
   .app-body { grid-template-columns: 1fr; }
   .sidebar {

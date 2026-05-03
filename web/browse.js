@@ -80,9 +80,9 @@ export async function browse(path, pushState = true) {
   highlightTreeCurrent();
 }
 
-// Apply sort/filter to allEntries and render. Split from browse() so the
-// toolbar can re-render without refetching. Keeps lightbox/playlist arrays
-// in sync with the visible set so prev/next don't land on hidden entries.
+// allEntries에 정렬/필터를 적용해 렌더링한다. browse()에서 분리해 툴바가
+// 재fetch 없이 다시 렌더할 수 있게 한다. lightbox/playlist 배열을 visible
+// 셋과 동기화 유지해, prev/next가 숨은 항목에 닿지 않게 한다.
 export function renderView() {
   const visible = applyView(allEntries);
   syncSelectionWithVisible(visible);
@@ -99,9 +99,9 @@ export function renderView() {
 
 export function applyView(entries) {
   const files = entries.filter(e => !e.is_dir);
-  // image/video/clip are mutually exclusive: clips never appear in the
-  // image or video tabs. The "전체" tab keeps all files in their natural
-  // sections so nothing is hidden without an explicit filter.
+  // image/video/clip은 상호 배타적이다 — clip은 image나 video 탭에 나타나지
+  // 않는다. "전체" 탭은 모든 파일을 자연스러운 섹션 안에 유지해, 명시적
+  // 필터 없이 숨겨지는 것이 없도록 한다.
   let out;
   if (view.type === 'all') {
     out = files;
@@ -177,7 +177,7 @@ function renderBreadcrumb(path) {
 function renderFileList(entries) {
   $.fileList.innerHTML = '';
 
-  // Folders intentionally omitted from the main list — the sidebar tree is
+  // 폴더는 메인 목록에서 의도적으로 제외한다 — 사이드바 트리가
   // the single navigation surface. Files-only sections below.
   const images = entries.filter(e => e.type === 'image');
   const videos = entries.filter(e => e.type === 'video');

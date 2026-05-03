@@ -31,9 +31,9 @@ export function syncToolbarUI() {
   $.toolbarSort.value = view.sort;
 }
 
-// popstate treats the URL as the source of truth — read view + path out of it,
-// sync the toolbar widgets, then fetch. browse(..., false) won't rewrite the
-// URL, so we don't loop.
+// popstate는 URL을 진실의 출처로 취급한다 — URL에서 view + path를 읽고,
+// 툴바 위젯을 동기화한 뒤 fetch 한다. browse(..., false)는 URL을 다시
+// 쓰지 않으므로 루프가 발생하지 않는다.
 export function wireRouter(browse) {
   window.addEventListener('popstate', () => {
     const p = new URLSearchParams(location.search).get('path') || '/';

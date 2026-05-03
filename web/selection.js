@@ -27,7 +27,7 @@ let _computeVisible = null;
 export function wireSelection({ computeVisible }) {
   _computeVisible = computeVisible;
 
-  // Selection toolbar — 카드 DOM은 건드리지 않고 영향 카드의 class/checkbox만
+  // selection 툴바 — 카드 DOM은 건드리지 않고 영향받는 카드의 class/checkbox만
   // 갱신해 GIF/WebP 자동재생 리셋과 listener 재할당을 피한다.
   $.selectAllFiles.addEventListener('change', () => {
     const on = $.selectAllFiles.checked;
@@ -112,9 +112,9 @@ export function setSelected(path, selected) {
 
 export function bindEntrySelection(container, entry) {
   const checkbox = container.querySelector('input[type="checkbox"]');
-  // Folders are never multi-selected — moving a folder is always a single-target
-  // operation. Hide the checkbox entirely so a stale selection set can't pull
-  // a folder into a bulk file move.
+  // 폴더는 절대 다중 선택되지 않는다 — 폴더 이동은 항상 단일 대상 연산이다.
+  // 잔재 selection 셋이 폴더를 일괄 파일 이동에 끌고 들어가지 않도록
+  // checkbox를 완전히 숨긴다.
   if (entry.is_dir) {
     const cell = container.querySelector('.select-cell, .select-check');
     if (cell) cell.style.visibility = 'hidden';

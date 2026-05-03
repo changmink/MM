@@ -128,9 +128,8 @@ function renderConvertImageResult(body) {
     `성공 ${body.succeeded}개 / 실패 ${body.failed}개`;
   $.convertImageSummary.className =
     body.failed > 0 ? 'url-summary url-summary-warn' : 'url-summary url-summary-ok';
-  // Show every result row so the user sees what failed and why; success
-  // rows are concise (filename → output) and failure rows include the
-  // localized error label.
+  // 사용자가 무엇이 실패했고 왜인지 볼 수 있도록 모든 결과 행을 보여준다.
+  // 성공 행은 간결하고(파일명 → 출력) 실패 행에는 지역화된 에러 라벨을 포함한다.
   $.convertImageRows.innerHTML = body.results.map(r => {
     if (r.error) {
       const label = CONVERT_IMAGE_ERROR_LABELS[r.error] || r.error;
@@ -161,8 +160,8 @@ export function wireConvertImage(deps) {
   $.convertImageConfirmBtn.addEventListener('click', onConfirmClick);
   wireModalDismiss($.convertImageModal, closeConvertImageModal);
 
-  // Toolbar batch trigger — populated by browse.js's renderView via the
-  // hidden #convert-png-all-btn data attribute.
+  // 툴바 batch 트리거 — browse.js의 renderView가 hidden #convert-png-all-btn
+  // data 속성을 통해 채운다.
   $.convertPNGAllBtn.addEventListener('click', () => {
     const paths = $.convertPNGAllBtn.dataset.paths
       ? JSON.parse($.convertPNGAllBtn.dataset.paths)

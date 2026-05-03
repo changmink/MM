@@ -29,9 +29,9 @@ func main() {
 		log.Fatalf("settings: %v", err)
 	}
 
-	// serverCtx is cancelled by SIGINT/SIGTERM. Long-lived background work
-	// (import job registry, future workers) derives from it via WithServerCtx
-	// so graceful shutdown unwinds them cleanly.
+	// serverCtx는 SIGINT/SIGTERM에 의해 취소된다. 장기 백그라운드 작업
+	// (import Job 레지스트리, 향후 워커들)이 WithServerCtx를 통해 이 컨텍스트를
+	// 파생하므로, graceful shutdown 시 모두 깔끔하게 풀린다.
 	serverCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 

@@ -46,9 +46,9 @@ export function wireLightbox({ onAfterDelete }) {
     if (e.key === 'Delete') deleteCurrentLightboxItem();
   });
 
-  // Audio auto-advance — module mode imports are read-only bindings, so the
-  // original `playlistIndex++` in this listener silently TypeError'd after
-  // FM-1. Fix by going through the setter.
+  // 오디오 자동 다음 곡 — 모듈 모드 import는 읽기 전용 바인딩이라 이
+  // 리스너의 원래 `playlistIndex++`가 FM-1 이후 조용히 TypeError를 일으켰다.
+  // setter를 거쳐 수정한다.
   $.audioEl.addEventListener('ended', () => {
     if (playlistIndex < playlist.length - 1) {
       setPlaylistIndex(playlistIndex + 1);
