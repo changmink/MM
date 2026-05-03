@@ -438,6 +438,58 @@ func TestImportURL_HandlerDisconnect_JobContinues(t *testing.T) {
 	}
 }
 
+func TestImportURL_BatchFetchesInParallel(t *testing.T) {
+	var active atomic.Int64
+	var maxActive atomic.Int64
+
+	muxOrigin := http.NewServeMux()
+	for i := 0; i < 4; i++ {
+		p := fmt.Sprintf("/slow%d.jpg", i)
+		muxOrigin.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
+			cur := active.Add(1)
+			for {
+				max := maxActive.Load()
+				if cur <= max || maxActive.CompareAndSwap(max, cur) {
+					break
+				}
+			}
+			defer active.Add(-1)
+
+			time.Sleep(50 * time.Millisecond)
+			w.Header().Set("Content-Type", "image/jpeg")
+			w.Header().Set("Content-Length", strconv.Itoa(len(jpegBody)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(jpegBody)
+		})
+	}
+	srv := httptest.NewServer(muxOrigin)
+	defer srv.Close()
+
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	h := registerImportTest(mux, root)
+	defer h.Close()
+
+	rw := postImport(t, mux, "/", []string{
+		srv.URL + "/slow0.jpg",
+		srv.URL + "/slow1.jpg",
+		srv.URL + "/slow2.jpg",
+		srv.URL + "/slow3.jpg",
+	})
+	events := parseSSEEvents(t, rw.Body.String())
+	summary := events[len(events)-1]
+	if summary["phase"] != "summary" || summary["succeeded"].(float64) != 4 {
+		t.Fatalf("summary = %v, want 4 successes; phases=%v", summary, phasesOf(events))
+	}
+
+	if got := maxActive.Load(); got <= 1 {
+		t.Fatalf("max concurrent fetches = %d, want > 1", got)
+	}
+	if got := maxActive.Load(); got > 2 {
+		t.Fatalf("max concurrent fetches = %d, want <= 2", got)
+	}
+}
+
 func TestImportURL_EmptyArray(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()

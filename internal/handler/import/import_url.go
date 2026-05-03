@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"file_server/internal/importjob"
@@ -31,6 +32,7 @@ const (
 	// blocking when broadcast falls behind. A slow subscriber must never
 	// stall the download.
 	progressChanBuffer = 16
+	importURLWorkers   = 2
 )
 
 type importRequest struct {
@@ -242,33 +244,66 @@ func (h *Handler) runImportJob(job *importjob.Job, snap settings.Settings, destA
 
 	rel := job.DestPath
 	urls := job.Snapshot().URLs
-	succeeded, failed, cancelled := 0, 0, 0
-	for i, urlState := range urls {
-		if job.Ctx().Err() != nil {
-			// Batch cancelled mid-flight: mark every remaining URL cancelled
-			// and stop hitting origins.
-			cancelled += cancelRemainingURLs(job, urls, i)
-			break
-		}
-		// Per-URL cancel may have flipped this index to "cancelled" before we
-		// reached it (cancel API sets state + emits error event for pending
-		// URLs). Skip the fetch entirely; the count is correct because the
-		// cancel handler did NOT increment counters ??we own that.
-		if job.URLStatus(i) == "cancelled" {
-			cancelled++
-			continue
-		}
-		switch h.fetchOneJob(job, i, urlState.URL, destAbs, rel, maxBytes, perURLTimeout) {
-		case fetchSucceeded:
-			succeeded++
-		case fetchCancelled:
-			cancelled++
-		default:
-			failed++
-		}
+	h.runImportURLWorkers(job, urls, destAbs, rel, maxBytes, perURLTimeout)
+
+	sum := summarizeURLs(job.Snapshot().URLs)
+	finalizeBatch(job, sum.Succeeded, sum.Failed, sum.Cancelled)
+}
+
+type importURLTask struct {
+	index int
+	url   string
+}
+
+func (h *Handler) runImportURLWorkers(job *importjob.Job, urls []importjob.URLState, destAbs, rel string,
+	maxBytes int64, perURLTimeout time.Duration) {
+
+	workerCount := importURLWorkers
+	if len(urls) < workerCount {
+		workerCount = len(urls)
+	}
+	if workerCount == 0 {
+		return
 	}
 
-	finalizeBatch(job, succeeded, failed, cancelled)
+	tasks := make(chan importURLTask)
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range tasks {
+				if job.Ctx().Err() != nil {
+					continue
+				}
+				// Per-URL cancel may have flipped this index to "cancelled"
+				// before this worker received the task. Skip the fetch; the
+				// cancel handler owns the SSE error event for that pending URL.
+				if job.URLStatus(task.index) == "cancelled" {
+					continue
+				}
+				_ = h.fetchOneJob(job, task.index, task.url, destAbs, rel, maxBytes, perURLTimeout)
+			}
+		}()
+	}
+
+dispatch:
+	for i, urlState := range urls {
+		if job.URLStatus(i) == "cancelled" {
+			continue
+		}
+		select {
+		case <-job.Ctx().Done():
+			break dispatch
+		case tasks <- importURLTask{index: i, url: urlState.URL}:
+		}
+	}
+	close(tasks)
+	wg.Wait()
+
+	if job.Ctx().Err() != nil {
+		cancelPendingURLs(job, urls)
+	}
 }
 
 // cancelRemainingURLs marks URLs in [fromIdx, len(urls)) as cancelled and
@@ -295,6 +330,21 @@ func cancelRemainingURLs(job *importjob.Job, urls []importjob.URLState, fromIdx 
 		cancelled++
 	}
 	return cancelled
+}
+
+func cancelPendingURLs(job *importjob.Job, urls []importjob.URLState) {
+	for j, u := range urls {
+		if job.URLStatus(j) != "pending" {
+			continue
+		}
+		job.UpdateURL(j, func(s *importjob.URLState) {
+			s.Status = "cancelled"
+			s.Error = "cancelled"
+		})
+		job.Publish(mustEvent("error", sseError{
+			Phase: "error", Index: j, URL: u.URL, Error: "cancelled",
+		}))
+	}
 }
 
 // finalizeBatch publishes the summary frame, records it on the job, and sets
