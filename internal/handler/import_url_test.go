@@ -382,11 +382,10 @@ func TestImportURL_SSE_AudioSkipsThumbPool(t *testing.T) {
 	}
 }
 
-// TestImportURL_HandlerDisconnect_JobContinues asserts the Phase 20 contract:
-// the client closing the SSE stream (or refreshing the tab) does NOT cancel
-// the underlying import job. The handler returns promptly, but the worker
-// keeps draining URLs until summary, and the registry retains the finished
-// job for snapshot/list queries.
+// TestImportURL_HandlerDisconnect_JobContinues은 Phase 20 계약을 단언한다
+// — 클라이언트가 SSE 스트림을 닫거나(탭을 새로 고쳐도) 진행 중인 import
+// Job을 취소하지 않는다. 핸들러는 즉시 반환하지만 워커는 summary까지 URL을
+// 계속 처리하고, 레지스트리는 snapshot/list 조회용으로 끝난 Job을 보존한다.
 func TestImportURL_HandlerDisconnect_JobContinues(t *testing.T) {
 	// Origin counts hits so we can confirm every URL was attempted even
 	// after the handler returned.

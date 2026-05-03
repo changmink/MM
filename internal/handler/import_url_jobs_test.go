@@ -13,8 +13,8 @@ import (
 	"file_server/internal/importjob"
 )
 
-// listJobsBody decodes the GET /api/import-url/jobs response so tests can
-// assert on `active` / `finished` independently.
+// listJobsBody는 GET /api/import-url/jobs 응답을 디코드해, 테스트가
+// `active` / `finished`를 각각 단언할 수 있게 한다.
 type listJobsBody struct {
 	Active   []importjob.JobSnapshot `json:"active"`
 	Finished []importjob.JobSnapshot `json:"finished"`

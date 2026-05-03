@@ -17,11 +17,11 @@ func requireFFmpeg(t *testing.T) {
 	}
 }
 
-// makeTestTS synthesizes a 1-second H.264 + AAC transport stream at
-// <dir>/<name>. The codec pair matches production TS captures and satisfies
-// the `-bsf:a aac_adtstoasc` bitstream filter used by both streamTS remux
-// (stream.go) and POST /api/convert (convert.go) — mp2 audio would abort
-// that filter with "Codec not supported".
+// makeTestTS는 <dir>/<name>에 1초짜리 H.264 + AAC transport stream을
+// 합성한다. 코덱 조합은 프로덕션 TS 캡처와 같으며, streamTS remux
+// (stream.go)와 POST /api/convert(convert.go)가 사용하는 `-bsf:a
+// aac_adtstoasc` bitstream filter와 호환된다 — mp2 오디오면 그 필터가
+// "Codec not supported"로 중단된다.
 func makeTestTS(t *testing.T, dir string, name ...string) string {
 	t.Helper()
 	requireFFmpeg(t)
