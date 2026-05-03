@@ -105,6 +105,8 @@ go run ./cmd/server
 
 mutating 라우트(POST·PATCH·DELETE)는 모두 `Origin == Host` 또는 `Sec-Fetch-Site` allowlist를 통과해야 한다. 거부 시 `403 cross_origin` (상세는 SPEC.md §5.3).
 
+본문 크기 상한: multipart 업로드 100 GiB / JSON body 64 KiB. 초과 시 `413 too_large` (`http.MaxBytesReader`, 상세는 SPEC.md §5 각 엔드포인트 4xx 표 / §9).
+
 스키마 상세는 [SPEC.md §5](SPEC.md#5-api-design).
 
 ---
