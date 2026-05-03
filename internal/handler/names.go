@@ -13,9 +13,18 @@ import (
 // 기준이 약해지므로, 공유 유틸은 여기로 모으고 라우트 파일은 자기 라우트만
 // 다룬다.
 
-// validateName rejects empty / "." / ".." / >255 / path-separator-bearing names.
+// validateName rejects names that would either escape the FS root, fail an
+// OS-level Mkdir/Rename, or break Windows portability. Catches:
+//   - empty / "." / ".." / >255 / path-separator-bearing names
+//   - Windows-reserved chars: < > : " | ? *
+//   - control chars (NUL ~ 0x1F + DEL)
+//   - Windows-reserved basenames: CON / PRN / AUX / NUL / COM1-9 / LPT1-9
+//     (case-insensitive, with or without extension)
+//
 // Used by file rename, folder rename, and folder create — same rule everywhere
 // so the path-traversal first line of defense doesn't drift between callers.
+// Wire: callers map any error here to `400 {"error": "invalid name"}` (SPEC §5)
+// so we keep the single short code; richer diagnostics belong in client UI.
 func validateName(name string) error {
 	if name == "" || name == "." || name == ".." {
 		return fmt.Errorf("invalid name")
@@ -24,7 +33,21 @@ func validateName(name string) error {
 		return fmt.Errorf("invalid name")
 	}
 	for _, c := range name {
-		if c == '/' || c == '\\' {
+		if c < 0x20 || c == 0x7f {
+			return fmt.Errorf("invalid name")
+		}
+		switch c {
+		case '/', '\\', '<', '>', ':', '"', '|', '?', '*':
+			return fmt.Errorf("invalid name")
+		}
+	}
+	base := strings.ToUpper(stripTrailingExt(name))
+	switch base {
+	case "CON", "PRN", "AUX", "NUL":
+		return fmt.Errorf("invalid name")
+	}
+	if len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) {
+		if base[3] >= '1' && base[3] <= '9' {
 			return fmt.Errorf("invalid name")
 		}
 	}

@@ -45,6 +45,36 @@ export function splitExtension(name) {
   return { base: name.slice(0, dot), ext: name.slice(dot) };
 }
 
+// Mirrors server validateName (internal/handler/names.go). Returns null if
+// the name is acceptable, or a human-readable Korean message describing the
+// first violation. Server has the final say, but this catches obvious cases
+// before a roundtrip and surfaces a useful UX message instead of generic
+// "유효하지 않은 이름입니다.".
+const RESERVED_BASENAMES = new Set(['CON', 'PRN', 'AUX', 'NUL']);
+export function validateRenameInput(name) {
+  if (name === '' || name === '.' || name === '..') return '이름을 입력하세요.';
+  if (name.length > 255) return '이름이 너무 깁니다 (최대 255자).';
+  for (let i = 0; i < name.length; i++) {
+    const c = name.charCodeAt(i);
+    if (c < 0x20 || c === 0x7f) return '이름에 사용할 수 없는 제어 문자가 있습니다.';
+    const ch = name[i];
+    if (ch === '/' || ch === '\\' || ch === '<' || ch === '>' ||
+        ch === ':' || ch === '"' || ch === '|' || ch === '?' || ch === '*') {
+      return `이름에 사용할 수 없는 문자가 있습니다: ${ch}`;
+    }
+  }
+  // Reserved basename check (case-insensitive, with or without extension).
+  // Mirrors stripTrailingExt + ToUpper(base) on the server.
+  const dot = name.lastIndexOf('.');
+  const base = (dot > 0 ? name.slice(0, dot) : name).toUpperCase();
+  if (RESERVED_BASENAMES.has(base)) return `'${base}'는 시스템 예약 이름입니다.`;
+  if (base.length === 4 && (base.startsWith('COM') || base.startsWith('LPT'))) {
+    const last = base.charCodeAt(3);
+    if (last >= 0x31 && last <= 0x39) return `'${base}'는 시스템 예약 이름입니다.`;
+  }
+  return null;
+}
+
 export function parentDir(p) {
   if (!p || p === '/') return '/';
   const i = p.lastIndexOf('/');

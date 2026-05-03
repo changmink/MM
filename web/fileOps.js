@@ -11,6 +11,7 @@ import {
 } from './state.js';
 import {
   esc, splitExtension, parentDir, rewritePathAfterFolderRename,
+  validateRenameInput,
 } from './util.js';
 
 // Tracks whether the active drag is a single folder. Folders take a separate
@@ -111,6 +112,11 @@ async function submitCreateFolder() {
   const name = $.folderNameInput.value.trim();
   if (!name) {
     showFolderError('폴더 이름을 입력하세요.');
+    return;
+  }
+  const nameErr = validateRenameInput(name);
+  if (nameErr) {
+    showFolderError(nameErr);
     return;
   }
   folderSubmitting = true;
@@ -365,6 +371,11 @@ async function submitRename() {
   const newBase = $.renameInput.value.trim();
   if (!newBase) {
     showRenameError('이름을 입력하세요.');
+    return;
+  }
+  const nameErr = validateRenameInput(newBase);
+  if (nameErr) {
+    showRenameError(nameErr);
     return;
   }
   const entry = renameTarget;
