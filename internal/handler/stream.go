@@ -75,7 +75,8 @@ func (h *Handler) streamTS(w http.ResponseWriter, r *http.Request, absPath strin
 			http.ServeContent(w, r, "video.mp4", ci.ModTime(), cached)
 			return
 		}
-		cached.Close()
+		// Stat 실패 시 fall-through — defer가 닫는다. 명시적 close를 더하면
+		// fd 재할당이 일어난 환경에서 다른 파일을 닫는 패턴이라 제거.
 	}
 
 	unlock := h.lockStreamKey(cachePath)
