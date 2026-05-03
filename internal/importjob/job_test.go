@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// newTestJob is a thin shortcut around Registry.Create so individual job
-// tests don't have to keep a Registry alive just for a constructor.
+// newTestJob은 Registry.Create를 감싼 얇은 단축이다 — 개별 Job 테스트가
+// 단지 생성자를 위해 Registry를 살려둘 필요 없게 만든다.
 func newTestJob(t *testing.T, urls ...string) *Job {
 	t.Helper()
 	reg := New(context.Background())
@@ -49,11 +49,11 @@ func TestJob_Subscribe_BroadcastsToAll(t *testing.T) {
 	}
 }
 
-// TestJob_Subscribe_SlowConsumerDropped: a subscriber that never drains its
-// channel must not stall a fast subscriber. The fast consumer drains in real
-// time and the publisher yields between sends so the cooperative scheduler
-// has a chance to run it; the slow consumer never reads, so its buffer fills
-// up and the rest of its sends are dropped — independently of fast.
+// TestJob_Subscribe_SlowConsumerDropped: 채널을 전혀 비우지 않는 구독자가
+// 빠른 구독자를 멈춰서는 안 된다. 빠른 소비자는 실시간으로 드레인하고
+// 발행자는 전송 사이에 yield해 협력적 스케줄러가 그것을 돌릴 기회를 갖는다.
+// 느린 소비자는 읽지 않으므로 버퍼가 가득 차고 그 뒤 전송은 떨어진다 —
+// fast와는 독립적으로.
 func TestJob_Subscribe_SlowConsumerDropped(t *testing.T) {
 	job := newTestJob(t, "a")
 
@@ -78,8 +78,7 @@ func TestJob_Subscribe_SlowConsumerDropped(t *testing.T) {
 		runtime.Gosched()
 	}
 
-	// Let fast finish draining anything still in its buffer, then close so
-	// the goroutine exits.
+	// 버퍼에 남아 있는 것을 fast가 드레인할 시간을 주고, goroutine이 종료되도록 close 한다.
 	time.Sleep(50 * time.Millisecond)
 	fastUnsub()
 	<-fastDone
@@ -141,7 +140,7 @@ func TestJob_Cancel_PropagatesContext(t *testing.T) {
 		t.Fatal("ctx not done after Cancel")
 	}
 
-	// Status is the worker's responsibility — Cancel only fires the context.
+	// Status는 워커의 책임이다 — Cancel은 컨텍스트만 트리거한다.
 	if got := job.Status(); got != StatusQueued {
 		t.Errorf("status changed by Cancel alone: got %q, want unchanged", got)
 	}
@@ -151,11 +150,11 @@ func TestJob_Cancel_PropagatesContext(t *testing.T) {
 	}
 }
 
-// TestJob_SetStatus_ClosesSubsOnTerminal: handlers blocked reading the
-// events channel must wake up when the worker hits a terminal state, even
-// if the final summary frame was dropped from a full per-subscriber
-// buffer. Without this, a slow client + a cap-1 ResponseWriter would hang
-// the request goroutine until the client disconnected.
+// TestJob_SetStatus_ClosesSubsOnTerminal: 이벤트 채널 읽기에서 블록된
+// 핸들러는 — 마지막 summary 프레임이 가득 찬 구독자 버퍼에서 떨어졌더라도
+// — 워커가 terminal 상태에 도달할 때 깨어나야 한다. 이게 없으면 느린
+// 클라이언트 + cap-1 ResponseWriter가 클라이언트가 끊을 때까지 요청
+// 고루틴을 멈춰 세운다.
 func TestJob_SetStatus_ClosesSubsOnTerminal(t *testing.T) {
 	for _, terminal := range []Status{StatusCompleted, StatusFailed, StatusCancelled} {
 		t.Run(string(terminal), func(t *testing.T) {
@@ -176,15 +175,15 @@ func TestJob_SetStatus_ClosesSubsOnTerminal(t *testing.T) {
 	}
 }
 
-// TestJob_Subscribe_AfterTerminal returns a pre-closed channel so a J4
-// /jobs/{id}/events subscriber that arrives after the job finished does not
-// block forever. The snapshot is the source of truth in that path.
+// TestJob_Subscribe_AfterTerminal은 미리 close된 채널을 반환한다 — Job이
+// 끝난 뒤에 도착한 J4 /jobs/{id}/events 구독자가 영원히 블록되지 않도록.
+// 그 경로에서는 스냅샷이 진실의 출처다.
 func TestJob_Subscribe_AfterTerminal(t *testing.T) {
 	job := newTestJob(t, "a")
 	job.SetStatus(StatusCompleted)
 
 	sub, unsub := job.Subscribe()
-	defer unsub() // must be a no-op
+	defer unsub() // no-op이어야 한다
 	select {
 	case _, ok := <-sub:
 		if ok {
@@ -195,8 +194,8 @@ func TestJob_Subscribe_AfterTerminal(t *testing.T) {
 	}
 }
 
-// TestJob_CancelOne_Running: a registered per-URL cancel fires only the
-// targeted index's context and reports CancelKindRunning to the caller.
+// TestJob_CancelOne_Running: 등록된 URL 단위 cancel은 대상 인덱스의
+// 컨텍스트만 트리거하고 호출자에게 CancelKindRunning을 보고한다.
 func TestJob_CancelOne_Running(t *testing.T) {
 	job := newTestJob(t, "a", "b", "c")
 
@@ -228,9 +227,9 @@ func TestJob_CancelOne_Running(t *testing.T) {
 	}
 }
 
-// TestJob_CancelOne_Pending: a still-pending URL (no per-URL cancel
-// registered, status == "pending") is atomically marked cancelled and the
-// caller is told it owns the lifecycle event publication.
+// TestJob_CancelOne_Pending: 아직 pending인 URL(URL 단위 cancel 등록 없음,
+// status == "pending")은 원자적으로 cancelled로 표시되며, 호출자는 라이프
+// 사이클 이벤트 발행 책임을 자신이 갖는다는 것을 통보받는다.
 func TestJob_CancelOne_Pending(t *testing.T) {
 	job := newTestJob(t, "https://a", "https://b")
 
@@ -250,8 +249,8 @@ func TestJob_CancelOne_Pending(t *testing.T) {
 	}
 }
 
-// TestJob_CancelOne_Terminal: a URL that has already finished cannot be
-// cancelled — caller responds 409 based on CancelKindNone.
+// TestJob_CancelOne_Terminal: 이미 끝난 URL은 취소할 수 없다 — 호출자는
+// CancelKindNone을 근거로 409를 응답한다.
 func TestJob_CancelOne_Terminal(t *testing.T) {
 	job := newTestJob(t, "a")
 	job.UpdateURL(0, func(s *URLState) { s.Status = "done" })
@@ -261,8 +260,8 @@ func TestJob_CancelOne_Terminal(t *testing.T) {
 	}
 }
 
-// TestJob_CancelOne_OutOfRange: defensive index bounds check returns
-// CancelKindNone, never panics.
+// TestJob_CancelOne_OutOfRange: 방어적 인덱스 경계 검사는 panic 없이
+// CancelKindNone을 반환한다.
 func TestJob_CancelOne_OutOfRange(t *testing.T) {
 	job := newTestJob(t, "a")
 	if _, kind := job.CancelOne(-1); kind != CancelKindNone {
@@ -273,33 +272,32 @@ func TestJob_CancelOne_OutOfRange(t *testing.T) {
 	}
 }
 
-// TestJob_SubscribeWithSnapshot_NoDoubleDelivery: an event published
-// between Snapshot() and Subscribe() must never appear in both the
-// captured snapshot AND the live channel. Exercise the contract by
-// hammering Publish concurrently with SubscribeWithSnapshot.
+// TestJob_SubscribeWithSnapshot_NoDoubleDelivery: Snapshot()과 Subscribe()
+// 사이에 발행된 이벤트는 캡처된 스냅샷과 라이브 채널 모두에 나타나서는
+// 절대 안 된다. SubscribeWithSnapshot과 동시에 Publish를 두드려 계약을
+// 검증한다.
 //
-// Caveat: this asserts the API-side guarantee (Snapshot + Subscribe under
-// one mu hold), not exactly-once delivery end-to-end. The producer's
-// UpdateURL → Publish pair is two separate mu acquisitions, so an
-// adversarial schedule (UpdateURL → SubscribeWithSnapshot → Publish) can
-// still leave the consumer with snap=done AND channel=done. Closing that
-// would require an atomic UpdateURLAndPublish helper on Job. The pubReady
-// barrier biases the schedule toward "Subscribe wins the lock first" so
-// the test predominantly exercises the API-contract branch.
+// 단서: 이 테스트는 API 측 보장(한 번의 mu 잠금 안의 Snapshot + Subscribe)
+// 만 단언하며, end-to-end exactly-once 전달은 아니다. 생산자의 UpdateURL
+// → Publish 쌍은 두 번의 mu 획득이라, 적대적 스케줄(UpdateURL →
+// SubscribeWithSnapshot → Publish)에서는 소비자가 snap=done이면서 동시에
+// channel=done을 받을 수 있다. 그것까지 닫으려면 Job에 원자적
+// UpdateURLAndPublish 헬퍼가 필요하다. pubReady 배리어로 스케줄을
+// "Subscribe가 락을 먼저 잡는" 쪽으로 편향시켜, 이 테스트는 주로 API 계약
+// 분기를 검증한다.
 func TestJob_SubscribeWithSnapshot_NoDoubleDelivery(t *testing.T) {
 	job := newTestJob(t, "https://x")
 
-	// Pre-mutate so we have a deterministic non-zero starting state.
+	// 결정적 비-zero 시작 상태를 갖도록 미리 변형해 둔다.
 	job.UpdateURL(0, func(s *URLState) {
 		s.Status = "running"
 		s.Received = 100
 	})
 
-	// Concurrently flip the URL to done and Publish that done event. The
-	// race is whether Publish lands BEFORE the snapshot capture (no
-	// channel delivery, snapshot shows done) or AFTER (channel sees done,
-	// snapshot shows running). Either is correct; what must NOT happen is
-	// "both snapshot shows done AND channel sees done".
+	// 동시에 URL을 done으로 뒤집고 그 done 이벤트를 Publish한다. race는
+	// Publish가 스냅샷 캡처 이전에 일어나는지(채널 전달 없음, 스냅샷이 done)
+	// 이후인지(채널은 done, 스냅샷은 running)이다. 둘 중 어느 쪽이든 옳다 —
+	// 절대 일어나서는 안 되는 건 "스냅샷이 done이면서 동시에 채널도 done"이다.
 	pubReady := make(chan struct{})
 	go func() {
 		<-pubReady
@@ -311,7 +309,7 @@ func TestJob_SubscribeWithSnapshot_NoDoubleDelivery(t *testing.T) {
 	snap, ch, unsub := job.SubscribeWithSnapshot()
 	defer unsub()
 
-	// Drain whatever the channel surfaces (at most a handful of events).
+	// 채널이 내보낸 것을 모두 drain한다(많아야 몇 개).
 	var live []Event
 	deadline := time.After(100 * time.Millisecond)
 drain:
@@ -334,21 +332,20 @@ drain:
 			liveSawDone = true
 		}
 	}
-	// The whole point of the atomic API: never both true.
+	// 원자적 API의 핵심: 둘 다 true가 되어선 안 된다.
 	if snapDone && liveSawDone {
 		t.Errorf("done event delivered twice: snapshot=done AND channel saw done frame")
 	}
 }
 
-// TestJob_SubscribeWithSnapshot_TerminalReturnsClosedChannel ensures the
-// terminal-job branch still pre-closes the channel and short-circuits the
-// reader.
+// TestJob_SubscribeWithSnapshot_TerminalReturnsClosedChannel은 terminal-Job
+// 분기가 여전히 채널을 미리 close해 reader를 short-circuit 시키는지 보장한다.
 func TestJob_SubscribeWithSnapshot_TerminalReturnsClosedChannel(t *testing.T) {
 	job := newTestJob(t, "a")
 	job.SetStatus(StatusCompleted)
 
 	snap, ch, unsub := job.SubscribeWithSnapshot()
-	defer unsub() // must be a no-op
+	defer unsub() // no-op이어야 한다
 	if snap.Status != StatusCompleted {
 		t.Errorf("snapshot status = %q, want completed", snap.Status)
 	}
@@ -362,18 +359,17 @@ func TestJob_SubscribeWithSnapshot_TerminalReturnsClosedChannel(t *testing.T) {
 	}
 }
 
-// TestJob_CancelOne_AtomicityCloseRace: even if a per-URL cancel is
-// registered AFTER an attempted CancelOne but BEFORE a follow-up call, the
-// next CancelOne sees the registered entry — confirming the registered
-// branch always wins when both signals coexist.
+// TestJob_CancelOne_AtomicityCloseRace: CancelOne 시도 이후, 이어지는
+// 호출 이전에 URL 단위 cancel이 등록되더라도, 다음 CancelOne은 등록된
+// 항목을 본다 — 두 신호가 공존할 때 등록된 분기가 항상 이기는지 확인한다.
 func TestJob_CancelOne_PreferRunningOverPending(t *testing.T) {
 	job := newTestJob(t, "a")
 	_, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	job.RegisterURLCancel(0, cancel)
-	// Status still pending, but cancel is registered → CancelKindRunning
-	// must win so the worker's existing cancellation path is the single
-	// source of the error event.
+	// Status는 여전히 pending이지만 cancel이 등록돼 있으므로
+	// CancelKindRunning이 이겨야 한다 — 워커의 기존 취소 경로가 error
+	// 이벤트의 단일 출처가 되어야 한다.
 	url, kind := job.CancelOne(0)
 	if kind != CancelKindRunning {
 		t.Fatalf("kind = %v, want CancelKindRunning (registered cancel takes precedence)", kind)

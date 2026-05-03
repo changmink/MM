@@ -48,8 +48,8 @@ func TestRegistry_Create_RejectsWhenFull(t *testing.T) {
 		t.Fatalf("Create over cap: got %v, want %v", err, ErrTooManyJobs)
 	}
 
-	// A finished job should not count against the cap; create one, finish it,
-	// and verify a new Create succeeds.
+	// 끝난 Job은 상한 카운트에 포함되지 않아야 한다 — 하나 만들어 끝낸 뒤
+	// 새 Create가 성공하는지 확인한다.
 	active, _ := reg.List()
 	active[0].SetStatus(StatusCompleted)
 	if _, err := reg.Create("dest", []string{"u"}); err != nil {
@@ -134,10 +134,10 @@ func TestRegistry_CancelAll_AffectsAllActive(t *testing.T) {
 	}
 }
 
-// TestRegistry_WaitAll_ParallelDeadline: the deadline budget applies to the
-// pool, not to each job sequentially. With 5 stuck jobs and a 100ms budget
-// the call must return in roughly 100ms (not 500ms) — a regression here
-// would silently extend graceful-shutdown timing.
+// TestRegistry_WaitAll_ParallelDeadline: deadline 예산은 풀 전체에 적용되며
+// 각 Job에 순차로 적용되지 않는다. 막힌 Job 5개와 100ms 예산이면 호출은
+// 약 100ms(500ms가 아님)에 반환되어야 한다 — 여기 회귀가 생기면 graceful
+// shutdown 시간이 조용히 길어진다.
 func TestRegistry_WaitAll_ParallelDeadline(t *testing.T) {
 	reg := New(context.Background())
 	for i := 0; i < 5; i++ {
@@ -155,9 +155,8 @@ func TestRegistry_WaitAll_ParallelDeadline(t *testing.T) {
 	}
 }
 
-// TestRegistry_WaitAll_ReturnsEarlyWhenAllDone: when every active job
-// finishes before the deadline, WaitAll must return immediately (no
-// pointless deadline wait).
+// TestRegistry_WaitAll_ReturnsEarlyWhenAllDone: 모든 active Job이 deadline
+// 이전에 끝나면 WaitAll은 즉시 반환해야 한다(쓸데없는 deadline 대기 금지).
 func TestRegistry_WaitAll_ReturnsEarlyWhenAllDone(t *testing.T) {
 	reg := New(context.Background())
 	jobs := make([]*Job, 3)
@@ -182,8 +181,8 @@ func TestRegistry_WaitAll_ReturnsEarlyWhenAllDone(t *testing.T) {
 }
 
 func TestRegistry_List_SortedByCreated(t *testing.T) {
-	// Sanity check on the sort guarantee List makes — it is what the API
-	// handler depends on for stable client-side row ordering.
+	// List가 보장하는 정렬에 대한 sanity check — API 핸들러는 안정적인
+	// 클라이언트 행 순서를 위해 이 보장에 의존한다.
 	reg := New(context.Background())
 	first, _ := reg.Create("dest", []string{"u"})
 	time.Sleep(2 * time.Millisecond)
