@@ -58,7 +58,7 @@ func TestMoveFile_ConflictAddsSuffix(t *testing.T) {
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
-	// existing file untouched
+	// 기존 파일은 그대로 유지되어야 한다.
 	data, _ := os.ReadFile(filepath.Join(dest, "file.txt"))
 	if string(data) != "old" {
 		t.Errorf("existing file overwritten: %q", data)
@@ -140,7 +140,7 @@ func TestMoveFile_SidecarsRenamedOnConflict(t *testing.T) {
 	writeFile(t, src, []byte("video"))
 	writeFile(t, filepath.Join(srcDir, ".thumb", "clip.mp4.jpg"), []byte("thumb"))
 	writeFile(t, filepath.Join(srcDir, ".thumb", "clip.mp4.jpg.dur"), []byte("99.0"))
-	// existing dest file forces _1 suffix
+	// dest에 기존 파일이 있으니 _1 접미사가 붙어야 한다.
 	writeFile(t, filepath.Join(destDir, "clip.mp4"), []byte("existing"))
 
 	got, err := MoveFile(src, destDir)
@@ -218,7 +218,7 @@ func TestMoveDir_DestExists(t *testing.T) {
 	if !errors.Is(err, ErrDestExists) {
 		t.Errorf("got %v, want ErrDestExists", err)
 	}
-	// src untouched
+	// src는 그대로 남아야 한다.
 	if _, err := os.Stat(srcDir); err != nil {
 		t.Errorf("src removed despite rejected move: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestMoveDir_Circular_Descendant(t *testing.T) {
 }
 
 func TestMoveDir_PrefixFalsePositive(t *testing.T) {
-	// /tmp/a → /tmp/ab must succeed: ab is NOT a descendant of a.
+	// /tmp/a → /tmp/ab 이동은 성공해야 한다: ab는 a의 하위가 아니다.
 	root := t.TempDir()
 	srcDir := filepath.Join(root, "a")
 	destDir := filepath.Join(root, "ab")
@@ -371,4 +371,35 @@ func TestMoveFile_ErrorCases(t *testing.T) {
 			t.Errorf("got %v, want ErrDestNotFound", err)
 		}
 	})
+}
+
+func TestNameWithSuffix(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		attempt int
+		want    string
+	}{
+		{"attempt 0 returns name unchanged", "foo.png", 0, "foo.png"},
+		{"attempt 1 inserts _1 before ext", "foo.png", 1, "foo_1.png"},
+		{"attempt 42 inserts _42", "foo.png", 42, "foo_42.png"},
+		{"negative attempt returns name unchanged", "foo.png", -1, "foo.png"},
+		{"no ext", "README", 1, "README_1"},
+		{"compound ext splits only last segment", "foo.tar.gz", 1, "foo.tar_1.gz"},
+		{"full path preserves dir", "/data/photos/foo.png", 3, "/data/photos/foo_3.png"},
+		// dotfile 경계 케이스 — filepath.Ext(".gitignore")는 ".gitignore"를
+		// 반환해 stem이 비어버린다. 기존 renameToUniqueDest도 같은 모양을
+		// 만들어낸다. 실제로 dotfile은 validateName carveout에서 미리 걸러져
+		// 이 헬퍼까지 오지 않지만, 회귀 방지를 위해 동작을 여기서 고정한다.
+		{"dotfile with no other dot", ".gitignore", 1, "_1.gitignore"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := NameWithSuffix(tc.input, tc.attempt)
+			if got != tc.want {
+				t.Errorf("NameWithSuffix(%q, %d) = %q, want %q",
+					tc.input, tc.attempt, got, tc.want)
+			}
+		})
+	}
 }

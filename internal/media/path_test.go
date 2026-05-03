@@ -31,7 +31,7 @@ func TestSafePath(t *testing.T) {
 		"../../etc/passwd",
 		"../../../etc/shadow",
 		"/../../etc/passwd",
-		// sibling directory: /data is a prefix of /data2 but must be rejected
+		// 형제 디렉터리: /data가 /data2의 prefix라도 거부되어야 한다.
 		"/../data2/evil",
 	}
 	for _, rel := range traversal {

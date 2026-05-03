@@ -11,20 +11,21 @@ import {
 } from './state.js';
 import {
   esc, splitExtension, parentDir, rewritePathAfterFolderRename,
+  validateRenameInput,
 } from './util.js';
 
-// Tracks whether the active drag is a single folder. Folders take a separate
-// PATCH endpoint and a separate self/descendant-rejection rule, so the drop
-// handler needs this even before reading the dataTransfer payload.
+// 진행 중 drag가 단일 폴더인지 추적한다. 폴더는 별도의 PATCH 엔드포인트와
+// 자기/후손 거부 규칙을 사용하므로, drop 핸들러가 dataTransfer 페이로드를
+// 읽기 전에도 이 정보가 필요하다.
 let dragSrcIsDir = false;
 
 let _browse = null;
 let _loadTree = null;
 
-// ── Upload ────────────────────────────────────────────────────────────────────
-// Internal card drags carry our custom MIME but no Files; external OS drags
-// carry Files. Gate on Files so dragging an internal file over the upload
-// zone doesn't light it up.
+// ── 업로드 ───────────────────────────────────────────────────────────────────
+// 내부 카드 drag는 커스텀 MIME을 갖지만 Files는 없다. 외부 OS drag는 Files를
+// 갖는다. Files로 게이트해, 내부 파일을 업로드 zone 위로 끌었을 때 zone이
+// 강조되지 않게 한다.
 function isExternalFileDrag(e) {
   return Array.from(e.dataTransfer.types).includes('Files');
 }
@@ -33,10 +34,9 @@ function uploadFiles(files) {
   Array.from(files).forEach(file => uploadOne(file));
 }
 
-// annotateUploadResult inspects the upload response and appends an inline
-// note for PNG → JPG auto-conversion outcomes (SPEC §2.8.1). Returns the
-// linger time before the progress row should be removed — longer when there
-// is something for the user to read.
+// annotateUploadResult는 업로드 응답을 검사해 PNG → JPG 자동 변환 결과
+// (SPEC §2.8.1)에 대한 인라인 메모를 덧붙인다. 진행 행이 제거되기 전 머무는
+// 시간을 반환한다 — 사용자가 읽을 내용이 있으면 더 길게.
 function annotateUploadResult(container, responseText) {
   let resp;
   try { resp = JSON.parse(responseText); } catch { return 1500; }
@@ -91,7 +91,7 @@ function uploadOne(file) {
   xhr.send(form);
 }
 
-// ── Folder Create ─────────────────────────────────────────────────────────────
+// ── 폴더 생성 ────────────────────────────────────────────────────────────────
 function openFolderModal() {
   $.folderNameInput.value = '';
   $.folderError.textContent = '';
@@ -111,6 +111,11 @@ async function submitCreateFolder() {
   const name = $.folderNameInput.value.trim();
   if (!name) {
     showFolderError('폴더 이름을 입력하세요.');
+    return;
+  }
+  const nameErr = validateRenameInput(name);
+  if (nameErr) {
+    showFolderError(nameErr);
     return;
   }
   folderSubmitting = true;
@@ -141,7 +146,7 @@ function showFolderError(msg) {
   $.folderError.classList.remove('hidden');
 }
 
-// ── Delete ────────────────────────────────────────────────────────────────────
+// ── 삭제 ─────────────────────────────────────────────────────────────────────
 // opts.skipBrowse=true면 호출자(라이트박스)가 자체 mutation 후 _browse를
 // 직접 호출하므로 중복 fetch를 피한다. return: 성공 true / 취소·실패 false.
 export async function deleteFile(path, opts = {}) {
@@ -159,9 +164,9 @@ export async function deleteFolder(path) {
   if (!confirm(`폴더 안의 모든 파일이 삭제됩니다.\n${path}\n\n계속하시겠습니까?`)) return;
   const res = await fetch('/api/folder?path=' + encodeURIComponent(path), { method: 'DELETE' });
   if (res.ok) {
-    // If currentPath sat inside (or was) the deleted folder, browse() would
-    // 404 on a path that no longer exists. Fall back to the parent so the
-    // user lands somewhere valid.
+    // currentPath가 삭제된 폴더 내부였거나 그 폴더 자체였다면, browse()는
+    // 더 이상 존재하지 않는 경로에 대해 404를 받는다. 사용자가 유효한
+    // 위치에 안착하도록 부모로 폴백한다.
     if (currentPath === path || currentPath.startsWith(path + '/')) {
       _browse(parentDir(path));
     } else {
@@ -173,7 +178,7 @@ export async function deleteFolder(path) {
   }
 }
 
-// ── Drag and Drop (file move) ────────────────────────────────────────────────
+// ── Drag and Drop (파일 이동) ────────────────────────────────────────────────
 function isInternalMove(e) {
   return Array.from(e.dataTransfer.types).includes(DND_MIME);
 }
@@ -186,7 +191,7 @@ function selectedMovePathsFor(entry) {
 export function attachDragHandlers(el, entry) {
   el.draggable = true;
   el.addEventListener('dragstart', e => {
-    // Folders are always single-target. Files can carry the active selection.
+    // 폴더는 항상 단일 대상이다. 파일은 활성 selection을 함께 운반할 수 있다.
     const isDir = !!entry.is_dir;
     const paths = isDir ? [entry.path] : selectedMovePathsFor(entry);
     setDragSrcPath(entry.path);
@@ -194,7 +199,7 @@ export function attachDragHandlers(el, entry) {
     dragSrcIsDir = isDir;
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData(DND_MIME, JSON.stringify({ src: entry.path, paths, isDir }));
-    // Firefox won't initiate a drag without text/plain or text/uri-list set.
+    // Firefox는 text/plain이나 text/uri-list가 설정되지 않으면 drag를 시작하지 않는다.
     e.dataTransfer.setData('text/plain', paths.join('\n'));
     el.classList.add('dragging');
   });
@@ -209,8 +214,8 @@ export function attachDragHandlers(el, entry) {
 function canDropMoveTo(destPath) {
   const paths = dragSrcPaths.length ? dragSrcPaths : (dragSrcPath ? [dragSrcPath] : []);
   if (!paths.length) return true;
-  // Folder drag: forbid dropping onto self or any descendant. Separator boundary
-  // ensures /a/b is not flagged as inside /a/bc. Mirrors media.MoveDir.
+  // 폴더 drag: 자기 자신이나 후손에 drop하는 것을 금지한다. separator 경계로
+  // /a/b가 /a/bc 안에 있다고 잘못 인식되는 것을 막는다. media.MoveDir 미러.
   if (dragSrcIsDir) {
     for (const p of paths) {
       if (destPath === p) return false;
@@ -263,8 +268,8 @@ export function attachDropHandlers(el, destPath) {
 }
 
 async function moveFolder(srcPath, destDir) {
-  // Defensive guards — same rules the server enforces, so we surface friendly
-  // messages without a round trip when the UI race lets a drop slip through.
+  // 방어적 가드 — 서버가 강제하는 것과 같은 규칙. UI race로 drop이 새어
+  // 나갔을 때 round-trip 없이 친절한 메시지를 표면화한다.
   if (parentDir(srcPath) === destDir) return;
   if (destDir === srcPath || destDir.startsWith(srcPath + '/')) return;
   try {
@@ -281,7 +286,7 @@ async function moveFolder(srcPath, destDir) {
     }
     const data = await res.json().catch(() => null);
     const newPath = data && data.path ? data.path : srcPath;
-    // If the moved folder was currentPath or an ancestor, the URL is now stale.
+    // 이동된 폴더가 currentPath나 그 조상이었다면 URL은 이제 stale 상태다.
     const target = rewritePathAfterFolderRename(srcPath, newPath, currentPath);
     if (target !== currentPath) {
       _browse(target);
@@ -306,7 +311,7 @@ const FOLDER_MOVE_ERROR_LABELS = {
 
 async function moveFiles(srcPaths, destDir) {
   const paths = Array.from(new Set(srcPaths)).filter(path => parentDir(path) !== destDir);
-  if (paths.length === 0) return; // defensive — also blocked by backend
+  if (paths.length === 0) return; // 방어적 — 백엔드도 어차피 막는다
   const failed = [];
   try {
     for (const path of paths) {
@@ -322,7 +327,7 @@ async function moveFiles(srcPaths, destDir) {
       }
       selectedPaths.delete(path);
     }
-    // Folder structure unchanged on file move; only the listing needs a refresh.
+    // 파일 이동에서는 폴더 구조가 바뀌지 않는다. 목록만 새로고침하면 된다.
     _browse(currentPath, false);
     if (failed.length) {
       alert(`이동 실패 ${failed.length}개\n` + failed.join('\n'));
@@ -332,7 +337,7 @@ async function moveFiles(srcPaths, destDir) {
   }
 }
 
-// ── Rename ────────────────────────────────────────────────────────────────────
+// ── 이름 변경 ────────────────────────────────────────────────────────────────
 let renameTarget = null;
 let renameSubmitting = false;
 
@@ -367,6 +372,11 @@ async function submitRename() {
     showRenameError('이름을 입력하세요.');
     return;
   }
+  const nameErr = validateRenameInput(newBase);
+  if (nameErr) {
+    showRenameError(nameErr);
+    return;
+  }
   const entry = renameTarget;
   const url = entry.is_dir
     ? '/api/folder?path=' + encodeURIComponent(entry.path)
@@ -384,8 +394,8 @@ async function submitRename() {
       if (entry.is_dir) {
         const data = await res.json().catch(() => null);
         const newPath = data && data.path ? data.path : entry.path;
-        // If the renamed folder is currentPath or an ancestor of it, the
-        // browser is sitting on a now-defunct URL — rewrite to the new prefix.
+        // 이름이 바뀐 폴더가 currentPath이거나 그 조상이라면 브라우저는
+        // 이제 무의미해진 URL에 있다 — 새 prefix로 다시 쓴다.
         const target = rewritePathAfterFolderRename(entry.path, newPath, currentPath);
         if (target !== currentPath) {
           _browse(target);
@@ -423,7 +433,7 @@ export function wireFileOps(deps) {
   _browse = deps.browse;
   _loadTree = deps.loadTree;
 
-  // Upload
+  // 업로드
   $.uploadZone.addEventListener('dragover', e => {
     if (!isExternalFileDrag(e)) return;
     e.preventDefault();
@@ -441,7 +451,7 @@ export function wireFileOps(deps) {
     $.fileInput.value = '';
   });
 
-  // Folder create
+  // 폴더 생성
   $.newFolderBtn.addEventListener('click', openFolderModal);
   $.folderCancelBtn.addEventListener('click', closeFolderModal);
   $.folderModal.addEventListener('click', e => {
@@ -452,7 +462,7 @@ export function wireFileOps(deps) {
     if (e.key === 'Enter') submitCreateFolder();
   });
 
-  // Rename
+  // 이름 변경
   $.renameCancelBtn.addEventListener('click', closeRenameModal);
   $.renameModal.addEventListener('click', e => {
     if (e.target === $.renameModal) closeRenameModal();

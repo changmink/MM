@@ -1,4 +1,4 @@
-package handler
+package convertapi
 
 import (
 	"context"
@@ -9,10 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"file_server/internal/convert"
+	"file_server/internal/handlerutil"
 	"file_server/internal/media"
 )
 
@@ -26,8 +26,8 @@ type convertRequest struct {
 	DeleteOriginal bool     `json:"delete_original"`
 }
 
-// SSE event shapes. The wire schema mirrors import_url.go's sseStart/etc. but
-// with `path` instead of `url` since the input is a local file.
+// SSE 이벤트 형태. wire 스키마는 import_url.go의 sseStart 등과 같지만,
+// 입력이 로컬 파일이라 `url` 대신 `path`를 쓴다.
 type convStart struct {
 	Phase string `json:"phase"`
 	Index int    `json:"index"`
@@ -66,7 +66,7 @@ type convSummary struct {
 	Failed    int    `json:"failed"`
 }
 
-func (h *Handler) handleConvert(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleConvert(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
 		return
@@ -86,26 +86,12 @@ func (h *Handler) handleConvert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, r, http.StatusInternalServerError, "streaming unsupported", nil)
+	flusher := assertFlusher(w, r)
+	if flusher == nil {
 		return
 	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-
-	// emit serializes SSE writes between the handler goroutine (start/done/
-	// error/summary) and the per-file progress writer. Progress samples use
-	// a drop-on-full channel so a slow client can never stall ffmpeg.
-	var writeMu sync.Mutex
-	emit := func(payload any) {
-		writeMu.Lock()
-		defer writeMu.Unlock()
-		writeSSEEvent(w, flusher, payload)
-	}
+	writeSSEHeaders(w)
+	emit := sseEmitter(w, flusher)
 
 	succeeded, failed := 0, 0
 	for i, p := range body.Paths {
@@ -121,9 +107,9 @@ func (h *Handler) handleConvert(w http.ResponseWriter, r *http.Request) {
 	emit(convSummary{Phase: "summary", Succeeded: succeeded, Failed: failed})
 }
 
-// convertOneSSE drives one TS → MP4 conversion and emits exactly one terminal
-// event (done or error) plus zero-or-one start and zero-or-more progress
-// events. Returns true on success.
+// convertOneSSE는 TS → MP4 변환 하나를 구동하고 정확히 한 번의 terminal
+// 이벤트(done 또는 error), start 0~1회, progress 0회 이상을 발행한다.
+// 성공 시 true를 반환한다.
 func (h *Handler) convertOneSSE(parentCtx context.Context, emit func(any),
 	index int, relPath string, deleteOriginal bool) bool {
 
@@ -162,17 +148,16 @@ func (h *Handler) convertOneSSE(parentCtx context.Context, emit func(any),
 		return emitErr("write_error")
 	}
 
-	unlock := h.lockConvertKey(abs)
+	unlock := handlerutil.LockPath(h.convertLocks, abs)
 	defer unlock()
 
-	// Re-check after lock: another request might have produced the .mp4 while
-	// we were waiting.
+	// 잠금 후 재확인: 우리가 대기하는 동안 다른 요청이 .mp4를 만들었을 수 있다.
 	if _, err := os.Stat(finalPath); err == nil {
 		return emitErr("already_exists")
 	}
 
-	// Relative path of the final MP4 for the done event. "/"-prefixed like
-	// the request input so the client can point loadBrowse at the same folder.
+	// done 이벤트용 최종 MP4의 상대 경로. 요청 입력과 마찬가지로 "/"로 시작해
+	// 클라이언트가 loadBrowse를 같은 폴더로 가리킬 수 있게 한다.
 	finalRel := filepath.Join(filepath.Dir(relPath), finalName)
 	finalRel = filepath.ToSlash(finalRel)
 	if !strings.HasPrefix(finalRel, "/") {
@@ -223,10 +208,9 @@ func (h *Handler) convertOneSSE(parentCtx context.Context, emit func(any),
 				"path", relPath, "err", err)
 			warnings = append(warnings, "delete_original_failed")
 		} else {
-			// Best-effort sidecar cleanup. The sidecars are regenerated on
-			// demand for the new .mp4, so failure here doesn't require a
-			// warning — the only observable effect is a stale thumb that the
-			// user can clear by touching the folder.
+			// best-effort 사이드카 정리. 사이드카는 새 .mp4에 대해 필요 시
+			// 재생성되므로 여기서 실패해도 경고가 필요하지 않다. 관측 가능한
+			// 유일한 효과는 잔재 thumb뿐이며, 사용자가 폴더를 건드리면 제거된다.
 			thumbDir := filepath.Join(srcDir, ".thumb")
 			for _, suffix := range []string{".jpg", ".jpg.dur"} {
 				sidecar := filepath.Join(thumbDir, origName+suffix)
@@ -245,9 +229,9 @@ func (h *Handler) convertOneSSE(parentCtx context.Context, emit func(any),
 	return true
 }
 
-// classifyConvertError maps runtime errors to public SSE codes. Parent ctx is
-// checked first so client disconnect (canceled) wins over whatever ffmpeg
-// happened to report on its way out.
+// classifyConvertError는 런타임 에러를 공개 SSE 코드로 매핑한다. 부모 ctx를
+// 먼저 검사해, 클라이언트 disconnect(canceled)가 ffmpeg가 종료 경로에서
+// 마침 보고한 다른 에러보다 우선하게 한다.
 func classifyConvertError(err error, parentCtx context.Context) string {
 	if parentCtx.Err() != nil && errors.Is(parentCtx.Err(), context.Canceled) {
 		return "canceled"
@@ -267,9 +251,9 @@ func classifyConvertError(err error, parentCtx context.Context) string {
 	return "write_error"
 }
 
-// logConvertError writes a structured server log for an aborted conversion.
-// Users only ever see the opaque code; operators can find root cause (ffmpeg
-// stderr, I/O error) here.
+// logConvertError는 중단된 변환에 대해 구조화된 서버 로그를 남긴다.
+// 사용자는 불투명 코드만 받는다 — 운영자는 여기서 근본 원인(ffmpeg stderr,
+// I/O 에러)을 찾을 수 있다.
 func logConvertError(relPath string, err error, code string) {
 	attrs := []any{"code", code, "path", relPath, "err", err.Error()}
 	var ffErr *convert.FFmpegExitError
@@ -279,12 +263,3 @@ func logConvertError(relPath string, err error, code string) {
 	slog.Warn("convert failed", attrs...)
 }
 
-// lockConvertKey serializes producers for the same source TS path. Matches
-// stream.go:lockStreamKey — leaves the map entry in place after unlock,
-// bounded by the set of unique TS files on disk.
-func (h *Handler) lockConvertKey(key string) func() {
-	v, _ := h.convertLocks.LoadOrStore(key, &sync.Mutex{})
-	mu := v.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
-}

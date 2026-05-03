@@ -2,14 +2,15 @@ package handler
 
 import (
 	"context"
-	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"runtime"
 	"sync"
 	"time"
 
+	handlerconvert "file_server/internal/handler/convert"
+	handlerimport "file_server/internal/handler/import"
+	"file_server/internal/handlerutil"
 	"file_server/internal/importjob"
 	"file_server/internal/settings"
 	"file_server/internal/thumb"
@@ -21,22 +22,24 @@ type Handler struct {
 	thumbPool    *thumb.Pool
 	urlClient    *http.Client
 	settings     *settings.Store
-	serverCtx    context.Context     // lifetime of the server process; jobs derive their context from this
-	registry     *importjob.Registry // in-memory URL-import job state; survives request lifecycle
-	streamLocks  sync.Map            // cachePath -> *sync.Mutex; serializes ffmpeg per cache key
-	convertLocks sync.Map            // absSrcPath -> *sync.Mutex; serializes TS → MP4 per source
-	webpLocks    sync.Map            // absSrcPath -> *sync.Mutex; serializes clip → WebP per source
-	importSem    chan struct{}       // size-1 semaphore; serializes URL import batches process-wide
+	serverCtx    context.Context     // 서버 프로세스 수명. Job들이 여기서 컨텍스트를 파생한다.
+	registry     *importjob.Registry // URL import Job 인메모리 상태. 요청 수명을 넘어 살아남는다.
+	streamLocks  sync.Map            // cachePath -> *sync.Mutex. cache key별로 ffmpeg를 직렬화한다.
+	convertLocks sync.Map            // absSrcPath -> *sync.Mutex. 원본별로 TS → MP4를 직렬화한다.
+	webpLocks    sync.Map            // absSrcPath -> *sync.Mutex. 원본별로 clip → WebP를 직렬화한다.
+	importSem    chan struct{}       // 크기 1 세마포어. 프로세스 단위로 URL import 배치를 직렬화한다.
+	importAPI    *handlerimport.Handler
+	convertAPI   *handlerconvert.Handler
 }
 
-// Option configures a Handler. Use with Register so tests can keep their
-// terse 4-arg call sites while production wiring (main.go) opts in to extras
-// like a server-lifetime context for graceful shutdown.
+// Option은 Handler를 구성한다. Register와 함께 써서 테스트가 짧은 4-인자
+// 호출을 유지하는 동시에, 프로덕션 wiring(main.go)이 graceful shutdown용
+// 서버 수명 컨텍스트 같은 추가 옵션을 켤 수 있게 해준다.
 type Option func(*Handler)
 
-// WithServerCtx attaches a server-lifetime context. Cancelling it (typically
-// from a SIGINT/SIGTERM handler) propagates to long-lived per-handler state
-// added in later phases (J3+: import job registry).
+// WithServerCtx는 서버 수명 컨텍스트를 부착한다. 이 컨텍스트를 취소하면
+// (보통 SIGINT/SIGTERM 핸들러에서) 이후 단계에서 추가된 핸들러 단위 장기
+// 상태(J3+: import Job 레지스트리)에 전파된다.
 func WithServerCtx(ctx context.Context) Option {
 	return func(h *Handler) {
 		if ctx == nil {
@@ -46,9 +49,9 @@ func WithServerCtx(ctx context.Context) Option {
 	}
 }
 
-// WithURLClient overrides the URL import HTTP client. Production uses the
-// default protected urlfetch client; tests can inject a localhost-capable
-// client without widening the production path.
+// WithURLClient는 URL import HTTP 클라이언트를 오버라이드한다. 프로덕션은
+// 기본 보호된 urlfetch 클라이언트를 사용한다. 테스트는 localhost를 허용하는
+// 클라이언트를 주입할 수 있으며, 프로덕션 경로를 넓히지 않는다.
 func WithURLClient(client *http.Client) Option {
 	return func(h *Handler) {
 		if client == nil {
@@ -58,10 +61,10 @@ func WithURLClient(client *http.Client) Option {
 	}
 }
 
-// Register wires all API routes. settingsStore may be nil in tests that do
-// not exercise URL import or /api/settings — callers that pass nil get the
-// hard-coded Default() values from settings. Pass WithServerCtx in production
-// so graceful shutdown can cancel long-lived background work.
+// Register는 모든 API 라우트를 연결한다. URL import나 /api/settings를
+// 검증하지 않는 테스트에서는 settingsStore가 nil이어도 된다 — nil을 넘기면
+// settings.Default() 하드코드 값이 사용된다. 프로덕션에서는 graceful
+// shutdown이 장기 백그라운드 작업을 취소할 수 있도록 WithServerCtx를 전달한다.
 func Register(mux *http.ServeMux, dataDir, webDir string, settingsStore *settings.Store, opts ...Option) *Handler {
 	h := &Handler{
 		dataDir:   dataDir,
@@ -74,17 +77,17 @@ func Register(mux *http.ServeMux, dataDir, webDir string, settingsStore *setting
 	for _, opt := range opts {
 		opt(h)
 	}
-	// Registry must be created after options apply so it inherits the
-	// (possibly overridden) serverCtx and propagates a graceful shutdown
-	// cancel into every active job.
+	// Registry는 옵션 적용 이후에 만들어야 (필요 시 오버라이드된) serverCtx를
+	// 상속하고, graceful shutdown 취소가 모든 active Job에 전파된다.
 	h.registry = importjob.New(h.serverCtx)
+	h.importAPI = handlerimport.New(h.dataDir, h.thumbPool, h.urlClient, h.settings, h.registry, h.importSem)
+	h.convertAPI = handlerconvert.New(h.dataDir, &h.convertLocks, &h.webpLocks)
 
-	// Read-only routes pass through directly. Mutating routes go through
-	// requireSameOrigin so a request whose Origin (when present) does not
-	// match the server's host is rejected before any state changes — a
-	// belt-and-suspenders CSRF mitigation for the no-auth single-user
-	// LAN deployment. GET/HEAD always pass; missing Origin (curl, server-
-	// side calls) also passes since CSRF requires a browser.
+	// 읽기 전용 라우트는 곧장 통과한다. 변경 라우트는 requireSameOrigin을
+	// 거쳐, Origin이 있는 경우 서버 호스트와 일치하지 않으면 상태 변경 전에
+	// 거부된다 — 인증이 없는 단일 사용자 LAN 배포를 위한 belt-and-suspenders
+	// CSRF 완화책이다. GET/HEAD는 항상 통과한다. Origin이 없는 경우(curl,
+	// 서버 측 호출)도 통과한다 — CSRF는 브라우저가 있어야 성립한다.
 	mux.HandleFunc("/api/browse", h.handleBrowse)
 	mux.HandleFunc("/api/tree", h.handleTree)
 	mux.HandleFunc("/api/stream", h.handleStream)
@@ -92,26 +95,26 @@ func Register(mux *http.ServeMux, dataDir, webDir string, settingsStore *setting
 	mux.HandleFunc("/api/upload", requireSameOrigin(h.handleUpload))
 	mux.HandleFunc("/api/file", requireSameOrigin(h.handleFile))
 	mux.HandleFunc("/api/folder", requireSameOrigin(h.handleFolder))
-	mux.HandleFunc("/api/import-url", requireSameOrigin(h.handleImportURL))
-	mux.HandleFunc("/api/import-url/jobs", requireSameOrigin(h.handleJobsRoot))
-	mux.HandleFunc("/api/import-url/jobs/", requireSameOrigin(h.handleJobsByID))
-	mux.HandleFunc("/api/convert", requireSameOrigin(h.handleConvert))
-	mux.HandleFunc("/api/convert-image", requireSameOrigin(h.handleConvertImage))
-	mux.HandleFunc("/api/convert-webp", requireSameOrigin(h.handleConvertWebP))
+	mux.HandleFunc("/api/import-url", requireSameOrigin(h.importAPI.HandleImportURL))
+	mux.HandleFunc("/api/import-url/jobs", requireSameOrigin(h.importAPI.HandleJobsRoot))
+	mux.HandleFunc("/api/import-url/jobs/", requireSameOrigin(h.importAPI.HandleJobsByID))
+	mux.HandleFunc("/api/convert", requireSameOrigin(h.convertAPI.HandleConvert))
+	mux.HandleFunc("/api/convert-image", requireSameOrigin(h.convertAPI.HandleConvertImage))
+	mux.HandleFunc("/api/convert-webp", requireSameOrigin(h.convertAPI.HandleConvertWebP))
 	mux.HandleFunc("/api/settings", requireSameOrigin(h.handleSettings))
 
 	mux.Handle("/", http.FileServer(http.Dir(webDir)))
 	return h
 }
 
-// requireSameOrigin wraps a handler so requests with a cross-origin Origin
-// header are rejected with 403 before reaching the inner handler. Safe-method
-// requests (GET/HEAD) always pass through — they cannot mutate state and
-// EventSource needs them. Missing Origin is treated as same-origin (curl,
-// SSR, internal calls). The CLAUDE.md threat model is single-user LAN with
-// no auth; a malicious page on another origin should not be able to issue
-// POST/PATCH/DELETE/PUT against the file server even if the user happens
-// to visit it while having the file server open in another tab.
+// requireSameOrigin은 핸들러를 감싸서 cross-origin Origin 헤더를 가진
+// 요청이 inner 핸들러에 닿기 전에 403으로 거부되도록 한다. safe-method
+// 요청(GET/HEAD)은 항상 통과한다 — 상태를 변형할 수 없고 EventSource가
+// 필요하다. Origin이 없는 경우는 same-origin으로 간주한다(curl, SSR,
+// 내부 호출). CLAUDE.md의 위협 모델은 인증이 없는 단일 사용자 LAN이다 —
+// 사용자가 파일 서버를 다른 탭에 열어둔 채 다른 origin의 악성 페이지를
+// 방문하더라도, 그 페이지가 파일 서버에 POST/PATCH/DELETE/PUT을 발사할
+// 수 있어선 안 된다.
 func requireSameOrigin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -124,13 +127,13 @@ func requireSameOrigin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// sameOrigin reports whether the request's Origin header (if present)
-// matches the request's Host. An absent Origin defers to Sec-Fetch-Site
-// using an allowlist: only "" (curl, server-side, pre-2020 browsers),
-// "same-origin", and "none" (user-typed URL) pass. "same-site" (sibling
-// subdomain on the same eTLD+1), "cross-site", "cross-origin", and any
-// future/unknown value fail-closed so a forward-compat addition can't
-// silently widen the surface.
+// sameOrigin은 요청의 Origin 헤더(있다면)가 요청의 Host와 일치하는지
+// 보고한다. Origin이 없으면 Sec-Fetch-Site에 위임하되 allowlist 방식이다 —
+// 통과하는 값은 ""(curl, 서버 측, 2020년 이전 브라우저), "same-origin",
+// "none"(사용자가 직접 입력한 URL)뿐이다. "same-site"(같은 eTLD+1의 형제
+// 서브도메인), "cross-site", "cross-origin"과 알 수 없는 모든 값은
+// fail-closed로 거부해, 향후 호환을 위한 새 값이 surface를 조용히 넓히지
+// 못하게 한다.
 func sameOrigin(r *http.Request) bool {
 	o := r.Header.Get("Origin")
 	if o == "" {
@@ -148,9 +151,9 @@ func sameOrigin(r *http.Request) bool {
 	return u.Host == r.Host
 }
 
-// settingsSnapshot returns the current URL import settings, falling back to
-// defaults when the store is nil (test harness) so every request path has a
-// usable value without null-checks.
+// settingsSnapshot은 현재 URL import 설정을 반환한다. store가 nil(테스트
+// harness)이면 기본값으로 폴백해, null 검사 없이도 모든 요청 경로가 사용
+// 가능한 값을 갖게 한다.
 func (h *Handler) settingsSnapshot() settings.Settings {
 	if h.settings == nil {
 		return settings.Default()
@@ -158,10 +161,10 @@ func (h *Handler) settingsSnapshot() settings.Settings {
 	return h.settings.Snapshot()
 }
 
-// Close stops background workers (thumbnail pool + import jobs). Safe to call
-// once per Handler. CancelAll/WaitAll ensures in-flight URL fetches unwind
-// before the thumbnail pool drains its queue, so half-finished imports do
-// not race the pool shutdown.
+// Close는 백그라운드 워커(썸네일 풀 + import Job)를 멈춘다. Handler당 한
+// 번만 호출해야 한다. CancelAll/WaitAll이 진행 중이던 URL fetch가 풀리는
+// 것을 보장한 뒤에야 썸네일 풀이 큐를 비우므로, 반쯤 끝난 import가 풀
+// shutdown과 race하지 않는다.
 func (h *Handler) Close() {
 	if h.registry != nil {
 		h.registry.CancelAll()
@@ -172,20 +175,13 @@ func (h *Handler) Close() {
 	}
 }
 
-// writeError emits a JSON error body and (for 5xx, or any non-nil err) logs
-// the underlying cause with request context. Pass nil for err on plain 4xx
-// validation failures where the message is the whole story.
+// writeJSON / writeError는 handlerutil로 향하는 얇은 포워더다 — 패키지 내
+// 호출 사이트(browse.go·files.go·folders.go 등)가 짧은 이름을 그대로 쓸 수
+// 있게 유지하면서, 로직은 handlerutil의 단일 출처로 모은다.
+func writeJSON(w http.ResponseWriter, r *http.Request, code int, body any) {
+	handlerutil.WriteJSON(w, r, code, body)
+}
+
 func writeError(w http.ResponseWriter, r *http.Request, code int, msg string, err error) {
-	if code >= 500 || err != nil {
-		slog.Error("request failed",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", code,
-			"msg", msg,
-			"err", err,
-		)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	handlerutil.WriteError(w, r, code, msg, err)
 }

@@ -2,7 +2,9 @@
 
 > 부모 SPEC: [`/SPEC.md`](../SPEC.md). 이 문서는 **§2~§3 전반의 프론트엔드 구현 구조**만 다룬다 — 제품 행동·API·SSE 이벤트 스키마는 변경하지 않는다.
 >
-> **Status: draft** — 사용자 승인 대기.
+> **Status: implemented** — 12개 spec 목표 + 후속 5개(`convertImage` / `convertWebp` / `sseConvertModal` / `modalDismiss` / `dragSelect`) 추가 분할로 총 17개 모듈 머지 완료.
+>
+> **Note:** 본 spec은 historical record. 본문에 등장하는 "12개 .js 파일" 수치(§3.1, §7 Acceptance Criteria 포함)와 cache-bust 버전(`?v=29`)은 분할 시점 baseline이며 갱신하지 않는다. 현재 모듈 수는 17개, 현재 cache-bust 버전은 `web/index.html`이 단일 출처(작성 시점 `?v=41`).
 
 ## 1. Objective
 

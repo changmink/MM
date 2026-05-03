@@ -46,7 +46,7 @@ syncToolbarUI();
 const initPath = new URLSearchParams(location.search).get('path') || '/';
 browse(initPath, false);
 loadTree();
-// Restore in-progress URL imports from the server (Phase 20 J4). Independent
-// of browse/tree — safe to fire-and-forget; the badge appears asynchronously
-// when the response arrives.
+// 서버에서 진행 중인 URL import를 복원한다(Phase 20 J4). browse/tree와
+// 독립적이라 fire-and-forget으로 안전하다 — 응답이 도착하면 badge가
+// 비동기로 나타난다.
 bootstrapURLJobs();

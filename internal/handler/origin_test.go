@@ -8,9 +8,8 @@ import (
 	"testing"
 )
 
-// TestSameOrigin_Decision tables out the helper directly so the routing
-// integration tests below can stay focused on the wiring rather than the
-// header-parsing minutiae.
+// TestSameOrigin_Decision은 helper를 직접 테이블로 검증한다. 그래야 아래의
+// 라우팅 통합 테스트가 헤더 파싱 세부 대신 wiring에 집중할 수 있다.
 func TestSameOrigin_Decision(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -25,21 +24,21 @@ func TestSameOrigin_Decision(t *testing.T) {
 		{"different host", "http://evil.example", "", "localhost:8080", false},
 		{"different port", "http://localhost:9000", "", "localhost:8080", false},
 		{"unparseable origin", "://nope", "", "localhost:8080", false},
-		// Sec-Fetch-Site fallback when Origin is absent. Allowlist semantics:
-		// only "", "same-origin", and "none" pass.
+		// Origin이 없을 때의 Sec-Fetch-Site 폴백. allowlist 의미:
+		// "", "same-origin", "none"만 통과한다.
 		{"no origin, sec-fetch-site cross-site", "", "cross-site", "localhost:8080", false},
 		{"no origin, sec-fetch-site cross-origin", "", "cross-origin", "localhost:8080", false},
 		{"no origin, sec-fetch-site same-origin", "", "same-origin", "localhost:8080", true},
 		{"no origin, sec-fetch-site none", "", "none", "localhost:8080", true},
-		// Allowlist fail-closed cases: same-site (sibling subdomain), unknown
-		// future values, and case-mismatched header values must be rejected.
+		// allowlist fail-closed 케이스: same-site(형제 서브도메인), 알 수 없는
+		// 향후 값, 대소문자 불일치 헤더 값은 거부되어야 한다.
 		{"no origin, sec-fetch-site same-site", "", "same-site", "localhost:8080", false},
 		{"no origin, sec-fetch-site junk value", "", "garbage", "localhost:8080", false},
 		{"no origin, sec-fetch-site uppercase rejected", "", "Same-Origin", "localhost:8080", false},
-		// Origin present takes precedence over Sec-Fetch-Site.
+		// Origin이 있으면 Sec-Fetch-Site보다 우선한다.
 		{"matching origin overrides cross-site", "http://localhost:8080", "cross-site", "localhost:8080", true},
 		{"cross-origin origin overrides same-origin fetch-site", "http://evil.example", "same-origin", "localhost:8080", false},
-		// IPv6 host literal — locks the url.Parse round-trip on bracketed hosts.
+		// IPv6 호스트 리터럴 — 대괄호 호스트의 url.Parse 라운드트립을 고정한다.
 		{"ipv6 host match", "http://[::1]:8080", "", "[::1]:8080", true},
 	}
 	for _, tc := range cases {
@@ -60,11 +59,10 @@ func TestSameOrigin_Decision(t *testing.T) {
 	}
 }
 
-// TestRequireSameOrigin_RejectsCrossOriginMutations verifies the wiring on
-// representative endpoints from each method class. We don't need to hit
-// every route — the wrapper is the same — but we do want to catch a future
-// "forgot to wrap a new mutating route" regression by including one
-// example per method.
+// TestRequireSameOrigin_RejectsCrossOriginMutations은 각 메서드 클래스의
+// 대표 엔드포인트에서 wiring을 검증한다. 모든 라우트를 칠 필요는 없다
+// — 래퍼가 동일하다 — 하지만 메서드별로 한 예씩 포함해, 향후 "새 변경
+// 라우트를 wrap 빼먹은" 회귀를 잡을 수 있게 한다.
 func TestRequireSameOrigin_RejectsCrossOriginMutations(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
@@ -102,9 +100,9 @@ func TestRequireSameOrigin_RejectsCrossOriginMutations(t *testing.T) {
 	}
 }
 
-// TestRequireSameOrigin_AllowsSameOrigin and AllowsMissingOrigin: the
-// wrapper must not break legitimate same-origin requests or curl/test
-// invocations that omit the Origin header entirely.
+// TestRequireSameOrigin_AllowsSameOrigin과 AllowsMissingOrigin: 래퍼는
+// 정상 same-origin 요청이나, Origin 헤더를 전혀 보내지 않는 curl/test
+// 호출을 깨뜨려서는 안 된다.
 func TestRequireSameOrigin_AllowsSameOrigin(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
@@ -114,19 +112,19 @@ func TestRequireSameOrigin_AllowsSameOrigin(t *testing.T) {
 	body, _ := bytesBufferFromString(`{"urls":["https://example.com/x.jpg"]}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/import-url?path=/", body)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", "http://"+req.Host) // matches r.Host
+	req.Header.Set("Origin", "http://"+req.Host) // r.Host와 일치
 	rw := httptest.NewRecorder()
 	mux.ServeHTTP(rw, req)
-	// Origin matched → request flows into handleImportURL. We don't care
-	// about the eventual outcome here (the URL is bogus); only that the
-	// wrapper let it through. 403 specifically means rejection.
+	// Origin 일치 → 요청이 handleImportURL로 흘러간다. 여기서 최종 결과는
+	// 신경 쓰지 않는다(URL이 가짜다). 래퍼가 통과시켰는지가 핵심이며, 403이
+	// 명확히 거부를 의미한다.
 	if rw.Code == http.StatusForbidden {
 		t.Errorf("same-origin request rejected: %s", rw.Body.String())
 	}
 }
 
-// TestRequireSameOrigin_AllowsCrossOriginGET — read-only methods bypass the
-// check so EventSource (GET) and curl (no Origin) still work.
+// TestRequireSameOrigin_AllowsCrossOriginGET — 읽기 전용 메서드는 검사를
+// 우회한다. 그래야 EventSource(GET)와 curl(Origin 없음)이 정상 동작한다.
 func TestRequireSameOrigin_AllowsCrossOriginGET(t *testing.T) {
 	root := t.TempDir()
 	mux := http.NewServeMux()
@@ -142,8 +140,8 @@ func TestRequireSameOrigin_AllowsCrossOriginGET(t *testing.T) {
 	}
 }
 
-// bytesBufferFromString is a tiny helper to keep the test body construction
-// terse without pulling bytes/strings into the main test signature.
+// bytesBufferFromString은 테스트 시그니처에 bytes/strings를 끌어들이지 않고도
+// 본문 생성을 간결하게 유지하기 위한 작은 헬퍼다.
 func bytesBufferFromString(s string) (*bytes.Buffer, int) {
 	b := bytes.NewBufferString(s)
 	return b, b.Len()

@@ -1,5 +1,7 @@
 # Multimedia Server — Implementation Plan
 
+> **운영 정책:** 진행 추적은 `tasks/todo.md`. 본 문서는 phase별 완료 기준의 historical 누적이며 새 phase 추가 시에만 갱신.
+
 ## 의존성 그래프
 
 ```

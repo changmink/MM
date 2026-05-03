@@ -18,9 +18,9 @@ func requireFFprobe(t *testing.T) {
 	}
 }
 
-// makeTestMP4 synthesizes a 1-second 64x64 H.264 video. With audio: silent
-// AAC stereo track. The pix_fmt is forced to yuv420p so libwebp accepts the
-// input without an explicit -vf format conversion.
+// makeTestMP4는 1초짜리 64x64 H.264 영상을 합성한다. withAudio가 true면
+// 무음 AAC 스테레오 트랙을 함께 넣는다. pix_fmt는 yuv420p로 강제 — 그래야
+// libwebp가 별도 -vf 포맷 변환 없이 입력을 받아들인다.
 func makeTestMP4(t *testing.T, dir, name string, withAudio bool) string {
 	t.Helper()
 	requireFFmpeg(t)
@@ -43,7 +43,7 @@ func makeTestMP4(t *testing.T, dir, name string, withAudio bool) string {
 	return out
 }
 
-// makeTestGIF synthesizes a small 1-second animated GIF.
+// makeTestGIF는 1초짜리 작은 애니메이션 GIF를 합성한다.
 func makeTestGIF(t *testing.T, dir string) string {
 	t.Helper()
 	requireFFmpeg(t)
@@ -72,8 +72,8 @@ func assertNoWebPTempLeft(t *testing.T, dir string) {
 	}
 }
 
-// probeAudioStreamCount returns the number of audio streams in path.
-// Used to verify EncodeWebP strips audio.
+// probeAudioStreamCount는 path에 들어 있는 오디오 스트림 개수를 반환한다.
+// EncodeWebP가 오디오를 제거하는지 검증할 때 쓴다.
 func probeAudioStreamCount(t *testing.T, path string) int {
 	t.Helper()
 	requireFFprobe(t)
@@ -94,12 +94,12 @@ func probeAudioStreamCount(t *testing.T, path string) int {
 	return len(strings.Split(s, "\n"))
 }
 
-// assertAnimatedWebP fails the test unless path is a WebP file with the
-// extended-format animation flag set. ffprobe's nb_read_frames reports
-// "image data not found" for animated webp containers, so we parse the
-// RIFF header directly instead. Spec ref: WebP container — bytes 0..3
-// "RIFF", 8..11 "WEBP", 12..15 "VP8X" (extended), byte 20 feature flags
-// where bit 1 (0x02) signals animation.
+// assertAnimatedWebP는 path가 extended 포맷의 animation flag가 설정된 WebP
+// 파일이 아니면 테스트를 실패시킨다. 애니메이션 webp 컨테이너에 대해
+// ffprobe의 nb_read_frames는 "image data not found"를 내기 때문에, 여기서는
+// RIFF 헤더를 직접 파싱한다. 스펙 참조: WebP 컨테이너 — bytes 0..3 "RIFF",
+// 8..11 "WEBP", 12..15 "VP8X"(extended), byte 20의 feature flags에서 bit
+// 1(0x02)이 animation을 의미한다.
 func assertAnimatedWebP(t *testing.T, path string) {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -309,8 +309,8 @@ func TestProbeStreamInfo_GIF(t *testing.T) {
 	if hasAudio {
 		t.Errorf("GIF hasAudio = true, want false")
 	}
-	// duration may be 0 or positive depending on ffprobe build — assert
-	// only the audio absence here.
+	// duration은 ffprobe 빌드에 따라 0이거나 양수일 수 있다 — 여기서는
+	// 오디오 부재만 확인한다.
 }
 
 func TestProbeStreamInfo_MissingFile(t *testing.T) {

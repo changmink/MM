@@ -38,7 +38,11 @@ func makeAutoConvertSetup(t *testing.T, autoConvert bool) (*http.ServeMux, strin
 		}
 	}
 	mux := http.NewServeMux()
-	Register(mux, root, root, store)
+	h := Register(mux, root, root, store)
+	// Drain the thumbnail pool before t.TempDir cleans up so background
+	// workers don't race the .thumb/ directory removal on Windows (where an
+	// open handle prevents unlink).
+	t.Cleanup(h.Close)
 	return mux, root
 }
 
@@ -513,6 +517,55 @@ func TestCreateFolder(t *testing.T) {
 			t.Errorf("expected 400, got %d", rw.Code)
 		}
 	})
+}
+
+// Regression: prior implementation did Stat → Mkdir in two steps. N goroutines
+// racing on the same name could either both observe absence + Mkdir (one wins,
+// other gets 500 mkdir failed) or both Stat after Mkdir (both 409). Mkdir
+// alone now returns EEXIST for the loser deterministically.
+func TestConcurrentCreateFolderSameName(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, root, root, nil)
+
+	const n = 20
+	var wg sync.WaitGroup
+	codes := make([]int, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			body := &bytes.Buffer{}
+			json.NewEncoder(body).Encode(map[string]string{"name": "race"})
+			req := httptest.NewRequest("POST", "/api/folder?path=/", body)
+			req.Header.Set("Content-Type", "application/json")
+			rw := httptest.NewRecorder()
+			mux.ServeHTTP(rw, req)
+			codes[idx] = rw.Code
+		}(i)
+	}
+	wg.Wait()
+
+	created, conflict, other := 0, 0, 0
+	for _, c := range codes {
+		switch c {
+		case http.StatusCreated:
+			created++
+		case http.StatusConflict:
+			conflict++
+		default:
+			other++
+		}
+	}
+	if created != 1 {
+		t.Errorf("expected exactly 1 success, got %d (conflict=%d other=%d)", created, conflict, other)
+	}
+	if conflict != n-1 {
+		t.Errorf("expected %d conflicts, got %d (created=%d other=%d)", n-1, conflict, created, other)
+	}
+	if other != 0 {
+		t.Errorf("expected 0 unexpected codes, got %d", other)
+	}
 }
 
 func TestDeleteFolder(t *testing.T) {

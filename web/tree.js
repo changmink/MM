@@ -142,7 +142,7 @@ async function toggleNode(wrapEl, node, depth) {
   const chevron = wrapEl.querySelector(':scope > .tree-node-row > .tree-chevron');
   const collapsed = kids.classList.contains('collapsed');
 
-  // First-time expand of a not-yet-loaded subtree: fetch one level.
+  // 아직 로드되지 않은 서브트리의 첫 expand: 한 레벨만 fetch 한다.
   if (collapsed && kids.childElementCount === 0) {
     chevron.textContent = '…';
     try {
@@ -174,16 +174,16 @@ export function highlightTreeCurrent() {
   $.treeRoot.querySelectorAll('.tree-node-row.active')
     .forEach(el => el.classList.remove('active'));
   if (currentPath === '/' || !currentPath) return;
-  // CSS.escape handles slashes/quotes safely; required for arbitrary paths.
+  // CSS.escape가 슬래시/따옴표를 안전하게 처리한다 — 임의 경로에 필요.
   const sel = `.tree-node[data-path="${CSS.escape(currentPath)}"] > .tree-node-row`;
   const target = $.treeRoot.querySelector(sel);
   if (target) target.classList.add('active');
 }
 
-// Sticky-until-bottom for the desktop sidebar. When the tree is taller than
-// the viewport's available area, set a negative top so the sidebar pins with
-// its bottom flush against the viewport bottom — page scroll then reveals the
-// rest of the tree. Mobile (<600px) is a fixed drawer; leave its top alone.
+// 데스크톱 사이드바의 sticky-until-bottom. 트리가 viewport 가용 영역보다
+// 클 때 음수 top을 설정해 사이드바가 viewport 하단에 맞춰 핀 고정된다 —
+// 페이지 스크롤이 트리의 나머지를 드러낸다. 모바일(<600px)은 fixed drawer
+// 라서 top을 건드리지 않는다.
 export function syncSidebarSticky() {
   if (!$.sidebar) return;
   if (window.matchMedia('(max-width: 600px)').matches) {
@@ -221,8 +221,8 @@ export function wireTree(deps) {
 
   window.addEventListener('resize', syncSidebarSticky);
   if ($.sidebar && typeof ResizeObserver !== 'undefined') {
-    // Catches mutations not covered by explicit syncSidebarSticky() calls
-    // (e.g. third-party DOM changes, font load reflows).
+    // 명시적 syncSidebarSticky() 호출이 다루지 않는 변형(예: 서드파티 DOM
+    // 변경, 폰트 로드 reflow)을 잡아낸다.
     new ResizeObserver(syncSidebarSticky).observe($.sidebar);
   }
 }

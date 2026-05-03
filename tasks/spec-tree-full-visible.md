@@ -1,5 +1,7 @@
 # Spec: 폴더 트리 전체 가시성 + 업로드 존 sticky
 
+> **Status: merged** — `web/tree.js`·`web/style.css`로 이전 후 머지 완료. 본 spec은 historical record로 보존.
+>
 > 부모 SPEC: [`/SPEC.md`](../SPEC.md). **§2.5 프론트엔드 UI**의 사이드바 동작을 보강한다.
 > 관련 선행 spec: [`spec-sidebar-dnd.md`](spec-sidebar-dnd.md) (사이드바 도입 자체).
 
@@ -24,7 +26,7 @@
 
 ### In scope
 - `web/style.css`의 `.sidebar`·`#upload-zone` 영역 sticky 정책 변경
-- `web/app.js`에 사이드바 sticky `top` 동기화 로직 추가 (window resize / 트리 로드·확장/접기·rename·delete 시 재계산)
+- `web/app.js`에 사이드바 sticky `top` 동기화 로직 추가 (window resize / 트리 로드·확장/접기·rename·delete 시 재계산) *(머지 후 ES module 분할로 `web/tree.js`의 `syncSidebarSticky`로 이전됨)*
 - `internal/handler` 또는 `web/` 하위에 chromedp 통합 테스트 1종 추가
 - `go.mod`에 `github.com/chromedp/chromedp` 추가
 - 본 변경사항을 SPEC.md §2.5에 한 줄 반영

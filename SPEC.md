@@ -47,14 +47,14 @@
 
 기존 파일 이동(`PATCH /api/file {"to": "..."}`, §5)은 `media.MoveFile`이 디렉토리를 명시적으로 거부(`ErrSrcIsDir`)하여 폴더에 대해서는 사용할 수 없다. 본 기능은 폴더에도 동일한 PATCH 의미론을 부여한다 — `PATCH /api/folder`에 `{"to": "..."}` body를 받으면 폴더 자체를 destDir 안으로 이동.
 
-- **API 형태:** `PATCH /api/folder?path=<src>` body가 `{"name":"..."}`이면 기존 rename, `{"to":"..."}`이면 이동. `PATCH /api/file`이 `patchFile`에서 body를 한 번 읽고 분기하는 것과 동일 패턴(`files.go:133` 참고).
+- **API 형태:** `PATCH /api/folder?path=<src>` body가 `{"name":"..."}`이면 기존 rename, `{"to":"..."}`이면 이동. `PATCH /api/file`이 `patchFile`에서 body를 한 번 읽고 분기하는 것과 동일 패턴(`files.go`의 `patchFile` 참고).
 - **이동 의미:** `srcAbs`(폴더)의 base name이 그대로 유지된 채 `destDir` 아래로 옮긴다. 결과 경로는 `destDir/<srcBaseName>`. 이름 변경은 동시에 수행하지 않음(이동과 rename은 별도 호출).
 - **충돌 처리:** `destDir/<srcBaseName>`이 이미 존재(파일이든 폴더든)하면 `409 {"error": "already exists"}`. **자동 `_N` suffix 부여 없음** — 폴더는 파일과 달리 자동 suffix가 사용자 의도와 어긋나기 쉬워 명시적 거부가 안전. rename 정책과 일관.
 - **자기 자손 이동 방지:** `destDir`이 `srcAbs`와 동일하거나 `srcAbs`의 자손이면 `400 {"error": "invalid destination"}`. 비교는 `filepath.Clean` 후 prefix 검사 + 경계가 path separator로 끝나는지 확인 (예: `/a/b`는 `/a/bc`의 prefix가 아님).
-- **동일 부모 거부:** `filepath.Dir(srcAbs) == destDir`이면 `400 {"error": "same directory"}` — 기존 파일 이동(`files.go:227`)과 동일. 의미 없는 이동을 노이즈로 만들지 않음.
+- **동일 부모 거부:** `filepath.Dir(srcAbs) == destDir`이면 `400 {"error": "same directory"}` — 기존 파일 이동(`files.go`의 `moveFile`)과 동일. 의미 없는 이동을 노이즈로 만들지 않음.
 - **루트 이동 방지:** `srcAbs == h.dataDir`이면 `400 {"error": "cannot move root"}`. rename 가드와 동일.
 - **원자성:** 단일 `os.Rename` 호출(폴더 전체 + 내부 `.thumb/` + 하위 모든 파일이 함께 이동). 사이드카 별도 처리 불필요(폴더 rename과 동일 원리, §2.1.1).
-- **Cross-volume 처리:** `os.Rename`이 `EXDEV` 반환 시 **재귀 copy+remove 폴백 없이** `500 {"error": "cross_device"}` 반환. 단일 데이터 볼륨이 전제이며(SPEC §1, Docker volume 단일 마운트), 폴더 재귀 복사는 race·디스크 공간·중간 실패 처리 비용이 크므로 의도적 out-of-scope. 파일 이동은 EXDEV 시 copy+remove 폴백을 유지(`media/move.go:93`) — 단일 파일 단위라 안전.
+- **Cross-volume 처리:** `os.Rename`이 `EXDEV` 반환 시 **재귀 copy+remove 폴백 없이** `400 {"error": "cross_device"}` 반환 (단일 볼륨 가정 미충족은 운영 precondition이라 5xx가 아닌 4xx). 단일 데이터 볼륨이 전제이며(SPEC §1, Docker volume 단일 마운트), 폴더 재귀 복사는 race·디스크 공간·중간 실패 처리 비용이 크므로 의도적 out-of-scope. 파일 이동은 EXDEV 시 copy+remove 폴백을 유지(`media/move.go:93`) — 단일 파일 단위라 안전.
 - **사이드 효과:** 이동된 폴더 안의 파일 경로가 모두 바뀌므로, **현재 browse 경로(`currentPath`)가 이동된 폴더 자신 또는 그 자손**이라면 클라이언트가 새 경로로 navigate 해야 한다 — `rewritePathAfterFolderRename`(폴더 rename에서 사용 중)을 재사용해 `srcOldPath` → `destDir + "/" + baseName`으로 다시 계산.
 - **응답:** `200 OK`, `{"path": "/movies/sub", "name": "sub"}` — 새 위치의 절대 상대 경로 + base name(불변).
 - **UI 트리거:**
@@ -117,7 +117,7 @@
 - [ ] **browse API 확장:** 동영상 entry에 `duration_sec: float | null` 필드 추가 (다른 타입은 항상 null)
 - [ ] **UI 렌더링 (`buildVideoGrid`):**
   - `duration_sec`이 null 또는 0 이하이면 오버레이 숨김
-  - 포맷팅은 클라이언트(`app.js`)에서 수행
+  - 포맷팅은 클라이언트(`web/util.js`의 `formatDuration`)에서 수행
   - 폴더 삭제 시 `.thumb/` 전체 삭제로 사이드카도 함께 정리됨 (기존 동작 그대로)
 
 ### 2.3.3 TS → MP4 영구 변환
@@ -196,7 +196,7 @@ TS 파일은 현재 `/api/stream` 요청 시마다 ffmpeg로 실시간 리먹싱
 
 ### 2.5.1 파일 용량 표시
 
-현재 browse 경로에 직접 있는 파일들의 개수·합계를 상단에 요약하고, 개별 파일 크기를 모든 뷰에서 볼 수 있게 한다. 서버 API 변경 없음 — `/api/browse` 응답에 `size` 필드가 이미 존재하므로 클라이언트(`web/app.js`, `web/style.css`)만 수정한다.
+현재 browse 경로에 직접 있는 파일들의 개수·합계를 상단에 요약하고, 개별 파일 크기를 모든 뷰에서 볼 수 있게 한다. 서버 API 변경 없음 — `/api/browse` 응답에 `size` 필드가 이미 존재하므로 클라이언트(`web/main.js` 진입점 + 도메인 모듈, `web/style.css`)만 수정한다.
 
 - **범위(scope):** 현재 browse 경로에 직접 있는 파일만. 하위 폴더 재귀 합산은 **하지 않음**. 폴더는 메인 리스트에 표시되지 않으므로(`renderFileList`가 파일만 분류) 자연스럽게 제외됨.
 - [ ] **합계 표시 위치:** breadcrumb 줄 오른쪽 끝에 `파일 {N}개 · {formatSize(total)}` 형태로 렌더. 파일 0개이면 요약 영역 숨김(빈 텍스트).
@@ -719,9 +719,13 @@ file_server/
 ├── internal/
 │   ├── handler/                # HTTP 엔드포인트 (각 파일이 라우트군 하나)
 │   │   ├── handler.go          # Handler 구조체, Register, writeError, requireSameOrigin
+│   │   ├── sse.go              # SSE bootstrap 헬퍼 (assertFlusher / writeSSEHeaders / sseEmitter)
+│   │   ├── names.go            # file/folder/upload 공유 유틸 (validateName, atomicRenameFile, ...)
 │   │   ├── browse.go           # GET /api/browse — 디렉터리 조회
 │   │   ├── tree.go             # GET /api/tree — 사이드바 트리
-│   │   ├── files.go            # 업로드/리네임/삭제/폴더 CRUD
+│   │   ├── files.go            # PATCH/DELETE /api/file — 파일 rename/delete/move + 사이드카 정리
+│   │   ├── folders.go          # POST/PATCH/DELETE /api/folder — 폴더 create/rename/delete/move
+│   │   ├── upload.go           # POST /api/upload + PNG → JPG 자동 변환 헬퍼
 │   │   ├── stream.go           # Range 스트리밍 + TS 실시간 remux (.cache/streams/)
 │   │   ├── thumb.go            # /api/thumb (lazy 생성 fallback 포함)
 │   │   ├── import_url.go       # URL/HLS 다운로드 SSE 핸들러
@@ -737,10 +741,24 @@ file_server/
 │   ├── imageconv/              # PNG → JPG 변환 (§2.8) — disintegration/imaging 기반, 흰 배경 합성
 │   ├── importjob/              # 잡 라이프사이클·이벤트 채널·Registry (인메모리)
 │   └── settings/               # §2.7 URL import 설정 — JSON 영속화 + 스냅샷 getter
-├── web/
+├── web/                          # vanilla HTML/CSS/JS — 번들러·외부 의존성 없음
 │   ├── index.html
 │   ├── style.css
-│   └── app.js
+│   ├── main.js                   # 진입점 (init/wire/popstate)
+│   ├── state.js / dom.js / util.js   # 공유 상태·DOM ref·유틸
+│   ├── router.js                 # URL 쿼리 동기 + history 관리
+│   ├── browse.js                 # 디렉터리 조회·렌더·라이트박스·오디오
+│   ├── tree.js                   # 사이드바 폴더 트리
+│   ├── fileOps.js                # drag/drop, rename/delete 모달
+│   ├── dragSelect.js             # rubber-band 영역 선택 (§2.5.4)
+│   ├── settings.js               # 설정 모달
+│   ├── urlImport.js              # URL/HLS import SSE 클라이언트
+│   ├── urlImportJobs.js          # 백그라운드 잡 복원/취소/dismiss
+│   ├── convert.js                # TS→MP4 변환 (sseConvertModal 주입)
+│   ├── convertImage.js           # 이미지 포맷 변환 모달
+│   ├── convertWebp.js            # 움짤 → WebP 변환 (sseConvertModal 주입)
+│   ├── sseConvertModal.js        # SSE 변환 공유 모달 팩토리
+│   └── modalDismiss.js           # 폼 모달 ESC + 백드롭 닫기 헬퍼
 ├── Dockerfile
 ├── docker-compose.yml
 └── SPEC.md
@@ -838,6 +856,7 @@ file_server/
 - `warnings` 가능 값:
   - `"renamed"` — 자동 변환 후 목표 `.jpg` 충돌로 `_1`/`_2` 자동 suffix 부착 (§2.8.1).
   - `"convert_failed"` — PNG → JPG 변환 시도가 실패해 원본 PNG로 폴백 저장 (§2.8.1). 업로드 자체는 성공.
+- 본문 크기 상한: `413 {"error": "too_large"}` — multipart 본문이 100 GiB 초과 (`internal/handler/limits.go::maxUploadBytes`, `http.MaxBytesReader`로 진입부에서 cap; §9 참고)
 
 #### DELETE /api/file
 - 성공: `204 No Content` (body 없음)
@@ -860,6 +879,7 @@ file_server/
 - 새 이름 = 기존 이름: `400 {"error": "name unchanged"}`
 - 충돌 (동일 디렉토리 내 동일 이름 존재): `409 {"error": "already exists"}`
 - traversal: `400 {"error": "invalid path"}`
+- JSON body 크기 상한: `413 {"error": "too_large"}` — body 64 KiB 초과 (`internal/handler/limits.go::maxJSONBodyBytes`, `http.MaxBytesReader`로 진입부에서 cap; §9 참고)
 
 #### POST /api/folder
 - Body: `{"name": "new-folder"}` (현재 `path` 파라미터 경로 아래에 생성)
@@ -881,6 +901,8 @@ Body 형태로 두 동작 분기 (`PATCH /api/file`과 동일 패턴):
 - `{"to":   "..."}` → **이동** (다른 디렉토리로, base name 유지)
 
 두 필드를 동시에 보내면 `400 {"error": "specify either name or to, not both"}`. 둘 다 없으면 `400 {"error": "missing name or to"}`.
+
+JSON body 크기 상한(두 분기 공통): `413 {"error": "too_large"}` — body 64 KiB 초과 (`internal/handler/limits.go::maxJSONBodyBytes`, `http.MaxBytesReader`로 진입부에서 cap; §9 참고)
 
 ##### 이름 변경 (`{"name": "..."}`)
 - 성공: `200 OK`
@@ -914,7 +936,7 @@ Body 형태로 두 동작 분기 (`PATCH /api/file`과 동일 패턴):
 - 자기 자손으로 이동 시도 (`/a` → `/a/b`): `400 {"error": "invalid destination"}`
 - 동일 부모 (이동 의미 없음): `400 {"error": "same directory"}`
 - 동일 base name이 destDir에 이미 존재: `409 {"error": "already exists"}`
-- cross-volume(`EXDEV`): `500 {"error": "cross_device"}` — 폴더 재귀 copy 폴백 없음
+- cross-volume(`EXDEV`): `400 {"error": "cross_device"}` — 운영 precondition 미충족(단일 볼륨), 폴더 재귀 copy 폴백 없음
 - traversal: `400 {"error": "invalid path"}`
 
 #### GET /api/stream
@@ -1315,6 +1337,16 @@ PNG 파일을 JPG로 영구 변환 (§2.8.2). **동기 JSON 응답** — SSE가 
 
 LAN 단일 사용자 모델에는 인증이 없으므로, 다른 오리진의 페이지가 사용자 브라우저를 통해 본 서버로 mutating 요청을 보내는 시나리오는 **요청 자체의 진위(authenticity)** 로만 막는다. `internal/handler/handler.go`의 `requireSameOrigin` 미들웨어가 모든 mutating 라우트(POST·PATCH·DELETE·PUT)에 걸려 있다. GET·HEAD·SSE 구독 (`EventSource`) 은 통과 — 읽기 전용이며 EventSource는 `Origin` 헤더를 일관되게 전송하지 않기 때문.
 
+`requireSameOrigin`으로 래핑되는 mutating 라우트(단일 출처 — CLAUDE.md / README 등은 본 절을 참조):
+- `POST /api/upload`
+- `PATCH /api/file`, `DELETE /api/file`
+- `POST /api/folder`, `PATCH /api/folder`, `DELETE /api/folder`
+- `POST /api/import-url`, `/api/import-url/jobs`, `/api/import-url/jobs/` (cancel/dismiss; SSE 재구독 GET은 비대상)
+- `POST /api/convert`, `POST /api/convert-image`, `POST /api/convert-webp`
+- `PATCH /api/settings`
+
+읽기 전용(`/api/browse`, `/api/tree`, `/api/stream`, `/api/thumb`, `GET /api/settings`)은 래핑 대상 아님. 새 mutating 라우트를 추가하면 본 목록과 `Register`의 wrap 호출을 같이 갱신한다.
+
 검사 규칙:
 
 1. `Origin` 헤더가 있으면 `url.Parse(Origin).Host == r.Host` 일 때만 허용.
@@ -1552,6 +1584,7 @@ volumes:
 **항상 할 것 (Always)**
 - Range 요청 지원 (스트리밍 seek 필수)
 - 업로드 파일은 `/data` 볼륨 내부에만 저장 (path traversal 방지)
+- Mutating 진입부에서 `http.MaxBytesReader`로 streaming/메모리 적재 cap 적용 — multipart 업로드 100 GiB(`maxUploadBytes`), JSON body 64 KiB(`maxJSONBodyBytes`). 초과 시 `413 {"error": "too_large"}` 반환 (`internal/handler/limits.go`, §5 각 엔드포인트 4xx 표 참고)
 - 섬네일은 비동기로 생성 (업로드 응답 차단 안 함)
 - Rename 시 `media.SafePath`로 원본·대상 경로 모두 검증 (path traversal 방지)
 - Rename은 동일 부모 디렉토리 내에서만 허용 (경로 이동 금지 — 이동은 별도 PATCH body)
@@ -1596,12 +1629,12 @@ volumes:
 
 첫 공식 릴리즈. 폴더 운영(생성·이름 변경·삭제·이동)이 모두 갖춰져 single-user 미디어 서버로서 기본 기능이 닫힌다.
 
-**포함:**
-- [ ] 폴더 이동 백엔드 (§2.1.2 — `media.MoveDir` 신설, `PATCH /api/folder` body 분기)
-- [ ] 폴더 이동 UI (§2.1.2, §2.1.3 — 사이드바 트리 ↔ 트리 / 메인 표 폴더 행 → 트리·breadcrumb DnD)
-- [ ] 사이드바 트리 노드 🗑 삭제 버튼 (§2.1.3)
-- [ ] 새 폴더 버튼 위치 이동 (메인 툴바 → 사이드바 헤더, §2.1.3)
-- [ ] README 갱신 — 본 SPEC §2.1.2 / §2.1.3을 README features 목록에 반영, 0.0.1 릴리즈 노트 추가, 기존 폴더 작업 설명 업데이트
+**포함 (모두 머지 완료 — 0.0.1 릴리즈됨, README §0.0.1 릴리즈 노트 참고):**
+- [x] 폴더 이동 백엔드 (§2.1.2 — `media.MoveDir` 신설, `PATCH /api/folder` body 분기)
+- [x] 폴더 이동 UI (§2.1.2, §2.1.3 — 사이드바 트리 ↔ 트리 / 메인 표 폴더 행 → 트리·breadcrumb DnD)
+- [x] 사이드바 트리 노드 🗑 삭제 버튼 (§2.1.3)
+- [x] 새 폴더 버튼 위치 이동 (메인 툴바 → 사이드바 헤더, §2.1.3)
+- [x] README 갱신 — 본 SPEC §2.1.2 / §2.1.3을 README features 목록에 반영, 0.0.1 릴리즈 노트 추가, 기존 폴더 작업 설명 업데이트
 
 **범위 외 (후속 버전):**
 - 사이드바 트리 노드별 + 버튼으로 임의 위치 폴더 생성

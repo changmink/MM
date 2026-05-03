@@ -3,6 +3,8 @@
 > 부모 spec: [`spec-frontend-modularization.md`](./spec-frontend-modularization.md)
 > 브랜치: `feature/frontend-modularization`
 > 머지 정책: 각 phase 끝나면 `develop`로 머지하지 않고 같은 feature 브랜치 안에서 누적 (큰 리팩터를 한 번에 리뷰).
+>
+> **Status: implemented (historical)** — 본 plan의 단계·수치(`12개 모듈`, cache-bust `?v=29` 등)는 분할 시점 baseline이며 갱신하지 않는다. 현재 모듈 수는 17개, cache-bust 버전은 `web/index.html`이 단일 출처(작성 시점 `?v=41`).
 
 ## 1. 목표 재확인
 

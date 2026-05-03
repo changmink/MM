@@ -382,11 +382,10 @@ func TestImportURL_SSE_AudioSkipsThumbPool(t *testing.T) {
 	}
 }
 
-// TestImportURL_HandlerDisconnect_JobContinues asserts the Phase 20 contract:
-// the client closing the SSE stream (or refreshing the tab) does NOT cancel
-// the underlying import job. The handler returns promptly, but the worker
-// keeps draining URLs until summary, and the registry retains the finished
-// job for snapshot/list queries.
+// TestImportURL_HandlerDisconnect_JobContinues은 Phase 20 계약을 단언한다
+// — 클라이언트가 SSE 스트림을 닫거나(탭을 새로 고쳐도) 진행 중인 import
+// Job을 취소하지 않는다. 핸들러는 즉시 반환하지만 워커는 summary까지 URL을
+// 계속 처리하고, 레지스트리는 snapshot/list 조회용으로 끝난 Job을 보존한다.
 func TestImportURL_HandlerDisconnect_JobContinues(t *testing.T) {
 	// Origin counts hits so we can confirm every URL was attempted even
 	// after the handler returned.
@@ -435,6 +434,58 @@ func TestImportURL_HandlerDisconnect_JobContinues(t *testing.T) {
 	}
 	if got := job.Status(); got != importjob.StatusCompleted {
 		t.Errorf("job status = %q, want %q", got, importjob.StatusCompleted)
+	}
+}
+
+func TestImportURL_BatchFetchesInParallel(t *testing.T) {
+	var active atomic.Int64
+	var maxActive atomic.Int64
+
+	muxOrigin := http.NewServeMux()
+	for i := 0; i < 4; i++ {
+		p := fmt.Sprintf("/slow%d.jpg", i)
+		muxOrigin.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
+			cur := active.Add(1)
+			for {
+				max := maxActive.Load()
+				if cur <= max || maxActive.CompareAndSwap(max, cur) {
+					break
+				}
+			}
+			defer active.Add(-1)
+
+			time.Sleep(50 * time.Millisecond)
+			w.Header().Set("Content-Type", "image/jpeg")
+			w.Header().Set("Content-Length", strconv.Itoa(len(jpegBody)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(jpegBody)
+		})
+	}
+	srv := httptest.NewServer(muxOrigin)
+	defer srv.Close()
+
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	h := registerImportTest(mux, root)
+	defer h.Close()
+
+	rw := postImport(t, mux, "/", []string{
+		srv.URL + "/slow0.jpg",
+		srv.URL + "/slow1.jpg",
+		srv.URL + "/slow2.jpg",
+		srv.URL + "/slow3.jpg",
+	})
+	events := parseSSEEvents(t, rw.Body.String())
+	summary := events[len(events)-1]
+	if summary["phase"] != "summary" || summary["succeeded"].(float64) != 4 {
+		t.Fatalf("summary = %v, want 4 successes; phases=%v", summary, phasesOf(events))
+	}
+
+	if got := maxActive.Load(); got <= 1 {
+		t.Fatalf("max concurrent fetches = %d, want > 1", got)
+	}
+	if got := maxActive.Load(); got > 2 {
+		t.Fatalf("max concurrent fetches = %d, want <= 2", got)
 	}
 }
 
@@ -562,6 +613,128 @@ func TestRedactURL(t *testing.T) {
 				t.Errorf("redactURL(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestRecoverImportJob_NoDoublePublishWhenSummaryAlreadyEmitted guards the
+// runImportJob defer: when the worker panics AFTER SetSummary→Publish but
+// BEFORE SetStatus, the recover path must not publish a second summary.
+// Subscribers were observing two summary frames per job — one from the
+// normal path and one from the recover branch.
+func TestRecoverImportJob_NoDoublePublishWhenSummaryAlreadyEmitted(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	h := registerImportTest(mux, root)
+	defer h.Close()
+
+	job, err := h.registry.Create("/", []string{"https://example.com/a"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	events, unsub := job.Subscribe()
+	defer unsub()
+
+	// Simulate a normal completion: worker publishes summary, sets status
+	// later. Use Succeeded counter so the test asserts the right summary
+	// survives.
+	want := importjob.Summary{Succeeded: 1}
+	job.SetSummary(want)
+	job.Publish(summaryEvent(want))
+
+	// Now drive the same defer body the worker uses, with a fake panic value.
+	recoverImportJob("simulated panic", job)
+
+	if got := job.Status(); got != importjob.StatusFailed {
+		t.Errorf("status = %v, want %v (recovery should drive non-terminal jobs to Failed)", got, importjob.StatusFailed)
+	}
+
+	summaryCount := 0
+	timeout := time.After(200 * time.Millisecond)
+loop:
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				break loop
+			}
+			if ev.Phase == "summary" {
+				summaryCount++
+			}
+		case <-timeout:
+			break loop
+		}
+	}
+	if summaryCount != 1 {
+		t.Errorf("summary frames received = %d, want 1 (double-publish regression)", summaryCount)
+	}
+}
+
+// TestRecoverImportJob_SkipsWhenAlreadyTerminal locks the late-defer guard:
+// once SetStatus(terminal) ran, a panic from a deferred callback must not
+// flip the status back to Failed nor emit any further events.
+func TestRecoverImportJob_SkipsWhenAlreadyTerminal(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	h := registerImportTest(mux, root)
+	defer h.Close()
+
+	job, err := h.registry.Create("/", []string{"https://example.com/a"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	job.SetSummary(importjob.Summary{Succeeded: 1})
+	job.SetStatus(importjob.StatusCompleted)
+
+	recoverImportJob("late defer panic", job)
+
+	if got := job.Status(); got != importjob.StatusCompleted {
+		t.Errorf("status = %v, want %v (recovery must not overwrite a terminal status)", got, importjob.StatusCompleted)
+	}
+}
+
+// TestRecoverImportJob_PublishesWhenSummaryMissing guards the panic-before-
+// summary path: if the worker dies before SetSummary, recovery synthesizes
+// one from URLState so subscribers never hang waiting for a terminal frame.
+func TestRecoverImportJob_PublishesWhenSummaryMissing(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	h := registerImportTest(mux, root)
+	defer h.Close()
+
+	job, err := h.registry.Create("/", []string{"https://example.com/a", "https://example.com/b"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	events, unsub := job.Subscribe()
+	defer unsub()
+
+	recoverImportJob("early panic", job)
+
+	if got := job.Status(); got != importjob.StatusFailed {
+		t.Errorf("status = %v, want Failed", got)
+	}
+
+	summaryCount := 0
+	timeout := time.After(200 * time.Millisecond)
+loop:
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				break loop
+			}
+			if ev.Phase == "summary" {
+				summaryCount++
+			}
+		case <-timeout:
+			break loop
+		}
+	}
+	if summaryCount != 1 {
+		t.Errorf("summary frames received = %d, want 1", summaryCount)
 	}
 }
 

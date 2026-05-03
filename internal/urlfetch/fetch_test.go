@@ -27,7 +27,7 @@ func newImageHandler(body []byte, contentType string, headerLength int) http.Han
 }
 
 func dummyJPEG() []byte {
-	// Minimal JFIF SOI/APP0/EOI sequence — enough for tests; we don't decode it.
+	// 테스트에 충분한 최소 JFIF SOI/APP0/EOI 시퀀스 — 디코딩하지 않는다.
 	return []byte{
 		0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00,
 		0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
@@ -58,7 +58,7 @@ func TestFetch_OK_JPEG(t *testing.T) {
 	if res.Type != "image" {
 		t.Errorf("type = %q, want image", res.Type)
 	}
-	// httptest server is http (not https) → insecure_http warning expected.
+	// httptest 서버는 http(https 아님) → insecure_http 경고가 기대된다.
 	if !slices.Contains(res.Warnings, "insecure_http") {
 		t.Errorf("warnings = %v, want to contain insecure_http", res.Warnings)
 	}
@@ -111,7 +111,7 @@ func TestFetch_ExtensionReplaced_MKV(t *testing.T) {
 	defer srv.Close()
 
 	dest := t.TempDir()
-	// URL declares .mp4 but the server returns MKV; extension must flip to .mkv.
+	// URL은 .mp4를 선언하지만 서버는 MKV를 반환한다 — 확장자가 .mkv로 바뀌어야 한다.
 	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/clip.mp4", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
@@ -134,7 +134,7 @@ func TestFetch_DefaultName_Video(t *testing.T) {
 	defer srv.Close()
 
 	dest := t.TempDir()
-	// URL path is "/" so there is no usable basename.
+	// URL path가 "/"라 쓸만한 basename이 없다.
 	res, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/", dest, "/", testMaxBytes, nil)
 	if ferr != nil {
@@ -179,15 +179,15 @@ func TestFetch_InvalidURL(t *testing.T) {
 	}
 }
 
-// Chunked-transfer responses (no Content-Length) used to be rejected with
-// "missing_content_length". The cap is now enforced at the byte level, so a
-// headerless small body must succeed.
+// Chunked-transfer 응답(Content-Length 없음)은 예전에 "missing_content_length"
+// 로 거부됐다. 이제는 바이트 단위로 상한을 강제하므로 헤더 없는 작은 본문은
+// 성공해야 한다.
 func TestFetch_NoContentLength_Succeeds(t *testing.T) {
 	body := dummyJPEG()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/jpeg")
 		w.WriteHeader(http.StatusOK)
-		// Force chunked encoding by flushing before writing the body.
+		// body 쓰기 전에 flush 해서 chunked encoding을 강제한다.
 		w.(http.Flusher).Flush()
 		w.Write(body)
 	}))
@@ -204,7 +204,7 @@ func TestFetch_NoContentLength_Succeeds(t *testing.T) {
 	}
 }
 
-// Oversize Content-Length must be rejected before the body is read.
+// 상한을 초과하는 Content-Length는 body를 읽기 전에 거부되어야 한다.
 func TestFetch_ContentLengthTooLarge(t *testing.T) {
 	const cap = int64(1024)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -223,15 +223,15 @@ func TestFetch_ContentLengthTooLarge(t *testing.T) {
 	assertNoLeftovers(t, dest)
 }
 
-// Without a declared Content-Length the header check cannot reject, so the
-// runtime byte counter must trip too_large and clean up the partial tmp file.
+// Content-Length가 선언되지 않으면 헤더 검사가 거부할 수 없으니, 런타임
+// 바이트 카운터가 too_large를 트리거하고 부분 tmp 파일을 정리해야 한다.
 func TestFetch_NoContentLength_RuntimeCap(t *testing.T) {
 	const cap = int64(64)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/jpeg")
 		w.WriteHeader(http.StatusOK)
 		w.(http.Flusher).Flush()
-		// Write cap+1 bytes so the LimitReader overshoots by exactly 1.
+		// LimitReader가 정확히 1 바이트 overshoot 하도록 cap+1 바이트를 쓴다.
 		payload := make([]byte, cap+1)
 		for i := range payload {
 			payload[i] = 0xFF
@@ -264,7 +264,7 @@ func TestFetch_UnsupportedContentType(t *testing.T) {
 }
 
 func TestFetch_ExtensionMismatch_Replaced(t *testing.T) {
-	body := dummyJPEG() // pretend it's a PNG; we don't decode
+	body := dummyJPEG() // PNG인 척하지만 디코딩하지 않으므로 무방하다
 	srv := httptest.NewServer(newImageHandler(body, "image/png", len(body)))
 	defer srv.Close()
 
@@ -302,7 +302,7 @@ func TestFetch_NoExtensionInURL(t *testing.T) {
 }
 
 func TestFetch_ExtensionEquivalent_NoWarning(t *testing.T) {
-	// .jpeg + image/jpeg → keep .jpeg, no warning.
+	// .jpeg + image/jpeg → .jpeg를 유지하며 경고 없음.
 	body := dummyJPEG()
 	srv := httptest.NewServer(newImageHandler(body, "image/jpeg", len(body)))
 	defer srv.Close()
@@ -324,7 +324,7 @@ func TestFetch_ExtensionEquivalent_NoWarning(t *testing.T) {
 func TestFetch_RedirectCap(t *testing.T) {
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Always redirect to ourselves so the chain is unbounded.
+		// 매번 자기 자신으로 redirect 해 체인이 무한해지도록 한다.
 		http.Redirect(w, r, srv.URL+"/next", http.StatusFound)
 	}))
 	defer srv.Close()
@@ -352,7 +352,7 @@ func TestFetch_HTTP404(t *testing.T) {
 }
 
 func TestFetch_FilenameSanitize_DotDot(t *testing.T) {
-	// path.Base("/a/b/..") returns ".." — should fall back to the category default.
+	// path.Base("/a/b/..")는 ".."를 반환한다 — 카테고리 기본값으로 폴백되어야 한다.
 	body := dummyJPEG()
 	srv := httptest.NewServer(newImageHandler(body, "image/jpeg", len(body)))
 	defer srv.Close()
@@ -366,7 +366,7 @@ func TestFetch_FilenameSanitize_DotDot(t *testing.T) {
 	if res.Name != "image.jpg" {
 		t.Errorf("name = %q, want image.jpg", res.Name)
 	}
-	// File must live inside dest, not escape it.
+	// 파일은 dest 내부에 있어야 하며 빠져나가서는 안 된다.
 	if _, err := os.Stat(filepath.Join(dest, res.Name)); err != nil {
 		t.Errorf("expected file inside dest: %v", err)
 	}
@@ -378,7 +378,7 @@ func TestFetch_Collision_RenamesUnique(t *testing.T) {
 	defer srv.Close()
 
 	dest := t.TempDir()
-	// Pre-create photo.jpg so the import collides.
+	// 충돌이 발생하도록 photo.jpg를 미리 만들어둔다.
 	if err := os.WriteFile(filepath.Join(dest, "photo.jpg"), []byte("existing"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +394,7 @@ func TestFetch_Collision_RenamesUnique(t *testing.T) {
 	if !slices.Contains(res.Warnings, "renamed") {
 		t.Errorf("warnings = %v, want to contain renamed", res.Warnings)
 	}
-	// Original file must be untouched.
+	// 원본 파일은 그대로 유지되어야 한다.
 	got, err := os.ReadFile(filepath.Join(dest, "photo.jpg"))
 	if err != nil || string(got) != "existing" {
 		t.Errorf("original photo.jpg modified: %q, err=%v", got, err)
@@ -402,7 +402,7 @@ func TestFetch_Collision_RenamesUnique(t *testing.T) {
 }
 
 func TestFetch_TempFileCleaned_OnRejection(t *testing.T) {
-	// Force unsupported_content_type: server returns text/plain.
+	// 서버가 text/plain을 반환하게 해 unsupported_content_type을 강제한다.
 	srv := httptest.NewServer(newImageHandler([]byte("hi"), "text/plain", 2))
 	defer srv.Close()
 
@@ -416,8 +416,8 @@ func TestFetch_TempFileCleaned_OnRejection(t *testing.T) {
 }
 
 func TestFetch_ExtensionReplaced_FromNonImageExt(t *testing.T) {
-	// .bin URL extension is unknown; must be replaced by Content-Type's mapped
-	// extension and warn extension_replaced.
+	// .bin은 알 수 없는 URL 확장자이므로 Content-Type 매핑 확장자로 교체되고
+	// extension_replaced 경고가 동반되어야 한다.
 	body := dummyJPEG()
 	srv := httptest.NewServer(newImageHandler(body, "image/jpeg", len(body)))
 	defer srv.Close()
@@ -461,7 +461,7 @@ func TestFetch_Start_Called_WithNameTotalType(t *testing.T) {
 }
 
 func TestFetch_Progress_Emitted_ForLargePayload(t *testing.T) {
-	// 3 MiB crosses the 1 MiB byte threshold at least twice.
+	// 3 MiB는 1 MiB byte threshold를 적어도 두 번 넘는다.
 	body := make([]byte, 3<<20)
 	srv := httptest.NewServer(newImageHandler(body, "image/jpeg", len(body)))
 	defer srv.Close()
@@ -498,8 +498,8 @@ func TestFetch_Progress_Emitted_ForLargePayload(t *testing.T) {
 }
 
 func TestFetch_Progress_NotEmitted_ForTinyPayload(t *testing.T) {
-	// 512 B finishes well under the 1 MiB byte threshold and — on localhost
-	// httptest — well under the 250 ms time threshold, so no progress fires.
+	// 512 B는 1 MiB byte threshold를 한참 밑돌고, localhost httptest 환경에서는
+	// 250 ms time threshold도 넘지 못하므로 progress가 발사되지 않는다.
 	body := make([]byte, 512)
 	srv := httptest.NewServer(newImageHandler(body, "image/jpeg", len(body)))
 	defer srv.Close()
@@ -515,19 +515,19 @@ func TestFetch_Progress_NotEmitted_ForTinyPayload(t *testing.T) {
 	if ferr != nil {
 		t.Fatalf("fetch failed: %v", ferr)
 	}
-	// Allow at most 1 emit in case the test machine is under load past 250 ms.
+	// 테스트 머신 부하로 250 ms를 넘길 수 있으므로 최대 1번 emit 까지는 허용한다.
 	if calls > 1 {
 		t.Errorf("got %d progress calls for tiny payload, want 0", calls)
 	}
 }
 
 func TestFetch_Progress_NilCallback_OK(t *testing.T) {
-	body := make([]byte, 2<<20) // 2 MiB — would trigger progress if a callback were set.
+	body := make([]byte, 2<<20) // 2 MiB — 콜백이 설정돼 있으면 progress가 트리거될 크기.
 	srv := httptest.NewServer(newImageHandler(body, "image/jpeg", len(body)))
 	defer srv.Close()
 
 	dest := t.TempDir()
-	// Explicit zero-value Callbacks — both fields nil.
+	// 명시적 zero-value Callbacks — 두 필드 모두 nil.
 	_, ferr := urlfetch.Fetch(context.Background(), urlfetch.NewClient(urlfetch.AllowPrivateNetworks()),
 		srv.URL+"/any.jpg", dest, "/", testMaxBytes, &urlfetch.Callbacks{})
 	if ferr != nil {
@@ -535,12 +535,12 @@ func TestFetch_Progress_NilCallback_OK(t *testing.T) {
 	}
 }
 
-// testMaxBytes is a generous per-test cap — 4 GiB is bigger than any fixture
-// a unit test generates, so call sites that are not specifically exercising
-// the cap enforcement path never trip on it by accident.
+// testMaxBytes는 테스트당 사용하는 넉넉한 상한이다 — 4 GiB는 단위 테스트
+// 픽스처보다 크므로, 상한 강제 경로를 직접 검증하지 않는 호출자가 우발적
+// 거부에 걸리는 일이 없다.
 const testMaxBytes = int64(4) << 30
 
-// assertNoLeftovers fails the test if any file or .urlimport-*.tmp remains in dir.
+// assertNoLeftovers는 dir에 파일이나 .urlimport-*.tmp가 남아 있으면 테스트를 실패시킨다.
 func assertNoLeftovers(t *testing.T, dir string) {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
@@ -554,5 +554,5 @@ func assertNoLeftovers(t *testing.T, dir string) {
 	}
 }
 
-// Compile-time guard that FetchError satisfies the error interface.
+// FetchError가 error 인터페이스를 만족하는지 컴파일 타임에 확인한다.
 var _ error = (*urlfetch.FetchError)(nil)

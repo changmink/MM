@@ -1,227 +1,17 @@
 package handler
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"log/slog"
-	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"file_server/internal/imageconv"
 	"file_server/internal/media"
 	"file_server/internal/thumb"
 )
-
-// pngAutoConvertQuality is the JPEG quality used for upload-time PNG → JPG
-// conversion (SPEC §2.8). 90 balances visible quality against file size for
-// typical photo / screenshot content; not user-configurable on purpose.
-const pngAutoConvertQuality = 90
-
-func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
-		return
-	}
-
-	rel := r.URL.Query().Get("path")
-	destDir, err := media.SafePath(h.dataDir, rel)
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "invalid path", err)
-		return
-	}
-
-	// Stream the multipart body directly to disk instead of letting
-	// ParseMultipartForm buffer the whole upload (32MB in RAM, rest spilled
-	// to temp files). MultipartReader skips that buffering entirely.
-	mr, err := r.MultipartReader()
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "expected multipart body", err)
-		return
-	}
-
-	var part *multipart.Part
-	for {
-		p, err := mr.NextPart()
-		if err == io.EOF {
-			writeError(w, r, http.StatusBadRequest, "missing file field", nil)
-			return
-		}
-		if err != nil {
-			writeError(w, r, http.StatusBadRequest, "read part failed", err)
-			return
-		}
-		if p.FormName() == "file" {
-			part = p
-			break
-		}
-		p.Close()
-	}
-	defer part.Close()
-
-	if part.FileName() == "" {
-		writeError(w, r, http.StatusBadRequest, "missing filename", nil)
-		return
-	}
-
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "mkdir failed", err)
-		return
-	}
-
-	// filepath.Base strips any directory component from the client-supplied filename.
-	clientName := filepath.Base(part.FileName())
-	destPath := filepath.Join(destDir, clientName)
-
-	// Decide whether to take the PNG → JPG branch BEFORE touching disk so we
-	// can stream the upload into a temp PNG (rather than the user-visible
-	// destination) and only commit to a final name after the conversion result
-	// is known. SPEC §2.8.1: branch fires only for .png (case-insensitive)
-	// AND when the snapshot has the toggle on.
-	autoConvert := strings.EqualFold(filepath.Ext(clientName), ".png") &&
-		h.settingsSnapshot().AutoConvertPNGToJPG
-
-	var (
-		finalPath string
-		finalSize int64
-		converted bool
-		warnings  = []string{}
-	)
-
-	if autoConvert {
-		var err error
-		finalPath, finalSize, converted, warnings, err = h.uploadPNGAutoConvert(destDir, destPath, part)
-		if err != nil {
-			writeError(w, r, http.StatusInternalServerError, "write file failed", err)
-			return
-		}
-	} else {
-		dst, err := createUniqueFile(destPath)
-		if err != nil {
-			writeError(w, r, http.StatusInternalServerError, "create file failed", err)
-			return
-		}
-		finalPath = dst.Name()
-		size, copyErr := io.Copy(dst, part)
-		dst.Close()
-		if copyErr != nil {
-			os.Remove(finalPath)
-			writeError(w, r, http.StatusInternalServerError, "write file failed", copyErr)
-			return
-		}
-		finalSize = size
-	}
-
-	fileType := media.DetectType(filepath.Base(finalPath))
-
-	// generate thumbnail asynchronously for images and videos via the bounded
-	// worker pool. If the pool queue is full we log and skip — handleThumb
-	// generates lazily on first view, so the user still gets a thumbnail.
-	if fileType == media.TypeImage || fileType == media.TypeVideo {
-		thumbDir := filepath.Join(destDir, ".thumb")
-		thumbPath := filepath.Join(thumbDir, filepath.Base(finalPath)+".jpg")
-		if !h.thumbPool.Submit(finalPath, thumbPath) {
-			slog.Warn("thumb pool full, deferring to lazy generation",
-				"src", finalPath,
-			)
-		}
-	}
-
-	relResult := filepath.ToSlash(filepath.Join(rel, filepath.Base(finalPath)))
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"path":      relResult,
-		"name":      filepath.Base(finalPath),
-		"size":      finalSize,
-		"type":      string(fileType),
-		"converted": converted,
-		"warnings":  warnings,
-	})
-}
-
-// uploadPNGAutoConvert streams the multipart part into a hidden temp PNG,
-// converts it to JPEG via imageconv, and renames the result to <basename>.jpg
-// in destDir. On any conversion failure the original PNG is preserved at the
-// originally-requested destPath instead — the upload still succeeds (201)
-// with a "convert_failed" warning so the client can surface the fallback
-// without treating it as data loss (SPEC §2.8.1).
-func (h *Handler) uploadPNGAutoConvert(destDir, destPath string, part io.Reader) (finalPath string, size int64, converted bool, warnings []string, err error) {
-	warnings = []string{}
-
-	// Both temp files go in destDir so the final rename is same-volume. The
-	// dot prefix hides them from /api/browse during the brief write window.
-	tmpPNG, err := os.CreateTemp(destDir, ".pngconvert-*.png")
-	if err != nil {
-		return "", 0, false, warnings, fmt.Errorf("create temp png: %w", err)
-	}
-	tmpPNGPath := tmpPNG.Name()
-	pngConsumed := false
-	defer func() {
-		if !pngConsumed {
-			_ = os.Remove(tmpPNGPath)
-		}
-	}()
-
-	size, copyErr := io.Copy(tmpPNG, part)
-	closeErr := tmpPNG.Close()
-	if copyErr != nil {
-		return "", 0, false, warnings, copyErr
-	}
-	if closeErr != nil {
-		return "", 0, false, warnings, closeErr
-	}
-
-	// Convert into a sibling temp file rather than the visible jpgPath so we
-	// don't claim the user-facing name until rename time.
-	tmpJPGPath := tmpPNGPath + ".jpg"
-	convErr := imageconv.ConvertPNGToJPG(tmpPNGPath, tmpJPGPath, pngAutoConvertQuality)
-
-	// jpgPath is the human-friendly target — original base name with .jpg
-	// (lowercased, so SHOT.PNG → SHOT.jpg).
-	ext := filepath.Ext(destPath)
-	jpgPath := destPath[:len(destPath)-len(ext)] + ".jpg"
-
-	if convErr == nil {
-		// Conversion succeeded — rename the JPG into place; PNG temp can go.
-		final, suffixed, renameErr := renameToUniqueDest(tmpJPGPath, jpgPath)
-		if renameErr != nil {
-			_ = os.Remove(tmpJPGPath)
-			return "", 0, false, warnings, fmt.Errorf("rename converted jpg: %w", renameErr)
-		}
-		_ = os.Remove(tmpPNGPath)
-		pngConsumed = true
-		if suffixed {
-			warnings = append(warnings, "renamed")
-		}
-		st, statErr := os.Stat(final)
-		if statErr != nil {
-			return "", 0, false, warnings, fmt.Errorf("stat converted jpg: %w", statErr)
-		}
-		return final, st.Size(), true, warnings, nil
-	}
-
-	// Conversion failed — fall back to saving the original PNG.
-	slog.Warn("png auto-convert failed, falling back to original",
-		"dest", destPath, "err", convErr,
-	)
-	_ = os.Remove(tmpJPGPath) // imageconv cleans its own temp, this is best-effort
-	warnings = append(warnings, "convert_failed")
-	final, suffixed, renameErr := renameToUniqueDest(tmpPNGPath, destPath)
-	if renameErr != nil {
-		return "", 0, false, warnings, fmt.Errorf("rename fallback png: %w", renameErr)
-	}
-	pngConsumed = true
-	if suffixed {
-		warnings = append(warnings, "renamed")
-	}
-	return final, size, false, warnings, nil
-}
 
 func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -234,41 +24,15 @@ func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// patchFile dispatches PATCH /api/file by inspecting the body shape:
+// patchFile dispatches PATCH /api/file:
 //
-//	{"name": "..."}  → rename in place (extension preserved)
-//	{"to":   "..."}  → move to a different directory
+//	{"name": "..."}  → renameFile (extension preserved)
+//	{"to":   "..."}  → moveFile
 //
-// Both fields are mutually exclusive. The body is read once into memory and
-// re-attached so each downstream handler can decode it normally — neither
-// renameFile nor moveFile knows it was inspected first.
+// 본문 분기·검증 로직은 patchFolder와 공유되므로 names.go의 patchDispatch
+// 단일 출처에 위임한다.
 func (h *Handler) patchFile(w http.ResponseWriter, r *http.Request) {
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "read body failed", err)
-		return
-	}
-	var probe struct {
-		Name string `json:"name"`
-		To   string `json:"to"`
-	}
-	if err := json.Unmarshal(bodyBytes, &probe); err != nil {
-		writeError(w, r, http.StatusBadRequest, "invalid body", err)
-		return
-	}
-	if probe.Name != "" && probe.To != "" {
-		writeError(w, r, http.StatusBadRequest, "specify either name or to, not both", nil)
-		return
-	}
-	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-	switch {
-	case probe.To != "":
-		h.moveFile(w, r)
-	case probe.Name != "":
-		h.renameFile(w, r)
-	default:
-		writeError(w, r, http.StatusBadRequest, "missing name or to", nil)
-	}
+	patchDispatch(w, r, h.renameFile, h.moveFile)
 }
 
 func (h *Handler) deleteFile(w http.ResponseWriter, r *http.Request) {
@@ -299,8 +63,8 @@ func (h *Handler) deleteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// remove sidecar thumbnail (and duration sidecar for videos). Both are
-	// best-effort: a stale .jpg simply gets overwritten on next generation.
+	// 사이드카 썸네일을(영상은 duration 사이드카까지 포함해) 제거한다.
+	// 둘 다 best-effort다 — 잔재 .jpg는 다음 생성 시 덮어써진다.
 	if media.IsImage(fi.Name()) || media.IsVideo(fi.Name()) {
 		thumbPath := filepath.Join(filepath.Dir(abs), ".thumb", fi.Name()+".jpg")
 		os.Remove(thumbPath)
@@ -334,8 +98,8 @@ func (h *Handler) moveFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reject moving into the same directory: it's almost always a UI mistake,
-	// and silently succeeding would still apply a _N suffix (cosmetic noise).
+	// 같은 디렉터리로의 이동은 거부한다 — 거의 항상 UI 실수이며, 조용히
+	// 성공시키면 _N 접미사가 붙어 미관상 잡음이 된다.
 	if filepath.Clean(filepath.Dir(srcAbs)) == filepath.Clean(destAbs) {
 		writeError(w, r, http.StatusBadRequest, "same directory", nil)
 		return
@@ -362,8 +126,7 @@ func (h *Handler) moveFile(w http.ResponseWriter, r *http.Request) {
 		finalRel = "/" + finalRel
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
+	writeJSON(w, r, http.StatusOK, map[string]string{
 		"path": finalRel,
 		"name": finalName,
 	})
@@ -399,8 +162,8 @@ func (h *Handler) renameFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rename keeps the original extension. Strip any extension the user
-	// may have included so "new.mkv" on an .mp4 file becomes "new.mp4".
+	// rename은 원본 확장자를 유지한다. 사용자가 입력한 확장자는 떼어내,
+	// .mp4 파일에 대한 "new.mkv"는 "new.mp4"가 되도록 한다.
 	oldName := fi.Name()
 	origExt := fileExtension(oldName)
 	newBase := stripTrailingExt(body.Name)
@@ -419,8 +182,8 @@ func (h *Handler) renameFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// parentAbs was safe-checked via srcAbs; newName has no path separators
-	// per validateName; join cannot escape the root.
+	// parentAbs는 srcAbs를 통해 이미 safe-check 되었고, newName은
+	// validateName이 path separator를 막아주므로 join이 root를 탈출할 수 없다.
 	parentAbs := filepath.Dir(srcAbs)
 	dstAbs := filepath.Join(parentAbs, newName)
 
@@ -441,20 +204,18 @@ func (h *Handler) renameFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	relResult := "/" + filepath.ToSlash(dstRel)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
+	writeJSON(w, r, http.StatusOK, map[string]string{
 		"path": relResult,
 		"name": newName,
 	})
 }
 
-// renameThumbSidecars moves .thumb/{oldName}.jpg and (for videos) its .dur
-// sidecar to match a renamed source file. oldName and newName must be
-// basenames only — a caller passing a path-with-slashes would silently
-// produce a wrong thumb path. validateName on the rename entry points
-// guarantees this today. Sidecar failures are logged but never block
-// success — the next /api/thumb request will regenerate them.
+// renameThumbSidecars는 rename된 원본 파일에 맞춰 .thumb/{oldName}.jpg와
+// (영상의 경우) 그 .dur 사이드카를 옮긴다. oldName과 newName은 basename만
+// 와야 한다 — 슬래시가 들어간 경로를 호출자가 넘기면 조용히 잘못된 thumb
+// 경로를 만든다. 현재로선 rename 진입부의 validateName이 이를 보장한다.
+// 사이드카 실패는 로그만 남기고 성공을 막지 않는다 — 다음 /api/thumb
+// 요청이 재생성한다.
 func renameThumbSidecars(parentAbs, oldName, newName string) {
 	if !media.IsImage(oldName) && !media.IsVideo(oldName) {
 		return
@@ -474,391 +235,3 @@ func renameThumbSidecars(parentAbs, oldName, newName string) {
 	}
 }
 
-// fileExtension returns the extension to preserve during file rename.
-// Unlike filepath.Ext, a leading-dot name with no other dot (".gitignore",
-// ".env") is treated as having no extension so the user can freely rename
-// dotfiles without an unwanted suffix being reattached. Matches the JS
-// client's splitExtension.
-func fileExtension(name string) string {
-	if strings.HasPrefix(name, ".") && strings.Count(name, ".") == 1 {
-		return ""
-	}
-	return filepath.Ext(name)
-}
-
-// stripTrailingExt removes any extension the user may have typed in the
-// new name. Unlike fileExtension, this uses plain filepath.Ext so that a
-// leading-dot input like ".mp4" strips to "" (which validateName rejects)
-// — users are expected to enter a base name, and a bare extension is more
-// likely a typo than a dotfile intent.
-func stripTrailingExt(name string) string {
-	if ext := filepath.Ext(name); ext != "" {
-		return strings.TrimSuffix(name, ext)
-	}
-	return name
-}
-
-// atomicRenameFile moves srcAbs to dstAbs, returning os.ErrExist if the
-// destination already exists. Uses os.Link (atomic EEXIST on POSIX and
-// Windows NTFS) plus os.Remove to close the TOCTOU window that a plain
-// Stat+Rename would leave open against a concurrent creator. Case-only
-// renames (a.txt → A.txt) fall back to plain os.Rename because a hard
-// link between two spellings of the same inode on case-insensitive
-// filesystems would itself fail EEXIST.
-func atomicRenameFile(srcAbs, dstAbs, oldName, newName string) error {
-	if strings.EqualFold(oldName, newName) && oldName != newName {
-		return os.Rename(srcAbs, dstAbs)
-	}
-	if err := os.Link(srcAbs, dstAbs); err != nil {
-		return err
-	}
-	if err := os.Remove(srcAbs); err != nil {
-		os.Remove(dstAbs) // roll back the link so src remains the canonical file
-		return err
-	}
-	return nil
-}
-
-func (h *Handler) handleFolder(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodPost:
-		h.createFolder(w, r)
-	case http.MethodDelete:
-		h.deleteFolder(w, r)
-	case http.MethodPatch:
-		h.patchFolder(w, r)
-	default:
-		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed", nil)
-	}
-}
-
-// patchFolder dispatches PATCH /api/folder by inspecting the body shape:
-//
-//	{"name": "..."}  → rename in place
-//	{"to":   "..."}  → move into a different directory (base name preserved)
-//
-// Mirrors patchFile so the API surface for files and folders stays symmetric.
-func (h *Handler) patchFolder(w http.ResponseWriter, r *http.Request) {
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "read body failed", err)
-		return
-	}
-	var probe struct {
-		Name string `json:"name"`
-		To   string `json:"to"`
-	}
-	if err := json.Unmarshal(bodyBytes, &probe); err != nil {
-		writeError(w, r, http.StatusBadRequest, "invalid body", err)
-		return
-	}
-	if probe.Name != "" && probe.To != "" {
-		writeError(w, r, http.StatusBadRequest, "specify either name or to, not both", nil)
-		return
-	}
-	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-	switch {
-	case probe.To != "":
-		h.moveFolder(w, r)
-	case probe.Name != "":
-		h.renameFolder(w, r)
-	default:
-		writeError(w, r, http.StatusBadRequest, "missing name or to", nil)
-	}
-}
-
-func (h *Handler) moveFolder(w http.ResponseWriter, r *http.Request) {
-	rel := r.URL.Query().Get("path")
-	srcAbs, err := media.SafePath(h.dataDir, rel)
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "invalid path", err)
-		return
-	}
-
-	if srcAbs == filepath.Clean(h.dataDir) {
-		writeError(w, r, http.StatusBadRequest, "cannot move root", nil)
-		return
-	}
-
-	var body struct {
-		To string `json:"to"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, r, http.StatusBadRequest, "invalid body", err)
-		return
-	}
-
-	destAbs, err := media.SafePath(h.dataDir, body.To)
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "invalid path", err)
-		return
-	}
-
-	// Reject moving into the same parent — same rule as moveFile.
-	if filepath.Clean(filepath.Dir(srcAbs)) == filepath.Clean(destAbs) {
-		writeError(w, r, http.StatusBadRequest, "same directory", nil)
-		return
-	}
-
-	finalAbs, err := media.MoveDir(srcAbs, destAbs)
-	if err != nil {
-		switch {
-		case errors.Is(err, media.ErrSrcNotFound):
-			writeError(w, r, http.StatusNotFound, "not found", nil)
-		case errors.Is(err, media.ErrSrcNotDir):
-			writeError(w, r, http.StatusBadRequest, "not a directory", nil)
-		case errors.Is(err, media.ErrDestNotFound),
-			errors.Is(err, media.ErrDestNotDir),
-			errors.Is(err, media.ErrCircular):
-			writeError(w, r, http.StatusBadRequest, "invalid destination", nil)
-		case errors.Is(err, media.ErrDestExists):
-			writeError(w, r, http.StatusConflict, "already exists", nil)
-		case errors.Is(err, media.ErrCrossDevice):
-			writeError(w, r, http.StatusInternalServerError, "cross_device", err)
-		default:
-			writeError(w, r, http.StatusInternalServerError, "move failed", err)
-		}
-		return
-	}
-
-	dstRel, err := filepath.Rel(h.dataDir, finalAbs)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "path failed", err)
-		return
-	}
-	relResult := "/" + filepath.ToSlash(dstRel)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
-		"path": relResult,
-		"name": filepath.Base(finalAbs),
-	})
-}
-
-func (h *Handler) renameFolder(w http.ResponseWriter, r *http.Request) {
-	rel := r.URL.Query().Get("path")
-	srcAbs, err := media.SafePath(h.dataDir, rel)
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "invalid path", err)
-		return
-	}
-
-	if srcAbs == filepath.Clean(h.dataDir) {
-		writeError(w, r, http.StatusBadRequest, "cannot rename root", nil)
-		return
-	}
-
-	var body struct {
-		Name string `json:"name"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, r, http.StatusBadRequest, "invalid body", err)
-		return
-	}
-
-	if err := validateName(body.Name); err != nil {
-		writeError(w, r, http.StatusBadRequest, err.Error(), nil)
-		return
-	}
-
-	fi, err := os.Stat(srcAbs)
-	if err != nil {
-		if os.IsNotExist(err) {
-			writeError(w, r, http.StatusNotFound, "not found", nil)
-			return
-		}
-		writeError(w, r, http.StatusInternalServerError, "stat failed", err)
-		return
-	}
-	if !fi.IsDir() {
-		writeError(w, r, http.StatusBadRequest, "not a directory", nil)
-		return
-	}
-
-	if body.Name == fi.Name() {
-		writeError(w, r, http.StatusBadRequest, "name unchanged", nil)
-		return
-	}
-
-	// parentAbs was safe-checked via srcAbs; body.Name has no separators
-	// per validateName; join cannot escape the root.
-	dstAbs := filepath.Join(filepath.Dir(srcAbs), body.Name)
-
-	// Case-only rename (movies → Movies) must skip the existence check
-	// because Stat on a case-insensitive FS resolves to the source itself.
-	caseOnly := strings.EqualFold(fi.Name(), body.Name) && fi.Name() != body.Name
-	if !caseOnly {
-		if _, err := os.Stat(dstAbs); err == nil {
-			writeError(w, r, http.StatusConflict, "already exists", nil)
-			return
-		}
-	}
-
-	// Single OS rename moves the directory atomically; contents (including
-	// .thumb/ subdirectory) follow automatically — no sidecar bookkeeping.
-	// A concurrent creator winning the Stat→Rename gap is an accepted race;
-	// see SPEC §9 "known limitations" (single-user deployment target).
-	if err := os.Rename(srcAbs, dstAbs); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "rename failed", err)
-		return
-	}
-
-	dstRel, err := filepath.Rel(h.dataDir, dstAbs)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "path failed", err)
-		return
-	}
-	relResult := "/" + filepath.ToSlash(dstRel)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
-		"path": relResult,
-		"name": body.Name,
-	})
-}
-
-func (h *Handler) createFolder(w http.ResponseWriter, r *http.Request) {
-	rel := r.URL.Query().Get("path")
-	parentAbs, err := media.SafePath(h.dataDir, rel)
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "invalid path", err)
-		return
-	}
-
-	var body struct {
-		Name string `json:"name"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, r, http.StatusBadRequest, "invalid body", err)
-		return
-	}
-
-	if err := validateName(body.Name); err != nil {
-		writeError(w, r, http.StatusBadRequest, err.Error(), nil)
-		return
-	}
-
-	targetAbs := filepath.Join(parentAbs, body.Name)
-
-	if _, err := os.Stat(targetAbs); err == nil {
-		writeError(w, r, http.StatusConflict, "already exists", nil)
-		return
-	}
-
-	if err := os.Mkdir(targetAbs, 0755); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "mkdir failed", err)
-		return
-	}
-
-	relResult := filepath.ToSlash(filepath.Join(rel, body.Name))
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{"path": relResult})
-}
-
-func (h *Handler) deleteFolder(w http.ResponseWriter, r *http.Request) {
-	rel := r.URL.Query().Get("path")
-	abs, err := media.SafePath(h.dataDir, rel)
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "invalid path", err)
-		return
-	}
-
-	// prevent deleting the root data directory itself
-	if abs == filepath.Clean(h.dataDir) {
-		writeError(w, r, http.StatusBadRequest, "cannot delete root", nil)
-		return
-	}
-
-	fi, err := os.Stat(abs)
-	if err != nil {
-		if os.IsNotExist(err) {
-			writeError(w, r, http.StatusNotFound, "not found", nil)
-			return
-		}
-		writeError(w, r, http.StatusInternalServerError, "stat failed", err)
-		return
-	}
-
-	if !fi.IsDir() {
-		writeError(w, r, http.StatusBadRequest, "not a directory", nil)
-		return
-	}
-
-	if err := os.RemoveAll(abs); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "delete failed", err)
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func validateName(name string) error {
-	if name == "" || name == "." || name == ".." {
-		return fmt.Errorf("invalid name")
-	}
-	if len(name) > 255 {
-		return fmt.Errorf("invalid name")
-	}
-	for _, c := range name {
-		if c == '/' || c == '\\' {
-			return fmt.Errorf("invalid name")
-		}
-	}
-	return nil
-}
-
-// renameToUniqueDest moves srcPath to destPath, falling back to <base>_N.<ext>
-// suffixes if the target slot is taken. Uses os.Link + os.Remove so EEXIST is
-// detected race-free (matches atomicRenameFile) — a parallel uploader cannot
-// claim the same free slot between our existence check and our rename. The
-// suffixed return reports whether a suffix was applied so the caller can
-// surface a "renamed" warning.
-func renameToUniqueDest(srcPath, destPath string) (finalPath string, suffixed bool, err error) {
-	const maxAttempts = 10000
-	if linkErr := os.Link(srcPath, destPath); linkErr == nil {
-		_ = os.Remove(srcPath)
-		return destPath, false, nil
-	} else if !os.IsExist(linkErr) {
-		return "", false, linkErr
-	}
-	ext := filepath.Ext(destPath)
-	base := destPath[:len(destPath)-len(ext)]
-	for i := 1; i < maxAttempts; i++ {
-		candidate := fmt.Sprintf("%s_%d%s", base, i, ext)
-		if linkErr := os.Link(srcPath, candidate); linkErr == nil {
-			_ = os.Remove(srcPath)
-			return candidate, true, nil
-		} else if !os.IsExist(linkErr) {
-			return "", false, linkErr
-		}
-	}
-	return "", false, fmt.Errorf("renameToUniqueDest: exhausted attempts for %s", destPath)
-}
-
-// createUniqueFile atomically creates path (or path with _N suffix if taken)
-// using O_CREATE|O_EXCL so concurrent uploads of the same filename cannot
-// observe the same free slot and clobber each other.
-func createUniqueFile(path string) (*os.File, error) {
-	const maxAttempts = 10000
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
-	if err == nil {
-		return f, nil
-	}
-	if !os.IsExist(err) {
-		return nil, err
-	}
-	ext := filepath.Ext(path)
-	base := path[:len(path)-len(ext)]
-	for i := 1; i < maxAttempts; i++ {
-		candidate := fmt.Sprintf("%s_%d%s", base, i, ext)
-		f, err := os.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
-		if err == nil {
-			return f, nil
-		}
-		if !os.IsExist(err) {
-			return nil, err
-		}
-	}
-	return nil, fmt.Errorf("could not find unique name for %s after %d attempts", path, maxAttempts)
-}

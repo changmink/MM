@@ -171,9 +171,9 @@ func TestGenerateAnimatedWebP(t *testing.T) {
 	if fi.Size() == 0 {
 		t.Error("thumbnail is empty")
 	}
-	// First frame is solid red — decoding the result jpg back should yield
-	// pixels in roughly the red range. We just sanity-check decode succeeds
-	// here; pixel-level color checks are brittle across jpeg quality levels.
+	// 첫 프레임은 단색 빨강이라 결과 jpg를 다시 디코딩하면 대략 빨강
+	// 범위의 픽셀이 나와야 한다. 여기서는 디코딩 성공 여부만 sanity check
+	// 한다 — 픽셀 단위 색상 검사는 jpeg 품질에 따라 흔들려서 신뢰도가 낮다.
 	f, err := os.Open(dst)
 	if err != nil {
 		t.Fatalf("open thumb: %v", err)
@@ -190,7 +190,7 @@ func TestGenerateAnimatedWebP(t *testing.T) {
 
 func TestProbeDuration(t *testing.T) {
 	dir := t.TempDir()
-	src := makeTestMP4(t, dir) // 4-second clip
+	src := makeTestMP4(t, dir) // 4초 클립
 
 	got, err := ProbeDuration(src)
 	if err != nil {
