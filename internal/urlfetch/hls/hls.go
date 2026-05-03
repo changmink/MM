@@ -21,7 +21,7 @@ import (
 	"file_server/internal/ffmpeg"
 )
 
-// Result describes a successful HLS import.
+// Result는 성공한 HLS import의 결과를 담는다.
 type Result struct {
 	URL      string
 	Path     string
@@ -31,7 +31,7 @@ type Result struct {
 	Warnings []string
 }
 
-// FetchError is the typed failure returned by Fetch.
+// FetchError는 Fetch가 반환하는 타입화된 실패 정보다.
 type FetchError struct {
 	Code string
 	Err  error
@@ -40,14 +40,13 @@ type FetchError struct {
 func (e *FetchError) Error() string { return e.Code }
 func (e *FetchError) Unwrap() error { return e.Err }
 
-// Callbacks lets a caller observe an HLS fetch in flight.
+// Callbacks는 진행 중인 HLS fetch를 호출자가 관찰할 수 있게 해준다.
 type Callbacks struct {
 	Start    func(name string, total int64, fileType string)
 	Progress func(received int64)
 }
 
-// Deps carries parent-package helpers into the HLS subpackage without creating
-// an import cycle.
+// Deps는 import 사이클 없이 부모 패키지의 헬퍼를 HLS 서브패키지로 전달한다.
 type Deps struct {
 	ClassifyHTTPError func(error) *FetchError
 	RenameUnique      func(tmpPath, destDir, name string) (string, bool, error)
@@ -59,9 +58,9 @@ const (
 	progressTimeThreshold = 250 * time.Millisecond
 )
 
-// Sentinel errors for HLS handling. classifyHLSRemuxError maps these plus
-// context.Canceled / context.DeadlineExceeded to stable FetchError.Code values
-// documented in SPEC §5.1.
+// HLS 처리용 sentinel 에러들. classifyHLSRemuxError는 이들과 함께
+// context.Canceled / context.DeadlineExceeded까지 SPEC §5.1에 문서화된
+// 안정적인 FetchError.Code 값으로 매핑한다.
 var (
 	errHLSVariantScheme    = errors.New("invalid_scheme")
 	errFFmpegMissing       = ffmpeg.ErrMissing
@@ -73,32 +72,31 @@ var (
 	errHLSMissingMapURI    = errors.New("hls_map_missing_uri")
 )
 
-// hlsMaxSegments caps how many #EXTINF segments a single media playlist may
-// declare. 10,000 ??16 hours of 6-second VOD ??comfortably above any normal
-// movie or lecture, but below an attacker's "1 byte × millions" request-rate
-// flood that the cumulative byte cap (url_import_max_bytes) cannot stop on
-// its own. See spec §3.2 D-8.
+// hlsMaxSegments는 미디어 플레이리스트 하나가 선언할 수 있는 #EXTINF
+// 세그먼트 수의 상한이다. 10,000개 ≈ 6초 세그먼트 기준 16시간 VOD ≈
+// 일반적인 영화·강의 분량보다 충분히 크지만, 누적 바이트 상한
+// (url_import_max_bytes)만으로는 막을 수 없는 "1바이트 × 수백만" 요청률
+// 폭주를 차단할 만큼 작다. spec §3.2 D-8 참고.
 const MaxSegments = 10000
 
 const hlsMaxSegments = MaxSegments
 
-// hlsMaxKeyEntries caps the number of #EXT-X-KEY rotations a single media
-// playlist may declare. Real-world HLS rarely rotates keys more than a few
-// times per stream; 256 is generous (~25 minutes of 6-second segments under
-// 1-segment-per-key rotation). The cap closes the budget-exhaustion vector
-// where a hostile playlist declares thousands of keys, each up to
-// hlsMaxKeyBytes (64 KiB), to drain url_import_max_bytes before any real
-// segment fires.
+// hlsMaxKeyEntries는 미디어 플레이리스트 하나가 선언할 수 있는 #EXT-X-KEY
+// 로테이션 수의 상한이다. 실제 HLS는 스트림당 키 로테이션이 몇 번을 넘는
+// 경우가 드물다 — 256개는 6초 세그먼트 기준 1세그먼트당 1키 로테이션 시
+// 약 25분에 해당해 충분히 여유롭다. 적대적 플레이리스트가 키 수천 개를
+// 선언하고 각 키가 hlsMaxKeyBytes(64 KiB)까지 차지하면서 실제 세그먼트가
+// 발사되기 전에 url_import_max_bytes를 고갈시키는 예산 소진 공격을 막는다.
 const hlsMaxKeyEntries = 256
 
-// hlsMaxInitEntries caps the number of #EXT-X-MAP init segments. Standard
-// HLS uses at most one (per discontinuity, rarely). 4 leaves room for
-// pathological-but-possible playlists with multiple discontinuities while
-// blocking the same byte-budget exhaustion class as hlsMaxKeyEntries.
+// hlsMaxInitEntries는 #EXT-X-MAP init 세그먼트 수의 상한이다. 표준 HLS는
+// (드물게 discontinuity마다 하나씩) 최대 한 개를 사용한다. 4는 다중
+// discontinuity가 있는 병적이지만 가능한 플레이리스트도 통과시키되,
+// hlsMaxKeyEntries와 동일한 예산 소진 공격은 차단한다.
 const hlsMaxInitEntries = 4
 
-// ffmpegExitError wraps a non-zero ffmpeg termination with captured stderr so
-// the caller can surface diagnostic context in logs.
+// ffmpegExitError는 non-zero로 종료된 ffmpeg와 캡처된 stderr를 함께 감싸,
+// 호출자가 진단 컨텍스트를 로그에 노출할 수 있게 한다.
 type ffmpegExitError struct {
 	exitCode int
 	stderr   string
@@ -108,26 +106,27 @@ func (e *ffmpegExitError) Error() string {
 	return fmt.Sprintf("ffmpeg exited %d: %s", e.exitCode, e.stderr)
 }
 
-// hlsWatchInterval is how often the runner checks the tmp output file while
-// ffmpeg is running. 500 ms keeps progress samples timely for humans watching
-// the SSE feed without wasting syscalls on an idle remux.
+// hlsWatchInterval은 ffmpeg가 실행 중일 때 runner가 tmp 출력 파일을
+// 점검하는 주기다. 500 ms는 SSE 피드를 보는 사람에게 적당한 progress 샘플
+// 간격이면서, 유휴 remux에 대한 syscall 낭비를 줄이는 균형점이다.
 const hlsWatchInterval = 500 * time.Millisecond
 
-// hlsMaxPlaylistBytes bounds how much of the initial response body we read to
-// parse the master playlist. Real-world master playlists are a few KiB; 1 MiB
-// is a generous defense-in-depth ceiling that still lets us fit in memory.
+// hlsMaxPlaylistBytes는 마스터 플레이리스트를 파싱하기 위해 초기 응답
+// 본문에서 읽을 수 있는 최대 바이트 수다. 실제 마스터 플레이리스트는 몇
+// KiB 수준이며, 1 MiB는 메모리에 무리 없이 들어가는 충분히 여유로운
+// 방어선이다.
 const MaxPlaylistBytes = 1 << 20
 
 const hlsMaxPlaylistBytes = MaxPlaylistBytes
 
-// isHLSResponse decides whether to take the HLS branch. The primary signal is
-// a canonical HLS Content-Type. "audio/mpegurl" is the pre-RFC-8216 legacy
-// form still emitted by several real-world CDNs (Mux test streams on GCS,
-// some Akamai configs) ??treating it as HLS avoids a false
-// unsupported_content_type for valid public streams. The fallback covers
-// CDNs that mislabel .m3u8 as text/plain or application/octet-stream; it
-// only applies when the URL path clearly names a playlist so a generic text
-// response from an unrelated URL does not get miscategorized.
+// isHLSResponse는 HLS 분기로 들어갈지 결정한다. 1차 신호는 정규 HLS
+// Content-Type이다. "audio/mpegurl"은 RFC 8216 이전의 레거시 형태인데
+// 여전히 일부 실제 CDN(Mux의 GCS 테스트 스트림, 일부 Akamai 설정 등)이
+// 내보낸다 — 이를 HLS로 취급해야 정상 공개 스트림에 대한 거짓
+// unsupported_content_type을 피할 수 있다. 폴백은 .m3u8을 text/plain이나
+// application/octet-stream으로 잘못 라벨링하는 CDN을 위한 것이며, URL
+// path가 명확히 플레이리스트일 때만 적용해 무관한 URL의 일반 텍스트
+// 응답이 잘못 분류되지 않게 한다.
 func IsResponse(contentType, urlPath string) bool {
 	mt, _, _ := mime.ParseMediaType(contentType)
 	mt = strings.ToLower(mt)
@@ -154,19 +153,18 @@ func isHLSResponse(contentType, urlPath string) bool {
 
 var bandwidthRE = regexp.MustCompile(`BANDWIDTH=(\d+)`)
 
-// parseMasterPlaylist inspects an HLS playlist body and returns the URL to
-// hand to ffmpeg. If the body is a master playlist (contains one or more
-// #EXT-X-STREAM-INF entries), it selects the variant with the highest
-// BANDWIDTH attribute, ties broken by declaration order. If no variants are
-// found, the body is treated as a media playlist and base is returned
-// unchanged. Relative variant URLs are resolved against base; variants whose
-// resolved scheme is not http/https are rejected up front so ffmpeg's
-// protocol_whitelist is backed by an application-level check too.
+// parseMasterPlaylist는 HLS 플레이리스트 본문을 검사하고 ffmpeg에 넘길
+// URL을 반환한다. 본문이 마스터 플레이리스트(#EXT-X-STREAM-INF 항목이 하나
+// 이상)이면 BANDWIDTH 속성이 가장 큰 variant를 선택하고, 동률이면 선언
+// 순서로 결정한다. variant가 없으면 본문을 미디어 플레이리스트로 취급하고
+// base를 변경 없이 반환한다. 상대 URL은 base 기준으로 해석하며, 해석된
+// scheme이 http/https가 아닌 variant는 즉시 거부해 ffmpeg의
+// protocol_whitelist를 애플리케이션 계층에서도 한 번 더 막는다.
 func parseMasterPlaylist(body []byte, base *url.URL) (*url.URL, error) {
 	lines := strings.Split(string(body), "\n")
 
 	var bestURL string
-	var bestBW int64 = -1 // -1 so the first variant (even BANDWIDTH=0) is chosen
+	var bestBW int64 = -1 // -1이면 BANDWIDTH=0인 첫 variant도 선택되도록 한다.
 
 	for i := 0; i < len(lines); i++ {
 		line := strings.TrimSpace(lines[i])
@@ -206,20 +204,20 @@ func parseMasterPlaylist(body []byte, base *url.URL) (*url.URL, error) {
 	if scheme != "http" && scheme != "https" {
 		return nil, errHLSVariantScheme
 	}
-	// Guard against a (hostile or broken) master playlist whose chosen variant
-	// resolves back to itself: handing the same URL to ffmpeg would loop
-	// through the same master again. Fall back to treating it as a media
-	// playlist ??ffmpeg will then either succeed if it is one, or fail with
-	// ffmpeg_error, which is the right outcome either way.
+	// 선택된 variant가 자기 자신으로 해석되는 (악의적이거나 망가진) 마스터
+	// 플레이리스트를 방어한다. 같은 URL을 ffmpeg에 넘기면 같은 마스터로
+	// 다시 들어가는 루프가 된다. 이런 경우 미디어 플레이리스트로 취급하도록
+	// 폴백한다 — 정말 미디어 플레이리스트면 성공할 것이고, 아니면
+	// ffmpeg_error로 실패할 것이라 어느 쪽이든 올바른 결과다.
 	if sameURL(resolved, base) {
 		return base, nil
 	}
 	return resolved, nil
 }
 
-// entryKind tags playlistEntry by its source tag ??needed by materializeHLS to
-// decide naming convention (seg_NNNN.ext vs key_N.bin vs init.ext) and what
-// kind of URI rewrite to perform.
+// entryKind는 playlistEntry를 그 소스 태그로 분류한다. materializeHLS가
+// 명명 규칙(seg_NNNN.ext vs key_N.bin vs init.ext)과 URI 재작성 종류를
+// 결정하는 데 필요하다.
 type entryKind int
 
 const (
@@ -228,57 +226,56 @@ const (
 	entryInit
 )
 
-// playlistEntry represents one remote resource referenced by a media playlist.
-// lineIdx points at the rawLines element materializeHLS should rewrite ??for
-// segments that's the URI line, for #EXT-X-KEY / #EXT-X-MAP it's the tag line
-// itself (the URI is an attribute embedded in the tag).
+// playlistEntry는 미디어 플레이리스트가 참조하는 원격 리소스 하나를
+// 나타낸다. lineIdx는 materializeHLS가 재작성해야 하는 rawLines 요소를
+// 가리킨다 — segment의 경우는 URI 라인 자체, #EXT-X-KEY / #EXT-X-MAP의
+// 경우는 URI를 속성으로 품은 태그 라인이다.
 type playlistEntry struct {
 	lineIdx int
 	uri     *url.URL
 	kind    entryKind
 }
 
-// mediaPlaylist is the parsed view of a media playlist. rawLines preserves
-// the input verbatim so materializeHLS can output a near-identical playlist
-// with only URI substrings replaced; entries enumerates every external
-// resource that needs to be downloaded and rewritten before ffmpeg consumes
-// the rewritten playlist.
+// mediaPlaylist는 파싱된 미디어 플레이리스트의 뷰다. rawLines는 입력을
+// 그대로 보존해, materializeHLS가 URI 부분만 교체한 거의 동일한 플레이리스트를
+// 출력할 수 있게 한다. entries는 ffmpeg가 재작성된 플레이리스트를 소비하기
+// 전에 다운로드·재작성이 필요한 외부 리소스들을 모두 열거한다.
 type mediaPlaylist struct {
 	rawLines []string
 	entries  []playlistEntry
 }
 
-// uriAttrRE extracts the value from a URI="..." attribute used by
-// #EXT-X-KEY and #EXT-X-MAP. Real HLS attribute lists are CSV with quoted
-// strings and unquoted enumerations; we only need URI which is always
-// quoted per RFC 8216 §4.2.
+// uriAttrRE은 #EXT-X-KEY와 #EXT-X-MAP에서 사용하는 URI="..." 속성에서
+// 값을 추출한다. 실제 HLS 속성 리스트는 quoted 문자열과 unquoted
+// enumeration이 섞인 CSV이지만, 우리가 필요한 URI는 RFC 8216 §4.2에 따라
+// 항상 quoted 형태다.
 var uriAttrRE = regexp.MustCompile(`URI="([^"]*)"`)
 
-// parseMediaPlaylist walks the playlist body and collects every external
-// resource (#EXTINF segments, #EXT-X-KEY URIs except METHOD=NONE, and
-// #EXT-X-MAP init segments) with its URL resolved against base. Returns
-//   - errHLSVariantScheme for any URI whose resolved scheme is not http/https
-//   - errHLSTooManySegments / errHLSTooManyKeys / errHLSTooManyInits past caps
-//   - errHLSDuplicateURIAttr if a single #EXT-X-KEY/#EXT-X-MAP line declares
-//     more than one URI="..." attribute (parser took the first; rewriter
-//     would touch all ??refuse the playlist to keep the two in lockstep)
-//   - errHLSMissingMapURI for an #EXT-X-MAP without URI
+// parseMediaPlaylist는 플레이리스트 본문을 순회하며 모든 외부 리소스
+// (#EXTINF 세그먼트, METHOD=NONE을 제외한 #EXT-X-KEY URI, #EXT-X-MAP init
+// 세그먼트)를 base 기준으로 해석한 URL과 함께 수집한다. 반환값은:
+//   - 해석된 scheme이 http/https가 아닌 URI가 있으면 errHLSVariantScheme
+//   - 상한을 넘으면 errHLSTooManySegments / errHLSTooManyKeys / errHLSTooManyInits
+//   - 단일 #EXT-X-KEY/#EXT-X-MAP 라인에 URI="..." 속성이 두 개 이상 선언돼
+//     있으면 errHLSDuplicateURIAttr (parser는 첫 번째를 취하지만 rewriter는
+//     모두 건드릴 수 있어, 둘이 어긋나지 않도록 플레이리스트 자체를 거부)
+//   - URI 없는 #EXT-X-MAP에는 errHLSMissingMapURI
 //
-// Per RFC 8216 §4.1.1, between #EXTINF and the segment URI line a media
-// playlist may insert helper tags such as #EXT-X-DISCONTINUITY,
-// #EXT-X-BYTERANGE, or #EXT-X-PROGRAM-DATE-TIME. The pendingSeg latch keeps
-// state across those (any line starting with `#` is preserved verbatim and
-// does not consume the latch).
+// RFC 8216 §4.1.1에 따라, #EXTINF와 세그먼트 URI 라인 사이에 미디어
+// 플레이리스트는 #EXT-X-DISCONTINUITY, #EXT-X-BYTERANGE,
+// #EXT-X-PROGRAM-DATE-TIME 같은 보조 태그를 끼워 넣을 수 있다. pendingSeg
+// 래치가 그 사이에서 상태를 유지한다 (`#`로 시작하는 라인은 그대로 보존되며
+// 래치를 소비하지 않는다).
 //
-// Empty / comment-only bodies return a playlist with no entries (no error)
-// ??fetchHLS will treat that as a degenerate stream and let ffmpeg fail
-// naturally.
+// 본문이 비었거나 주석만 있는 경우 항목이 없는 플레이리스트를 (에러 없이)
+// 반환한다 — fetchHLS는 이를 퇴화한 스트림으로 취급하고 ffmpeg가 자연스럽게
+// 실패하도록 둔다.
 func parseMediaPlaylist(body []byte, base *url.URL) (*mediaPlaylist, error) {
 	rawLines := splitPlaylistLines(body)
 	pl := &mediaPlaylist{rawLines: rawLines}
 
-	// State: have we just seen #EXTINF? Then the next non-comment, non-blank
-	// line is the segment URI for that segment.
+	// 상태: 직전에 #EXTINF를 봤는가? 그렇다면 다음에 오는 주석·빈 줄이 아닌
+	// 라인이 그 세그먼트의 URI다.
 	pendingSeg := false
 	segCount := 0
 	keyCount := 0
@@ -295,8 +292,8 @@ func parseMediaPlaylist(body []byte, base *url.URL) (*mediaPlaylist, error) {
 			}
 			uriStr := uriAttrValue(trim)
 			if uriStr == "" {
-				// METHOD=NONE has no URI ??nothing to download. Other tags
-				// without URI also fall through (defensive).
+				// METHOD=NONE은 URI가 없어 다운로드할 게 없다. URI 없는 다른
+				// 태그도 방어적으로 같은 분기로 흐른다.
 				continue
 			}
 			entry, err := makePlaylistEntry(uriStr, base, i, entryKey)
@@ -326,16 +323,17 @@ func parseMediaPlaylist(body []byte, base *url.URL) (*mediaPlaylist, error) {
 				return nil, errHLSTooManyInits
 			}
 		case strings.HasPrefix(trim, "#"):
-			// Other tag (#EXTM3U, #EXT-X-VERSION, #EXT-X-BYTERANGE, etc.) ??			// preserved in rawLines, no entry created. materializeHLS's
-			// rewrite pass normalizes any URI="..." attribute here to "" so
-			// unrecognized tags can never carry a remote URL into ffmpeg's
-			// input even if a future ffmpeg whitelist relaxation occurred.
+			// 그 외 태그(#EXTM3U, #EXT-X-VERSION, #EXT-X-BYTERANGE 등) —
+			// rawLines에 그대로 보존하고 entry는 만들지 않는다. materializeHLS
+			// 의 rewrite 패스가 여기 등장하는 URI="..." 속성을 ""로 정규화하므로,
+			// 향후 ffmpeg whitelist가 완화되더라도 인식되지 않은 태그가 원격
+			// URL을 ffmpeg 입력으로 끌고 들어갈 일은 없다.
 		case trim == "":
-			// Blank line ??preserved in rawLines, no entry.
+			// 빈 줄 — rawLines에 보존하고 entry는 만들지 않는다.
 		default:
-			// Non-comment, non-blank line. If a segment is pending, this is
-			// the segment URI. Otherwise treat as orphan and ignore ??could
-			// be a continuation of an unknown tag.
+			// 주석·빈 줄이 아닌 라인. pendingSeg가 켜져 있으면 세그먼트
+			// URI이다. 아니면 미아로 취급해 무시한다 — 인식되지 않은 태그의
+			// 연장선일 수도 있다.
 			if !pendingSeg {
 				continue
 			}
@@ -368,8 +366,8 @@ func makePlaylistEntry(uriStr string, base *url.URL, lineIdx int, kind entryKind
 	return playlistEntry{lineIdx: lineIdx, uri: resolved, kind: kind}, nil
 }
 
-// uriAttrValue extracts the URI attribute value from an #EXT-X-KEY or
-// #EXT-X-MAP tag line. Returns "" if URI is absent.
+// uriAttrValue는 #EXT-X-KEY 또는 #EXT-X-MAP 태그 라인에서 URI 속성 값을
+// 추출한다. URI가 없으면 ""를 반환한다.
 func uriAttrValue(tagLine string) string {
 	m := uriAttrRE.FindStringSubmatch(tagLine)
 	if m == nil {
@@ -378,10 +376,10 @@ func uriAttrValue(tagLine string) string {
 	return m[1]
 }
 
-// splitPlaylistLines normalizes CRLF ??LF and splits on LF, preserving every
-// line (including the trailing empty one when the body ends with a newline).
-// Used by parseMediaPlaylist so rawLines indices match the original byte
-// layout for materializeHLS rewrite.
+// splitPlaylistLines는 CRLF를 LF로 정규화하고 LF로 분리하면서 모든 라인을
+// 보존한다 (본문이 newline으로 끝날 때 발생하는 끝의 빈 라인도 포함).
+// parseMediaPlaylist가 사용해 rawLines 인덱스가 원본 바이트 레이아웃과
+// 일치하도록 만들고, materializeHLS의 rewrite와 일관성을 유지한다.
 func splitPlaylistLines(body []byte) []string {
 	if len(body) == 0 {
 		return nil
@@ -390,9 +388,9 @@ func splitPlaylistLines(body []byte) []string {
 	return strings.Split(normalized, "\n")
 }
 
-// sameURL compares two URLs by scheme/host/path ??query/fragment ignored ??so
-// a variant link with a differing token still counts as the same endpoint for
-// loop detection.
+// sameURL은 두 URL을 scheme/host/path로만 비교한다 — query/fragment는
+// 무시한다. 그래야 토큰만 다른 variant 링크도 루프 감지에서 같은 엔드포인트로
+// 인식된다.
 func sameURL(a, b *url.URL) bool {
 	return strings.EqualFold(a.Scheme, b.Scheme) &&
 		strings.EqualFold(a.Host, b.Host) &&
@@ -408,16 +406,16 @@ func extractBandwidth(line string) int64 {
 	return bw
 }
 
-// runFfmpeg is the swappable entry point that runHLSRemux invokes to spawn
-// ffmpeg. Tests replace this with a capture-only stub to verify argv
-// invariants (AC-10 / AC-11 in spec §4) without launching a real binary.
-// Production uses defaultRunFfmpeg. Replacement contract: the implementation
-// must honor ctx (kill the child on cancel) and write any process stderr
-// into the supplied io.Writer for log surfacing.
+// runFfmpeg는 runHLSRemux가 ffmpeg를 spawn할 때 호출하는 교체 가능한
+// 엔트리 포인트다. 테스트는 실제 바이너리를 띄우지 않고도 argv 불변식
+// (spec §4의 AC-10 / AC-11)을 검증할 수 있도록 capture-only stub으로
+// 교체한다. 프로덕션은 defaultRunFfmpeg를 쓴다. 교체 계약: 구현은 ctx를
+// 존중해야 하며(취소 시 자식을 죽임) 프로세스 stderr를 받은 io.Writer에
+// 기록해 로그로 노출되게 해야 한다.
 //
-// Concurrency note: runFfmpeg is a package-level var; tests that swap it
-// MUST NOT use t.Parallel() ??code review enforces this rather than a hard
-// runtime guard.
+// 동시성 주의: runFfmpeg는 패키지 수준 var다. 이를 교체하는 테스트는
+// t.Parallel()을 써서는 안 된다 — 런타임 강제 가드 대신 코드 리뷰가 이
+// 규칙을 강제한다.
 var runFfmpeg = defaultRunFfmpeg
 
 func SetRunFfmpegForTest(fn func(context.Context, []string, io.Writer) error) func() {
@@ -426,52 +424,48 @@ func SetRunFfmpegForTest(fn func(context.Context, []string, io.Writer) error) fu
 	return func() { runFfmpeg = orig }
 }
 
-// defaultRunFfmpeg surfaces errFFmpegMissing when the binary is absent so that
-// runHLSRemux can short-circuit at the same place ??this also lets test swaps
-// bypass the LookPath check entirely (no ffmpeg needed for argv invariant
-// tests).
+// defaultRunFfmpeg은 바이너리가 없을 때 errFFmpegMissing을 표면화해
+// runHLSRemux가 같은 지점에서 short-circuit 하도록 한다 — 동시에 테스트가
+// LookPath 검사 자체를 우회할 수 있게 해준다(argv 불변식 테스트는 ffmpeg가
+// 필요 없다).
 func defaultRunFfmpeg(ctx context.Context, args []string, stderr io.Writer) error {
 	return ffmpeg.RunWithStderr(ctx, stderr, args...)
 }
 
-// runHLSRemux spawns ffmpeg to remux a local HLS playlist (with all segment
-// and key files already materialized into the same directory by
-// materializeHLS) into a single MP4 at outputPath. Output is capped at
-// maxOutputBytes: a watcher polls the output file size every hlsWatchInterval
-// and cancels the ffmpeg ctx if the cap is exceeded. Context cancellation
-// also kills ffmpeg via the child ctx that runFfmpeg honors. If cb.Progress
-// is non-nil, the watcher reports the output file's current size using the
-// same throttling rules as progressReader (byte OR time threshold).
+// runHLSRemux는 materializeHLS가 같은 디렉터리에 모든 segment·key 파일을
+// 이미 풀어놓은 로컬 HLS 플레이리스트를 ffmpeg로 spawn해 outputPath에
+// 단일 MP4로 remux 한다. 출력은 maxOutputBytes로 상한이 있으며, watcher가
+// hlsWatchInterval마다 출력 파일 크기를 폴링해 상한 초과 시 ffmpeg ctx를
+// 취소한다. 컨텍스트 취소는 runFfmpeg가 존중하는 자식 ctx를 통해 ffmpeg를
+// 종료시킨다. cb.Progress가 non-nil이면 watcher가 progressReader와 같은
+// throttling 규칙(byte OR time threshold)으로 현재 출력 파일 크기를 보고한다.
 //
-// Security: ffmpeg is launched with -protocol_whitelist file,crypto and
-// -allowed_extensions ALL ??local file reads only, no network access. This
-// is the core invariant that closes the HLS DNS rebinding window: ffmpeg
-// can't perform its own hostname resolution because the input is a fully
-// local playlist and its referenced segments / keys are local files. argv
-// invariant tests (AC-10 / AC-11) lock this contract.
+// 보안: ffmpeg는 -protocol_whitelist file,crypto와 -allowed_extensions ALL
+// 로 실행된다 — 로컬 파일 읽기만 가능하고 네트워크 접근은 불가능하다.
+// 이것이 HLS DNS rebinding 창을 닫는 핵심 불변식이다: 입력이 완전히 로컬
+// 플레이리스트이고 참조하는 segment/key도 로컬 파일이라 ffmpeg가 자체
+// hostname 해석을 수행할 수 없다. argv 불변식 테스트(AC-10 / AC-11)가 이
+// 계약을 고정한다.
 //
-// Returns one of: nil on exit 0; errHLSTooLarge if the cap was breached;
-// ctx.Err() on external cancel or deadline; *ffmpegExitError on non-zero exit
-// with stderr captured; errFFmpegMissing if the ffmpeg binary is not on PATH.
-// classifyHLSRemuxError translates these to public FetchError.Code values.
+// 반환값: 종료 0이면 nil; 상한 초과면 errHLSTooLarge; 외부 취소나 deadline
+// 이면 ctx.Err(); non-zero 종료면 stderr가 캡처된 *ffmpegExitError; ffmpeg
+// 바이너리가 PATH에 없으면 errFFmpegMissing. classifyHLSRemuxError가 이를
+// 공개 FetchError.Code 값으로 번역한다.
 //
-// Note on observability in practice: ffmpeg's MP4 muxer buffers packets until
-// it can finalize headers, so for small remuxes (under a few hundred KiB of
-// mdat) the output file may only appear near end-of-input and the watcher
-// will not sample any intermediate sizes. For real HLS VOD (minutes of
-// video) the buffer does flush periodically and the watcher behaves as
-// documented.
+// 실제 관찰성에 대한 메모: ffmpeg의 MP4 muxer는 헤더를 마무리할 수 있을
+// 때까지 패킷을 버퍼링하므로, 작은 remux(mdat가 수백 KiB 미만)에서는 출력
+// 파일이 입력 끝 근처에서야 나타나고 watcher가 중간 크기를 샘플링하지 못할
+// 수 있다. 실제 HLS VOD(수 분짜리 영상)는 버퍼가 주기적으로 flush 되므로
+// watcher가 문서화된 대로 동작한다.
 func runHLSRemux(ctx context.Context, localPlaylistPath, outputPath string, cb *Callbacks, maxOutputBytes int64) error {
-	// -protocol_whitelist file,crypto: ffmpeg may only open local files
-	// (segments / keys / init segments materializeHLS staged) and use its
-	// AES decryption layer for #EXT-X-KEY. All network protocols are
-	// removed ??there is no way for ffmpeg to perform a DNS lookup or
-	// network fetch from inside this invocation.
-	// -allowed_extensions ALL: segments and init files keep their original
-	// extension (.m4s, .vtt, .aac, ?? under materializeHLS's whitelist
-	// scheme. ffmpeg's default extension allowlist is too narrow for some
-	// containers, so we widen it ??safe because every input path is a
-	// local file we just wrote.
+	// -protocol_whitelist file,crypto: ffmpeg는 로컬 파일(materializeHLS가
+	// 풀어둔 segment / key / init)만 열 수 있고, #EXT-X-KEY를 위해 AES
+	// 복호화 계층만 사용한다. 모든 네트워크 프로토콜이 제거되어 — 이
+	// 호출 안에서 ffmpeg가 DNS 조회나 네트워크 fetch를 수행할 방법이 없다.
+	// -allowed_extensions ALL: segment·init 파일은 materializeHLS의 whitelist
+	// 규칙에 따라 원래 확장자(.m4s, .vtt, .aac 등)를 유지한다. ffmpeg의
+	// 기본 확장자 allowlist는 일부 컨테이너에 너무 좁아 우리가 넓힌다 —
+	// 모든 입력 경로가 방금 우리가 직접 쓴 로컬 파일이므로 안전하다.
 	args := []string{
 		"-hide_banner", "-loglevel", "error",
 		"-protocol_whitelist", "file,crypto",
@@ -484,19 +478,18 @@ func runHLSRemux(ctx context.Context, localPlaylistPath, outputPath string, cb *
 		"-y", outputPath,
 	}
 
-	// ffmpegCtx is a child of ctx so external cancel/timeout still propagates
-	// to the process. The watcher cancels via cancelFfmpeg() on size-cap
-	// breach ??that path also routes through ctx, so runFfmpeg only ever
-	// terminates ffmpeg through its supplied context (no out-of-band Kill).
+	// ffmpegCtx는 ctx의 자식이라 외부 취소/타임아웃이 프로세스에도 전파된다.
+	// watcher는 size-cap을 넘으면 cancelFfmpeg()로 취소하는데, 그 경로 역시
+	// ctx를 거치므로 runFfmpeg는 항상 받은 컨텍스트를 통해서만 ffmpeg를
+	// 종료한다(out-of-band Kill 없음).
 	ffmpegCtx, cancelFfmpeg := context.WithCancel(ctx)
 	defer cancelFfmpeg()
 
 	var stderr bytes.Buffer
 
-	// watchCtx is decoupled from parent ctx: we want the watcher to keep
-	// polling until we explicitly cancel it after runFfmpeg returns, so a
-	// client-initiated ctx cancel does not stop the final size sample from
-	// landing.
+	// watchCtx는 부모 ctx에서 분리한다: runFfmpeg가 반환된 뒤에 우리가
+	// 명시적으로 취소할 때까지 watcher가 계속 폴링하길 원한다. 클라이언트가
+	// 시작한 ctx 취소가 마지막 size 샘플의 도착을 막아서는 안 된다.
 	watchCtx, cancelWatch := context.WithCancel(context.Background())
 	var sizeExceeded atomic.Bool
 	watchDone := make(chan struct{})
@@ -512,8 +505,8 @@ func runHLSRemux(ctx context.Context, localPlaylistPath, outputPath string, cb *
 	cancelWatch()
 	<-watchDone
 
-	// errFFmpegMissing is a configuration error and must surface ahead of
-	// the watcher / ctx checks (those only matter once the process is up).
+	// errFFmpegMissing은 설정 오류이며 watcher / ctx 검사보다 먼저 표면화해야
+	// 한다(그 검사들은 프로세스가 떠 있을 때만 의미가 있다).
 	if errors.Is(waitErr, errFFmpegMissing) {
 		return errFFmpegMissing
 	}
@@ -521,7 +514,7 @@ func runHLSRemux(ctx context.Context, localPlaylistPath, outputPath string, cb *
 		return errHLSTooLarge
 	}
 	if ctx.Err() != nil {
-		// External cancel or deadline beat the size watcher.
+		// 외부 취소나 deadline이 size watcher보다 먼저 발동했다.
 		return ctx.Err()
 	}
 	if waitErr != nil {
@@ -537,26 +530,25 @@ func runHLSRemux(ctx context.Context, localPlaylistPath, outputPath string, cb *
 	return nil
 }
 
-// fetchHLS turns an HLS response into a remuxed MP4 entirely without exposing
-// origin URLs to ffmpeg. The flow (spec §3.1):
+// fetchHLS는 origin URL을 ffmpeg에 절대 노출하지 않으면서 HLS 응답을
+// remux된 MP4로 바꾼다. 흐름은 다음과 같다 (spec §3.1):
 //
-//  1. Read master playlist body from the already-issued response (1 MiB cap).
-//  2. parseMasterPlaylist ??variantURL.
-//  3. If variantURL ??master URL, fetch the variant playlist body via the
-//     protected client (IP-pin + DNS validation per request).
-//  4. parseMediaPlaylist on the variant body ??segment / key / init entries.
-//  5. Create destDir/.urlimport-hls-<random>/ as a self-contained workspace.
-//  6. materializeHLS downloads every segment / key / init through the same
-//     protected client and writes a rewritten playlist with local-only URIs.
-//  7. runHLSRemux invokes ffmpeg on that local playlist (-protocol_whitelist
-//     file,crypto). ffmpeg never performs DNS ??DNS rebinding is closed.
-//  8. Atomic rename the output MP4 into destDir; defer cleanup wipes the
-//     working directory.
+//  1. 이미 발급된 응답에서 마스터 플레이리스트 본문을 읽는다(1 MiB 상한).
+//  2. parseMasterPlaylist → variantURL.
+//  3. variantURL이 master URL과 다르면 보호된 클라이언트로 variant 플레이리스트
+//     본문을 가져온다 (요청마다 IP-pin + DNS 검증).
+//  4. variant 본문에 parseMediaPlaylist → segment / key / init 엔트리.
+//  5. destDir/.urlimport-hls-<random>/ 를 격리된 작업 디렉터리로 만든다.
+//  6. materializeHLS가 같은 보호된 클라이언트로 모든 segment / key / init을
+//     다운로드하고 로컬 URI만 갖는 재작성된 플레이리스트를 쓴다.
+//  7. runHLSRemux가 그 로컬 플레이리스트로 ffmpeg를 호출한다
+//     (-protocol_whitelist file,crypto). ffmpeg는 DNS를 절대 수행하지 않으므로
+//     DNS rebinding 창이 닫힌다.
+//  8. 출력 MP4를 destDir로 원자적 rename하고, defer로 작업 디렉터리를 정리한다.
 //
-// All errors map to public FetchError.Code values via classifyHTTPError /
-// classifyHLSRemuxError / classifyMaterializeError. Cumulative byte cap
-// (maxBytes) is shared between segment downloads and ffmpeg output via a
-// single atomic.Int64 counter.
+// 모든 에러는 classifyHTTPError / classifyHLSRemuxError / classifyMaterializeError
+// 를 통해 공개 FetchError.Code 값으로 매핑된다. 누적 바이트 상한(maxBytes)은
+// 단일 atomic.Int64 카운터를 통해 segment 다운로드와 ffmpeg 출력이 공유한다.
 func Fetch(
 	ctx context.Context,
 	client *http.Client,
@@ -578,8 +570,8 @@ func Fetch(
 	if int64(len(masterBody)) > hlsMaxPlaylistBytes {
 		return nil, &FetchError{Code: "hls_playlist_too_large"}
 	}
-	// Close eagerly so we do not hold the TCP connection open during the
-	// variant playlist + segments fetches.
+	// variant 플레이리스트와 segment fetch 동안 TCP 연결을 잡고 있지 않도록
+	// 적극적으로 닫는다.
 	_ = resp.Body.Close()
 
 	variantURL, err := parseMasterPlaylist(masterBody, parsed)
@@ -590,10 +582,10 @@ func Fetch(
 		return nil, &FetchError{Code: "ffmpeg_error", Err: err}
 	}
 
-	// Variant body source: the master itself if parseMasterPlaylist returned
-	// the original (no #EXT-X-STREAM-INF), or a fresh fetch via the protected
-	// client otherwise. The fetch path is what makes DNS rebinding-safe ??the
-	// client's publicOnlyDialContext re-resolves and IP-pins per request.
+	// variant 본문 출처: parseMasterPlaylist가 원본을 그대로 반환했다면
+	// (#EXT-X-STREAM-INF 없음) 마스터 자체, 아니면 보호된 클라이언트로 새로
+	// fetch 한다. 이 fetch 경로가 DNS rebinding을 막아준다 — 클라이언트의
+	// publicOnlyDialContext가 요청마다 다시 해석하고 IP를 고정한다.
 	var variantBody []byte
 	var variantBase *url.URL
 	if sameURL(variantURL, parsed) {
@@ -613,25 +605,24 @@ func Fetch(
 		return nil, classifyMediaPlaylistError(err)
 	}
 
-	// Workspace lives inside destDir so atomic rename of the final MP4 stays
-	// on the same filesystem (no EXDEV) and so browse's dot-prefix filter
-	// hides the directory automatically. RemoveAll runs unconditionally ??	// success / failure / panic all converge on cleanup.
+	// 작업 디렉터리는 destDir 안에 둔다. 최종 MP4의 원자적 rename이 동일
+	// 파일시스템 안에서 일어나도록(EXDEV 없음) 하기 위함이고, browse의
+	// dot-prefix 필터가 자동으로 숨겨주기 때문이다. RemoveAll은 무조건
+	// 실행되어 — 성공·실패·panic 모두 cleanup으로 수렴한다.
 	hlsTempDir, err := os.MkdirTemp(destDir, ".urlimport-hls-*")
 	if err != nil {
 		return nil, &FetchError{Code: "write_error", Err: err}
 	}
 	defer os.RemoveAll(hlsTempDir)
 
-	// Single cumulative counter shared by segment downloads and ffmpeg
-	// output ??spec D-9. atomic.Int64 keeps it safe under any future
-	// parallelization of segment fetches.
+	// segment 다운로드와 ffmpeg 출력이 공유하는 단일 누적 카운터 — spec D-9.
+	// atomic.Int64로 향후 segment fetch가 병렬화돼도 안전하다.
 	remaining := atomic.Int64{}
 	remaining.Store(maxBytes)
 
-	// Wrap progress callbacks so the materialize phase (Phase 1: segment
-	// bytes) and the remux phase (Phase 2: output MP4 bytes) emit a single
-	// monotonically increasing counter ??spec D-4. Phase 2 emits are
-	// offset by Phase 1's total.
+	// progress 콜백을 감싸 materialize 단계(Phase 1: segment 바이트)와 remux
+	// 단계(Phase 2: 출력 MP4 바이트)가 단일 단조 증가 카운터를 발행하도록
+	// 한다 — spec D-4. Phase 2 발행은 Phase 1의 합계만큼 offset 된다.
 	//
 	var phase1Total atomic.Int64
 	wrappedCb := cb
@@ -654,7 +645,7 @@ func Fetch(
 	phase1Total.Store(totalDownloaded)
 
 	name := deriveHLSFilename(parsed, deps)
-	// Extension is always forced to .mp4 (we remux away from .m3u8).
+	// 확장자는 항상 .mp4로 강제한다(.m3u8에서 remux해 빠져나오기 때문).
 	warnings = append(warnings, "extension_replaced")
 
 	if cb != nil && cb.Start != nil {
@@ -689,10 +680,10 @@ func Fetch(
 	}, nil
 }
 
-// fetchPlaylistBody GETs a playlist URL through the protected client and
-// returns its body capped at hlsMaxPlaylistBytes. Errors map onto stable
-// FetchError codes so the caller can surface them in the SSE error frame
-// without wrapping again.
+// fetchPlaylistBody는 보호된 클라이언트로 플레이리스트 URL을 GET 해
+// hlsMaxPlaylistBytes 상한으로 자른 본문을 반환한다. 에러는 안정적인
+// FetchError 코드로 매핑되므로, 호출자가 추가 wrap 없이 SSE error
+// 프레임에 그대로 노출할 수 있다.
 func fetchPlaylistBody(ctx context.Context, client *http.Client, urlStr string, deps Deps) ([]byte, *FetchError) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
 	if err != nil {
@@ -716,11 +707,11 @@ func fetchPlaylistBody(ctx context.Context, client *http.Client, urlStr string, 
 	return body, nil
 }
 
-// classifyMediaPlaylistError maps parseMediaPlaylist sentinels to public
-// FetchError codes. The three "too many" caps share a single wire code
-// (hls_too_many_segments) ??operators can grep server logs for the
-// underlying sentinel name to distinguish segment / key / init flooding.
-// Defaults to ffmpeg_error for unrecognized parser issues (defensive ??// keeps the wire contract narrow).
+// classifyMediaPlaylistError는 parseMediaPlaylist의 sentinel을 공개
+// FetchError 코드로 매핑한다. "too many" 상한 세 종류는 단일 wire 코드
+// (hls_too_many_segments)를 공유한다 — 운영자는 서버 로그에서 sentinel 이름으로
+// segment / key / init flooding을 구분할 수 있다. 인식되지 않은 parser
+// 이슈는 기본 ffmpeg_error로 흘려보낸다(방어적 — wire 계약을 좁게 유지).
 func classifyMediaPlaylistError(err error) *FetchError {
 	switch {
 	case errors.Is(err, errHLSVariantScheme):
@@ -734,10 +725,11 @@ func classifyMediaPlaylistError(err error) *FetchError {
 	}
 }
 
-// classifyMaterializeError maps materializeHLS / downloadOne errors to public
-// FetchError codes. errHLSTooLarge surfaces as "too_large"; ctx errors map
-// to download_timeout / network_error; anything else flows through
-// classifyHTTPError so dial / TLS / private_network / http_error stay stable.
+// classifyMaterializeError는 materializeHLS / downloadOne 에러를 공개
+// FetchError 코드로 매핑한다. errHLSTooLarge는 "too_large"로,
+// ctx 에러는 download_timeout / network_error로 매핑된다. 그 외는 모두
+// classifyHTTPError를 거쳐 dial / TLS / private_network / http_error를
+// 안정적으로 유지한다.
 func classifyMaterializeError(err error, deps Deps) *FetchError {
 	switch {
 	case errors.Is(err, errHLSTooLarge):
@@ -751,9 +743,9 @@ func classifyMaterializeError(err error, deps Deps) *FetchError {
 	}
 }
 
-// deriveHLSFilename strips the URL's last path segment of its extension and
-// appends .mp4. Empty / "." / ".." basenames fall back to "video.mp4" so the
-// remuxed output always has a sensible filename.
+// deriveHLSFilename은 URL의 마지막 path 세그먼트에서 확장자를 떼고 .mp4를
+// 붙인다. basename이 비었거나 "." / ".."이면 "video.mp4"로 폴백해, remux된
+// 출력이 항상 합리적인 파일명을 갖게 한다.
 func DeriveFilename(parsed *url.URL, deps Deps) string {
 	base := path.Base(parsed.Path)
 	if decoded, err := url.PathUnescape(base); err == nil {
@@ -771,12 +763,12 @@ func deriveHLSFilename(parsed *url.URL, deps Deps) string {
 	return DeriveFilename(parsed, deps)
 }
 
-// classifyHLSRemuxError maps runHLSRemux sentinels to public FetchError codes.
-// ctx.Err() is checked first so cancels/timeouts surface correctly even when
-// ffmpeg returns a non-zero exit alongside a cancellation. ffmpeg_missing is
-// a distinct code from ffmpeg_error: the former is a server-side
-// misconfiguration (operator should install ffmpeg), the latter is a stream
-// or input failure the user can do nothing about on their side.
+// classifyHLSRemuxError는 runHLSRemux의 sentinel을 공개 FetchError 코드로
+// 매핑한다. ctx.Err()를 먼저 검사하므로, ffmpeg가 non-zero 종료와 함께
+// 취소를 반환해도 cancel/timeout이 올바르게 표면화된다. ffmpeg_missing은
+// ffmpeg_error와 구분되는 별도 코드다 — 전자는 서버 측 설정 오류
+// (운영자가 ffmpeg를 설치해야 함), 후자는 사용자가 손쓸 수 없는 스트림 또는
+// 입력 실패다.
 func classifyHLSRemuxError(err error) *FetchError {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
@@ -788,18 +780,18 @@ func classifyHLSRemuxError(err error) *FetchError {
 	case errors.Is(err, errFFmpegMissing):
 		return &FetchError{Code: "ffmpeg_missing", Err: err}
 	default:
-		// Includes *ffmpegExitError and any other ffmpeg-layer failure.
+		// *ffmpegExitError 및 그 외 ffmpeg 레이어 실패를 포함한다.
 		return &FetchError{Code: "ffmpeg_error", Err: err}
 	}
 }
 
-// watchOutputFile polls tmpPath for growth until ctx cancels. When the file
-// exceeds maxBytes, calls onOversize once and returns. Otherwise forwards
-// every observed size change through cb.Progress, throttled by the same
-// byte/time thresholds as progressReader.
+// watchOutputFile은 ctx가 취소될 때까지 tmpPath의 크기 증가를 폴링한다.
+// 파일이 maxBytes를 초과하면 onOversize를 한 번 호출하고 반환한다. 그렇지
+// 않으면 progressReader와 동일한 byte/time threshold로 throttle하여
+// cb.Progress로 매번 관찰된 크기 변화를 전달한다.
 //
-// Extracted from runHLSRemux so the polling contract can be tested against a
-// controlled growing file without needing ffmpeg's buffered output behavior.
+// runHLSRemux에서 분리해 — ffmpeg의 버퍼링된 출력 동작 없이도 통제된
+// 증가 파일을 상대로 폴링 계약을 테스트할 수 있게 했다.
 func watchOutputFile(
 	ctx context.Context,
 	tmpPath string,
