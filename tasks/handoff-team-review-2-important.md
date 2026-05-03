@@ -1,13 +1,13 @@
 # 팀 리뷰(2회차) Important 후속 핸드오프
 
-> **Status: in-progress** — Phase 1 (Group D) + Phase 2 (Group A) 완료. Phase 3 (Group B) + Phase 4 (Group C) 대기.
+> **Status: ready for final verification / PR** — Phase 1 (Group D) + Phase 2 (Group A) + Phase 3 (Group B) + Phase 4 (Group C: C.2/C.3) 완료. C.1은 별도 spec으로 분리되어 본 핸드오프 범위에서 제외.
 
 ## 진행 상황 (2026-05-03 갱신)
 
 ### 작업 브랜치
 - 현재: `feature/team-review-2-important` (develop에서 분기)
-- HEAD: `22e082e` (A.7 commit — runImportJob 분해)
-- develop 대비 13개 커밋 누적, 작업 트리 clean
+- HEAD: `8b80a38` (C.3 commit — import URL 배치 병렬 처리)
+- develop 대비 20개 커밋 누적, 작업 트리 clean
 
 ### 완료 — Phase 1 (Group D, 문서 정합화)
 | 커밋 | 작업 |
@@ -30,38 +30,53 @@
 | `828b586` | fix(handler): validateName Windows 예약 문자/제어문자/예약 basename 차단 (A.6 — 서버+클라+테스트 40개) |
 | `22e082e` | refactor(handler): runImportJob을 cancelRemainingURLs/finalizeBatch로 분해 (A.7) |
 
+### 완료 — Phase 3 (Group B, 아키텍처 정리)
+| 커밋 | 작업 |
+|---|---|
+| `57703ee` | feat(ffmpeg): internal/ffmpeg 패키지로 ffmpeg/ffprobe 호출 통합 (B.3) |
+| `ebd18b3` | docs(media): 책임 두 축 명시 (B.4) |
+| `3cfc84e` | refactor(urlfetch): hls 서브패키지 분리 (B.2) |
+| `5e1cf7d` | refactor(handler): import/convert 서브패키지 분리 (B.1) |
+
+### 완료 — Phase 4 (Group C, 성능 hot path — C.1 제외)
+| 커밋 | 작업 |
+|---|---|
+| `2720dfa` | perf(urlfetch): HLS materialize segment 병렬화 (C.2) |
+| `8b80a38` | perf(handler): import URL 배치 병렬 처리 (C.3) |
+
 ### 진행 중 의사결정 (다음 세션이 그대로 따를 것)
 - **A.2**: 핸드오프의 옵션 B 채택 — `imageconv.ConvertPNGToJPG` 시그니처는 그대로 두고 핸들러 측 best-effort cleanup goroutine으로 처리. 옵션 A(ctx 추가)는 PNG decode/JPEG encode 자체가 ctx를 honor하지 않아 실효성 없다고 판단.
 - **A.6**: wire 에러 코드는 `"invalid name"` 단일 유지 (SPEC §5 보존). 더 상세한 진단은 클라이언트 `validateRenameInput`에서 한글 메시지로 노출.
 - **A.4**: `writeJSON` 헬퍼는 `handler.go`의 `writeError` 바로 위에 배치. 이미 err 체크가 있던 `import_url_jobs.go` 2곳은 변경하지 않음 (PR 표면 최소화).
 - **C.1 (streamTS pipe streaming)**: 별도 spec으로 분리. fragmented MP4 호환성·`-c copy` 실패 fallback 등 trade-off가 spec 수준 검토 필요. **본 핸드오프에서는 제외.**
+- **C.2**: `materializeHLS`는 표준 라이브러리 worker pool로 4-동시 병렬화. 새 dependency 없이 `copyWithCaps` CAS 루프 + `phase1Total atomic.Int64` 적용. 검증: `go test ./...`, `go test -race ./internal/urlfetch/...`.
+- **C.3**: process-wide `importSem`은 batch 간 직렬화 용도로 유지하고, batch 내부 URL fetch만 worker 2개로 병렬화. summary는 병렬 완료 순서와 무관하도록 최종 URL 상태 snapshot에서 계산. 검증: `go test ./...`, `go test -race ./internal/urlfetch/... ./internal/handler/...`.
 - **README v0.0.2 릴리즈 노트**: Phase 1 진행 중 발견된 누락. handoff 외 작업이지만 같은 docs 그룹이라 묶어 처리.
 
 ### 남은 작업
 
-#### Phase 3 — Group B (아키텍처 정리, 4건)
-**권장 머지 순서: B.3 먼저 → B.2 → B.1 → B.4**
-- **B.3 (단독 PR 권장, 표면 가장 큼)**: `internal/ffmpeg` 신설 — `stream.go`/`thumb/thumb.go`/`convert/convert.go`/`convert/webp.go`/`urlfetch/hls.go` 6곳에 흩어진 `exec.LookPath("ffmpeg")` + `exec.CommandContext(...)` 통합. `ErrMissing` 단일 sentinel. 본 핸드오프 §B.3 참고.
-- **B.2**: `internal/urlfetch/hls/` 서브패키지 분리 (B.3 후 LookPath 중복 동시 정리 가능).
-- **B.1**: `internal/handler/import/` + `internal/handler/convert/` 서브패키지 분리. `requireSameOrigin` 등록은 root에 유지.
-- **B.4**: `internal/media/doc.go` 한 줄 (단기). 장기 `media/types/`·`media/fsop/` 분리는 별도 phase.
+본 핸드오프 범위의 Important 작업은 완료됨.
 
-#### Phase 4 — Group C (성능 hot path, 2건 — C.1 제외)
-**권장 머지 순서: C.2 → C.3** (회귀 표면 점진 확대)
-- **C.2**: `materializeHLS` segment 병렬화 (errgroup, 4-동시). 동시에 `copyWithCaps`의 `Load → Add` 비원자 패턴을 CAS 루프로 교체 + `phase1Total` 클로저 캡처를 `atomic.Int64`로. 본 핸드오프 §C.2 참고.
-- **C.3**: URL 배치 per-job worker pool (2-4). A.7 분해 완료로 표면 축소 — 안전한 진행 가능.
-- ~~C.1~~: 별도 spec으로 분리 (위 의사결정 참고).
+- ~~B.3~~ 완료: `57703ee`
+- ~~B.2~~ 완료: `3cfc84e`
+- ~~B.1~~ 완료: `5e1cf7d`
+- ~~B.4~~ 완료: `ebd18b3`
+- ~~C.2~~ 완료: `2720dfa`
+- ~~C.3~~ 완료: `8b80a38`
+- ~~C.1~~: 별도 spec으로 분리 (위 의사결정 참고). 본 브랜치에서 추가 진행하지 않음.
 
 ### 다음 세션 작업 시작 절차
 1. `git checkout feature/team-review-2-important` (이미 분기됨)
-2. `git log --oneline develop..HEAD | head -15`로 누적 커밋 확인
-3. `go test ./...` 통과 확인 (clean state)
-4. **B.3부터 시작** — 본 문서 §B.3의 권장 구현 따라 `internal/ffmpeg` 신설.
-5. 매 커밋 전 `go test ./...` 통과 확인 (CLAUDE.md 정책)
-6. 커밋 메시지는 핸드오프 §"커밋 분할 권장" 표 #11~17 참고
+2. `git log --oneline develop..HEAD | head -20`로 누적 커밋 확인
+3. 최종 검증 권장:
+   - `go build ./...`
+   - `go vet ./...`
+   - `go test ./...`
+   - `go test -race ./internal/urlfetch/... ./internal/handler/...`
+4. 검증 통과 후 PR/merge 준비. C.1은 별도 spec 작업으로 분리.
 
 ### 머지 시점 결정 사항 (다음 세션 또는 그 이후)
-- Phase 3 + Phase 4 모두 완료 후 `develop`로 머지할지, Phase 단위로 머지할지 결정 필요.
+- Phase 3 + Phase 4 완료 상태. `develop`로 머지할지, Phase 단위 PR로 나눌지 결정 필요.
 - 본 브랜치는 docs(Phase 1) + fix/refactor(Phase 2) + arch(Phase 3) + perf(Phase 4) 혼재 — 한 번에 머지하면 PR이 커지지만 logical 그룹별 commit 분할이 이미 되어 있어 review 부담은 작다.
 
 ---
