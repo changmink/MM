@@ -119,7 +119,7 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		finalPath = dst.Name()
 		size, copyErr := io.Copy(dst, part)
-		dst.Close()
+		closeErr := dst.Close()
 		if copyErr != nil {
 			os.Remove(finalPath)
 			if isMaxBytesErr(copyErr) {
@@ -127,6 +127,13 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			writeError(w, r, http.StatusInternalServerError, "write file failed", copyErr)
+			return
+		}
+		// NFS / 일부 네트워크 FS는 deferred write 에러를 close 시점에만 노출.
+		// 무시하면 잘림 업로드가 201로 응답될 수 있어 부분 파일을 정리하고 5xx 반환.
+		if closeErr != nil {
+			os.Remove(finalPath)
+			writeError(w, r, http.StatusInternalServerError, "write file failed", closeErr)
 			return
 		}
 		finalSize = size
