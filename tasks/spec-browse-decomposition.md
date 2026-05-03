@@ -2,7 +2,7 @@
 
 > 부모 SPEC: [`/SPEC.md`](../SPEC.md). 본 spec은 **프론트엔드 구현 구조**만 다룬다 — 제품 행동·API·SSE 스키마 변경 없음.
 >
-> Status: **accepted** — 5 Open Questions 모두 권장값으로 확정 (5 모듈 / lightbox+audio 통합 / AC-1 ≤250 / 12 시나리오 / 한 PR + 단계별 commit). Phase 32에서 진행.
+> Status: **merged** — Phase 32 완료. BD-1~7 7 commit, browse.js 752→248, 5 신규 모듈(clipPlayback / visiblePaths / selection / cardBuilders / lightbox). chromedp e2e 6개 + 수동 12 시나리오 통과.
 >
 > 선행 spec: [`spec-frontend-modularization.md`](./spec-frontend-modularization.md) (Phase 30 머지 완료, 17 모듈 분할). 본 spec은 그 후속으로 가장 큰 단일 모듈인 `web/browse.js`(752줄)만 한 단계 더 쪼갠다.
 
