@@ -8,12 +8,11 @@ import {
   allEntries, setAllEntries,
   imageEntries, setImageEntries,
   videoEntries, setVideoEntries,
-  visibleFilePaths, setVisibleFilePaths,
   lbIndex, setLbIndex,
   lbCurrentVideoPath, setLbCurrentVideoPath,
   playlist, setPlaylist,
   playlistIndex, setPlaylistIndex,
-  selectedPaths, view,
+  view,
 } from './state.js';
 import { esc, iconFor, formatSize, formatDuration } from './util.js';
 import { syncURL } from './router.js';
@@ -36,10 +35,19 @@ import {
   selectedVisibleClipPaths,
   updateConvertWebPAllBtn,
 } from './visiblePaths.js';
+import {
+  wireSelection,
+  syncSelectionWithVisible,
+  renderSelectionControls,
+  syncCardSelectionStates,
+  bindEntrySelection,
+} from './selection.js';
 
 // browse.js 외부 surface 보존 — 기존 export 함수들이 외부에서 직접
 // import 되던 사실은 없지만 (현 grep 0건), 회귀 차단을 위한 보수적
-// re-export. BD-1·BD-2 plan §6 #8.
+// re-export. BD-1·BD-2 plan §6 #8. (syncCardSelectionStates 는 BD-3
+// 에서 dragSelect.js import 경로를 selection.js 로 갱신해 외부 import
+// 를 끊었으므로 re-export 불필요.)
 export { isClip };
 export {
   visibleTSPaths,
@@ -199,70 +207,6 @@ function renderFileList(entries) {
       : '파일이 없습니다.';
     $.fileList.innerHTML = `<p style="color:var(--text-dim);padding:20px 0">${msg}</p>`;
   }
-}
-
-function syncSelectionWithVisible(entries) {
-  setVisibleFilePaths(entries.filter(e => !e.is_dir).map(e => e.path));
-  const visibleSet = new Set(visibleFilePaths);
-  for (const path of Array.from(selectedPaths)) {
-    if (!visibleSet.has(path)) selectedPaths.delete(path);
-  }
-}
-
-function renderSelectionControls() {
-  const total = visibleFilePaths.length;
-  const selected = visibleFilePaths.filter(path => selectedPaths.has(path)).length;
-  $.selectAllFiles.disabled = total === 0;
-  $.selectAllFiles.checked = total > 0 && selected === total;
-  $.selectAllFiles.indeterminate = selected > 0 && selected < total;
-  $.selectionSummary.textContent = selected
-    ? `선택 ${selected}개 / ${total}개`
-    : `선택 0개${total ? ` / ${total}개` : ''}`;
-  $.clearSelectionBtn.hidden = selected === 0;
-}
-
-// updateCardSelection은 path 한 건의 카드 .selected class + checkbox 상태만
-// 갱신한다. selection 종속 UI(상단 indicator, convert 버튼)는 갱신하지 않는다 —
-// 호출자가 한 번에 묶어 부르도록 분리.
-function updateCardSelection(path, selected) {
-  const card = $.fileList.querySelector(`[data-path="${CSS.escape(path)}"]`);
-  if (!card) return;
-  card.classList.toggle('selected', selected);
-  const cb = card.querySelector('input[type="checkbox"]');
-  if (cb && cb.checked !== selected) cb.checked = selected;
-}
-
-// syncCardSelectionStates는 selectedPaths를 진실값으로 삼아 visible 모든 카드의
-// .selected/checkbox 상태와 selection 종속 UI를 동기화한다. dragSelect의
-// rubber-band 처럼 한 번에 다중 path가 토글되는 경로가 renderView 대신 호출 —
-// 카드 DOM 재구성과 listener 재할당, GIF/WebP 자동재생 리셋을 피한다.
-export function syncCardSelectionStates() {
-  $.fileList.querySelectorAll('[data-path]').forEach(card => {
-    const path = card.dataset.path;
-    const selected = selectedPaths.has(path);
-    card.classList.toggle('selected', selected);
-    const cb = card.querySelector('input[type="checkbox"]');
-    if (cb && cb.checked !== selected) cb.checked = selected;
-  });
-  refreshSelectionUI();
-}
-
-// refreshSelectionUI는 카드 DOM은 건드리지 않고 selection 종속 UI만 다시
-// 그린다. 200+ 카드 디렉터리에서 체크박스 토글 시 renderView 전체 재구축은
-// GIF/WebP 자동재생을 리셋하고 jank를 만들기 때문에, setSelected 같은 hot
-// path가 이걸로 우회한다.
-function refreshSelectionUI() {
-  const visible = applyView(allEntries);
-  updateConvertPNGAllBtn(visible);
-  updateConvertWebPAllBtn(visible);
-  renderSelectionControls();
-}
-
-function setSelected(path, selected) {
-  if (selected) selectedPaths.add(path);
-  else selectedPaths.delete(path);
-  updateCardSelection(path, selected);
-  refreshSelectionUI();
 }
 
 function sectionTitle(text) {
@@ -446,22 +390,6 @@ function buildTable(entries) {
   return table;
 }
 
-function bindEntrySelection(container, entry) {
-  const checkbox = container.querySelector('input[type="checkbox"]');
-  // Folders are never multi-selected — moving a folder is always a single-target
-  // operation. Hide the checkbox entirely so a stale selection set can't pull
-  // a folder into a bulk file move.
-  if (entry.is_dir) {
-    const cell = container.querySelector('.select-cell, .select-check');
-    if (cell) cell.style.visibility = 'hidden';
-    return;
-  }
-  checkbox.checked = selectedPaths.has(entry.path);
-  container.classList.toggle('selected', checkbox.checked);
-  checkbox.addEventListener('click', ev => ev.stopPropagation());
-  checkbox.addEventListener('change', () => setSelected(entry.path, checkbox.checked));
-}
-
 function handleClick(entry) {
   if (entry.is_dir) {
     browse(entry.path);
@@ -558,23 +486,10 @@ function renderPlaylist() {
 }
 
 export function wireBrowse() {
-  // Selection toolbar — 카드 DOM은 건드리지 않고 영향 카드의 class/checkbox만
-  // 갱신해 GIF/WebP 자동재생 리셋과 listener 재할당을 피한다.
-  $.selectAllFiles.addEventListener('change', () => {
-    const on = $.selectAllFiles.checked;
-    visibleFilePaths.forEach(path => {
-      if (on) selectedPaths.add(path);
-      else selectedPaths.delete(path);
-      updateCardSelection(path, on);
-    });
-    refreshSelectionUI();
-  });
-  $.clearSelectionBtn.addEventListener('click', () => {
-    const previouslySelected = Array.from(selectedPaths);
-    selectedPaths.clear();
-    previouslySelected.forEach(path => updateCardSelection(path, false));
-    refreshSelectionUI();
-  });
+  // Selection toolbar — selection.js 내부에 closure 형태로 등록. computeVisible
+  // 은 applyView/allEntries 도메인을 selection.js 가 import 하지 않게 하는
+  // 단방향 의존 회피용(plan §6 #4 라이트박스 deps 패턴 미러).
+  wireSelection({ computeVisible: () => applyView(allEntries) });
 
   // Lightbox controls
   $.lbClose.addEventListener('click', closeLightbox);

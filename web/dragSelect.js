@@ -10,7 +10,7 @@
 // "카드 위에서 시작"을 closest()로 거른다.
 
 import { selectedPaths } from './state.js';
-import { syncCardSelectionStates } from './browse.js';
+import { syncCardSelectionStates } from './selection.js';
 
 const MOVE_THRESHOLD = 5;
 const MOBILE_MAX_WIDTH = 600;
